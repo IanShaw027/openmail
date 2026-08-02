@@ -35,7 +35,8 @@ FULL_LIMIT = 50
 MAX_RESTORE_PROBES = 3
 MAX_LOGIN_URL_PROBES = 2
 MAX_FOLDER_PROBES = 3
-MAX_DETAIL_HYDRATE = 2
+# List view often has subject only — pull bodies for more rows so UI is not empty
+MAX_DETAIL_HYDRATE = 8
 
 # Session-valid markers (helper: FolderListPage)
 SESSION_OK_MARKERS = (
@@ -887,16 +888,25 @@ class MailcomCookieProvider:
             messages = self.fetch_message_list(
                 client, folder=folder, limit=limit, site=site, meta=meta
             )
-            # Hydrate only a couple bodies for verification codes (each is extra RTT)
-            hydrate_n = MAX_DETAIL_HYDRATE if quick else min(5, limit)
+            # List rows are often subject-only (lightmailer). Pull detail HTML for bodies.
+            hydrate_n = MAX_DETAIL_HYDRATE if quick else min(15, limit)
             for i, msg in enumerate(list(messages)):
                 if i >= hydrate_n:
                     break
-                if msg.body_text or msg.body_html or msg.verification_code:
+                if msg.body_text or msg.body_html:
                     continue
                 try:
+                    refs = getattr(msg, "raw_refs", None) or {}
+                    detail_url = None
+                    if isinstance(refs, dict):
+                        detail_url = refs.get("detail_url") or refs.get("url")
                     detail = self.fetch_detail(
-                        client, msg.id, folder=folder, site=site, meta=meta
+                        client,
+                        msg.id,
+                        folder=folder,
+                        site=site,
+                        meta=meta,
+                        detail_url=str(detail_url) if detail_url else None,
                     )
                     if detail:
                         msg.subject = msg.subject or detail.subject
@@ -905,7 +915,7 @@ class MailcomCookieProvider:
                         msg.body_text = detail.body_text
                         msg.body_html = detail.body_html
                         msg.body_preview = detail.body_preview or msg.body_preview
-                        msg.verification_code = detail.verification_code
+                        msg.verification_code = detail.verification_code or msg.verification_code
                 except Exception:
                     continue
 
@@ -1330,24 +1340,51 @@ class MailcomCookieProvider:
         folder: str = "inbox",
         site: str = DEFAULT_SITE,
         meta: dict[str, Any] | None = None,
+        detail_url: str | None = None,
     ) -> Message | None:
-        """Fetch a single message body by id (best-effort URL patterns)."""
-        if not message_id:
+        """Fetch a single message body by lightmailer detail URL or id patterns."""
+        if not message_id and not detail_url:
             return None
-        bases = _folder_urls(site, meta)
         candidates: list[str] = []
+        # Prefer URL captured from list page (messagedetail?mailId=…)
+        if detail_url:
+            candidates.append(str(detail_url))
+        # message_id may itself be a full URL from parse_lightmailer_message_list
+        mid = str(message_id or "")
+        if mid.startswith("http://") or mid.startswith("https://") or mid.startswith("./"):
+            candidates.append(mid)
+        bases = _folder_urls(site, meta)
+        folder_url = (meta or {}).get("folder_url") if meta else None
+        if folder_url:
+            bases = [str(folder_url), *bases]
         for base in bases:
-            b = base.rstrip("/")
-            candidates.extend(
-                [
-                    f"{b}/mail/show/{message_id}",
-                    f"{b}/message/{message_id}",
-                    f"{b}/?msg={message_id}",
-                    f"{b}/mail?id={message_id}",
-                ]
-            )
+            b = str(base).rstrip("/")
+            # lightmailer relative detail
+            if mid and mid.isdigit():
+                candidates.extend(
+                    [
+                        f"{b}/messagedetail?mailId={mid}",
+                        f"{b}/./messagedetail?mailId={mid}",
+                    ]
+                )
+            if mid:
+                candidates.extend(
+                    [
+                        f"{b}/mail/show/{mid}",
+                        f"{b}/message/{mid}",
+                        f"{b}/?msg={mid}",
+                        f"{b}/mail?id={mid}",
+                    ]
+                )
+        seen: set[str] = set()
         for url in candidates:
+            if not url or url in seen:
+                continue
+            seen.add(url)
             try:
+                # resolve relative ./messagedetail against folder base
+                if url.startswith("./") and folder_url:
+                    url = urljoin(str(folder_url), url)
                 resp = client.get(url)
             except Exception:
                 continue
@@ -1356,7 +1393,9 @@ class MailcomCookieProvider:
                 continue
             if _looks_like_session_loss(html) and not session_looks_valid(html):
                 continue
-            msg = parse_message_detail_html(html, msg_id=message_id, folder=folder.lower())
+            msg = parse_message_detail_html(
+                html, msg_id=mid or str(message_id or "detail"), folder=folder.lower()
+            )
             if msg.subject or msg.body_text or msg.body_html:
                 return msg
         return None

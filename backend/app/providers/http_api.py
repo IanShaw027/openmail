@@ -390,26 +390,25 @@ class HttpApiProvider:
     ) -> httpx.Response:
         """GET/POST url with SSRF validation including redirects.
 
-        DNS is resolved once and the request is made to the pinned IP with an
-        explicit Host header to reduce DNS rebinding races.
+        SSRF: resolve DNS and block private/metadata IPs, then request the
+        **original hostname** so TLS SNI works (Cloudflare / workers.dev reject
+        bare-IP HTTPS with SSLV3_ALERT_HANDSHAKE_FAILURE when using pin-to-IP).
         """
-        from app.services.ssrf import pin_url_to_ip
-
-        # Keep original URL for redirect base; pin each hop
+        # Keep original URL for redirect base; re-validate each hop
         current_orig = validate_url(url)
         client, close = self._get_client(proxy=proxy)
         try:
             for _ in range(_MAX_REDIRECTS + 1):
-                connect_url, _host, pin_headers = pin_url_to_ip(current_orig)
+                # Re-check DNS / private ranges every hop without rewriting host
+                validate_url(current_orig, resolve_dns=True)
                 req_headers = dict(headers or {})
-                req_headers.update(pin_headers)
                 if method.upper() == "POST":
                     resp = client.post(
-                        connect_url, headers=req_headers, follow_redirects=False
+                        current_orig, headers=req_headers, follow_redirects=False
                     )
                 else:
                     resp = client.get(
-                        connect_url, headers=req_headers, follow_redirects=False
+                        current_orig, headers=req_headers, follow_redirects=False
                     )
 
                 if resp.status_code in (301, 302, 303, 307, 308):
