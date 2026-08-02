@@ -2218,7 +2218,7 @@ onUnmounted(() => {
                     :title="`${brandLabel(accountBrand(acc))} · ${typeLabel(acc.type)}${acc.imapHost ? ' · ' + acc.imapHost : ''}`"
                     @click="onCopyCell($event, `brand-${acc.id}`, brandLabel(accountBrand(acc)))"
                   >
-                    <BrandMark :brand="accountBrand(acc)" :size="13" />
+                    <BrandMark :brand="accountBrand(acc)" :size="15" />
                     <span>{{ brandLabel(accountBrand(acc)) }}</span>
                   </button>
                 </td>
