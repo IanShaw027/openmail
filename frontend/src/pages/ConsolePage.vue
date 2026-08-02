@@ -1237,20 +1237,22 @@ async function fetchOne(
       mailNoMoreRemote.value = false
     }
     const folder = mailFolder.value
-    // Incremental since: newest cached mail time (UTC) or lastFetchAt
+    // Manual / clear / first-full → recent window (no since).
+    // Silent batch may use since based on newest *mail* date only (see settings.sinceFor).
+    const wantRecent =
+      Boolean(opts.forceRecent) ||
+      Boolean(opts.clearFirst) ||
+      (!opts.before && userSettings.needsFullFetch(acc.email))
     const since =
-      opts.before || opts.forceRecent || opts.clearFirst
-        ? undefined
-        : userSettings.sinceFor(acc.email)
-    const full =
-      opts.forceRecent || opts.clearFirst
-        ? true
-        : opts.before
-          ? false
-          : userSettings.needsFullFetch(acc.email)
+      opts.before || wantRecent ? undefined : userSettings.sinceFor(acc.email)
+    const full = wantRecent && !opts.before
     const maxMessages =
       opts.maxMessages ??
-      (opts.before ? MAIL_LOAD_MORE : opts.clearFirst || full || !since ? MAIL_FIRST_PAGE : undefined)
+      (opts.before
+        ? MAIL_LOAD_MORE
+        : wantRecent || !since
+          ? MAIL_FIRST_PAGE
+          : MAIL_FIRST_PAGE)
     // Prefer local-vault secrets (cloud mirror of client-sealed rows has none)
     const src = resolveFetchAccount(acc)
     // Child mailbox under HttpApi: fetch with parent api_url + this address as filter
@@ -1305,6 +1307,8 @@ async function fetchOne(
                 : { api_auth_style: 'none' }),
             }
           : credentialFromLocal(src)
+      // Always send an explicit page size so providers do not fall back to tiny quick=5.
+      // full=true only for "recent window" (ignore since); load-older uses before only.
       result = await proxyFetchMail({
         email: fetchEmail,
         provider,
@@ -1314,10 +1318,10 @@ async function fetchOne(
         credential,
         cookies: src.sessionCookies?.length ? src.sessionCookies : undefined,
         proxy: src.proxy || parent?.proxy || undefined,
-        since: full || opts.before ? undefined : since,
-        before: opts.before,
-        max_messages: maxMessages,
-        full: full && !opts.before,
+        since: full || opts.before ? undefined : since || undefined,
+        before: opts.before || undefined,
+        max_messages: maxMessages ?? MAIL_FIRST_PAGE,
+        full: Boolean(full),
       })
     }
 
@@ -1398,6 +1402,8 @@ async function onFetchSelected(quick = true) {
     return
   }
   mailNoMoreRemote.value = false
+  // Always pull latest N (not since=lastFetchAt). Incremental since was too aggressive
+  // after a successful fetch and looked like "broken" until Clear & refetch.
   await fetchOne(acc, quick, {
     silent: false,
     maxMessages: MAIL_FIRST_PAGE,

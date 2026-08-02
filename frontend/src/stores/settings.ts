@@ -90,35 +90,41 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   /**
-   * Incremental since (UTC ISO): prefer newest cached message time, else lastFetchAt,
-   * else lookback window. Full first fetch returns undefined.
+   * Incremental since (UTC ISO) for silent/background poll.
+   *
+   * Prefer **newest cached message date only**. Never use lastFetchAt (wall-clock
+   * "now" after a successful fetch) — that made subsequent pulls use since≈now-60s,
+   * so providers returned empty while Clear&Refetch (full recent window) still worked.
+   *
+   * Falls back to lookbackDays when cache has no parseable dates.
+   * Full first fetch returns undefined (caller should use forceRecent / full).
    */
   function sinceFor(email: string): string | undefined {
     if (needsFullFetch(email)) return undefined
     const e = email.toLowerCase()
-    let bestMs: number | null = null
+    let mailMs: number | null = null
     try {
       const cachedIso = useMailCacheStore().newestUtcIso(e)
       if (cachedIso) {
         const t = Date.parse(cachedIso)
-        if (Number.isFinite(t)) bestMs = t
+        if (Number.isFinite(t)) mailMs = t
       }
     } catch {
       /* pinia not ready */
     }
-    const last = s.value.lastFetchAt[e]
-    if (last) {
-      const t = Date.parse(last)
-      if (Number.isFinite(t) && (bestMs === null || t > bestMs)) bestMs = t
+    const days = Math.max(1, s.value.lookbackDays || 3)
+    const lookbackMs = Date.now() - days * 86_400_000
+    // Floor: do not ask for more than lookback window even if cache is older
+    let sinceMs: number
+    if (mailMs != null) {
+      // Overlap 2 minutes so the boundary message is not missed; never go past "now"
+      sinceMs = Math.min(mailMs - 120_000, Date.now())
+      // If newest mail is very old, still only re-pull lookback (avoid huge IMAP SINCE)
+      if (sinceMs < lookbackMs) sinceMs = lookbackMs
+    } else {
+      sinceMs = lookbackMs
     }
-    if (bestMs != null) {
-      // slight overlap (60s) so boundary mails are not missed
-      return new Date(bestMs - 60_000).toISOString()
-    }
-    const days = s.value.lookbackDays || 3
-    const d = new Date()
-    d.setUTCDate(d.getUTCDate() - days)
-    return d.toISOString()
+    return new Date(sinceMs).toISOString()
   }
 
   function applyRetentionNow() {
