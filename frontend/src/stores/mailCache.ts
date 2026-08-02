@@ -200,10 +200,13 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     email?: string
     /** Only messages for these mailbox addresses (lowercase) */
     emails?: string[]
+    /** inbox | spam | sent — omit for all folders */
+    folder?: string
   }): Array<MailMessage & { accountEmail: string }> {
     const q = (opts.q || '').toLowerCase()
     const from = (opts.from || '').toLowerCase()
     const subject = (opts.subject || '').toLowerCase()
+    const folderFilter = opts.folder ? normalizeFolder(opts.folder) : null
     const emailSet =
       opts.emails && opts.emails.length
         ? new Set(opts.emails.map((e) => e.toLowerCase()))
@@ -213,6 +216,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       if (opts.email && email !== opts.email.toLowerCase()) continue
       if (emailSet && !emailSet.has(email)) continue
       for (const m of list) {
+        if (folderFilter && normalizeFolder(m.folder || 'inbox') !== folderFilter) continue
         if (opts.hasCode && !m.verification_code) continue
         if (from && !(m.from || m.from_address || '').toLowerCase().includes(from)) continue
         if (subject && !(m.subject || '').toLowerCase().includes(subject)) continue

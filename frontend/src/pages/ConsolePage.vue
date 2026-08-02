@@ -30,7 +30,6 @@ import {
   saveGroups,
   uidGroup,
 } from '@/utils/groups'
-import { loadNoteTemplates } from '@/utils/noteTemplates'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
 import { useTwoFaStore } from '@/stores/twofa'
 import { mapPool } from '@/utils/mapPool'
@@ -48,6 +47,7 @@ import {
 } from '@/utils/consoleAccountLabels'
 import ConsoleSendModal from '@/components/console/ConsoleSendModal.vue'
 import ConsoleGroupModal from '@/components/console/ConsoleGroupModal.vue'
+import NotePurposeCell from '@/components/console/NotePurposeCell.vue'
 
 const { t, locale } = useI18n()
 const accounts = useAccountsStore()
@@ -192,10 +192,6 @@ const PRECHECK_TIMEOUT_MS = 45_000
 /** local = browser; cloud = device-scoped server store */
 const importTarget = ref<'local' | 'cloud'>('local')
 const importCloudPoll = ref(false)
-const noteTemplates = ref<string[]>(loadNoteTemplates())
-const noteEditId = ref<string | null>(null)
-const noteEditText = ref('')
-
 /** Layout panes (percent of viewport / split track) */
 const SIDE_MIN_PX = 200
 const PANE_MIN_PX = 100
@@ -834,12 +830,18 @@ function onDragStart(kind: 'side' | 'mail', e: MouseEvent) {
   if (isNarrow.value) return
   dragging.value = kind
   e.preventDefault()
+  document.body.style.cursor = kind === 'side' ? 'col-resize' : 'row-resize'
+  document.body.style.userSelect = 'none'
   const onMove = (ev: MouseEvent) => {
     if (dragging.value === 'side') {
-      const vw = window.innerWidth || 1
-      const minPct = Math.min(35, (SIDE_MIN_PX / vw) * 100)
-      const pct = (ev.clientX / vw) * 100
-      sideW.value = Math.min(42, Math.max(minPct, pct))
+      // Measure against the console grid, not full window (padding / rail skew)
+      const root = document.querySelector('.console') as HTMLElement | null
+      const rect = root?.getBoundingClientRect()
+      const total = rect?.width || window.innerWidth || 1
+      const left = rect?.left || 0
+      const minPct = Math.min(38, (SIDE_MIN_PX / total) * 100)
+      const pct = ((ev.clientX - left) / total) * 100
+      sideW.value = Math.min(48, Math.max(minPct, pct))
       if (importCollapsed.value && sideW.value > minPct) importCollapsed.value = false
     } else if (dragging.value === 'mail') {
       // Measure split track only (not toolbar/filters) so ratio stays accurate
@@ -857,6 +859,8 @@ function onDragStart(kind: 'side' | 'mail', e: MouseEvent) {
   }
   const onUp = () => {
     dragging.value = null
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
     window.removeEventListener('mousemove', onMove)
     window.removeEventListener('mouseup', onUp)
   }
@@ -1474,26 +1478,8 @@ async function deleteOne(acc: MailAccount) {
   }
 }
 
-function startNoteEdit(acc: MailAccount, e?: Event) {
-  e?.stopPropagation()
-  noteEditId.value = acc.id
-  noteEditText.value = acc.note || ''
-}
-
-async function commitNoteEdit(acc: MailAccount) {
-  if (noteEditId.value !== acc.id) return
-  const note = noteEditText.value.trim()
+async function patchAccountNote(acc: MailAccount, note: string) {
   await accounts.patchAccount(acc.id, { note: note || undefined })
-  noteEditId.value = null
-}
-
-async function applyNoteTemplate(acc: MailAccount, label: string, e?: Event) {
-  e?.stopPropagation()
-  await accounts.patchAccount(acc.id, { note: label })
-  if (noteEditId.value === acc.id) {
-    noteEditText.value = label
-    noteEditId.value = null
-  }
 }
 
 function openSend(acc?: MailAccount | null) {
@@ -1575,12 +1561,61 @@ function filterErrorsOnly() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  const tag = (e.target as HTMLElement)?.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
-    if (e.key === 'Escape') (e.target as HTMLElement).blur()
+  const el = e.target as HTMLElement | null
+  const tag = el?.tagName
+  const editable =
+    tag === 'INPUT' ||
+    tag === 'TEXTAREA' ||
+    tag === 'SELECT' ||
+    !!el?.isContentEditable
+  if (editable) {
+    if (e.key === 'Escape') {
+      el?.blur()
+      showImportHelp.value = false
+      showGroupManage.value = false
+      showSend.value = false
+    }
     return
   }
-  if (e.key === '/' ) {
+  // Esc: close drawers / deselect
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    if (showSend.value) {
+      showSend.value = false
+      return
+    }
+    if (showGroupManage.value) {
+      showGroupManage.value = false
+      return
+    }
+    if (showImportHelp.value) {
+      showImportHelp.value = false
+      return
+    }
+    if (isNarrow.value && !importCollapsed.value) {
+      importCollapsed.value = true
+      return
+    }
+    accounts.deselectAll()
+    return
+  }
+  // Enter: fetch selected
+  if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (hasSelection.value && !mailLoading.value) {
+      e.preventDefault()
+      void onFetchSelected(true)
+    }
+    return
+  }
+  // Tab with Alt: cycle mail folder inbox → spam → sent
+  if (e.key === 'Tab' && e.altKey) {
+    e.preventDefault()
+    const order: Array<'inbox' | 'spam' | 'sent'> = ['inbox', 'spam', 'sent']
+    const i = order.indexOf(mailFolder.value)
+    mailFolder.value = order[(i + (e.shiftKey ? 2 : 1)) % 3]!
+    return
+  }
+  if (e.key === '/') {
     e.preventDefault()
     document.querySelector<HTMLInputElement>('.search-wide')?.focus()
   } else if (e.key === 'f' || e.key === 'F') {
@@ -1592,7 +1627,29 @@ function onKeydown(e: KeyboardEvent) {
   } else if (e.key === 'e' || e.key === 'E') {
     e.preventDefault()
     if (selected.value) openEdit(selected.value)
+  } else if (e.key === 'i' || e.key === 'I') {
+    e.preventDefault()
+    toggleImportPanel()
+  } else if (e.key === 'j' || e.key === 'ArrowDown') {
+    e.preventDefault()
+    stepSelect(1)
+  } else if (e.key === 'k' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    stepSelect(-1)
+  } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+    e.preventDefault()
+    flashMsg(t('console.shortcutHint'), 'info')
   }
+}
+
+function stepSelect(delta: number) {
+  const list = listAll.value
+  if (!list.length) return
+  const cur = accounts.selectedId
+  let idx = list.findIndex((a) => a.id === cur)
+  if (idx < 0) idx = delta > 0 ? -1 : 0
+  const next = list[Math.min(list.length - 1, Math.max(0, idx + delta))]
+  if (next) accounts.select(next.id)
 }
 
 onMounted(() => {
@@ -1766,9 +1823,15 @@ onUnmounted(() => {
     <div
       v-if="!isNarrow"
       class="splitter splitter-v"
-      title="拖拽调整宽度"
+      role="separator"
+      aria-orientation="vertical"
+      :title="t('console.dragResizeWidth')"
       @mousedown="onDragStart('side', $event)"
-    ></div>
+    >
+      <span class="splitter-grip" aria-hidden="true">
+        <span /><span /><span />
+      </span>
+    </div>
 
     <!-- Right -->
     <section class="main-col">
@@ -2044,56 +2107,10 @@ onUnmounted(() => {
                 </td>
 
                 <td class="col-note" @click.stop>
-                  <div v-if="noteEditId === acc.id" class="note-edit">
-                    <input
-                      v-model="noteEditText"
-                      class="input input-sm note-input"
-                      type="text"
-                      :placeholder="t('console.notePlaceholder')"
-                      @keydown.enter="commitNoteEdit(acc)"
-                      @keydown.escape="noteEditId = null"
-                    />
-                    <div class="note-chips">
-                      <button
-                        v-for="tpl in noteTemplates"
-                        :key="tpl"
-                        type="button"
-                        class="chip note-chip"
-                        @click="applyNoteTemplate(acc, tpl)"
-                      >
-                        {{ tpl }}
-                      </button>
-                    </div>
-                    <div class="btn-row note-actions">
-                      <button type="button" class="btn btn-primary btn-sm" @click="commitNoteEdit(acc)">
-                        {{ t('common.save') }}
-                      </button>
-                      <button type="button" class="btn btn-ghost btn-sm" @click="noteEditId = null">
-                        {{ t('common.cancel') }}
-                      </button>
-                    </div>
-                  </div>
-                  <button
-                    v-else
-                    type="button"
-                    class="note-cell"
-                    :title="t('console.noteClickEdit')"
-                    @click="startNoteEdit(acc, $event)"
-                  >
-                    <span v-if="acc.note">{{ acc.note }}</span>
-                    <span v-else class="muted">{{ t('console.noteEmpty') }}</span>
-                  </button>
-                  <div v-if="noteEditId !== acc.id" class="note-quick">
-                    <button
-                      v-for="tpl in noteTemplates.slice(0, 3)"
-                      :key="tpl"
-                      type="button"
-                      class="chip note-chip sm"
-                      @click="applyNoteTemplate(acc, tpl, $event)"
-                    >
-                      {{ tpl }}
-                    </button>
-                  </div>
+                  <NotePurposeCell
+                    :account="acc"
+                    @patch="(note) => patchAccountNote(acc, note)"
+                  />
                 </td>
 
                 <td>
@@ -2222,9 +2239,15 @@ onUnmounted(() => {
       <div
         v-if="!isNarrow"
         class="splitter splitter-h"
-        title="拖拽调整邮件区高度"
+        role="separator"
+        aria-orientation="horizontal"
+        :title="t('console.dragResizeHeight')"
         @mousedown="onDragStart('mail', $event)"
-      ></div>
+      >
+        <span class="splitter-grip splitter-grip-h" aria-hidden="true">
+          <span /><span /><span />
+        </span>
+      </div>
       <!-- Mail panel -->
       <div class="mail-panel glass">
         <div class="mail-head">
@@ -3222,9 +3245,14 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
 }
 .pager .page-size {
   width: 72px;
+  max-width: 88px;
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 5;
 }
 .mail-pager .page-size-sm {
   width: 68px;
+  flex: 0 0 auto;
 }
 
 .table-card {
@@ -3692,12 +3720,18 @@ th.col-act.sticky-act {
   font-size: 11px;
   color: var(--muted);
 }
+/* UiSelect — only constrain width; never force height/padding on the root
+   (that broke the custom select layout and clipped the dropdown). */
 .page-size {
-  width: 64px !important;
-  min-width: 64px !important;
-  max-width: 64px !important;
-  height: 28px !important;
-  padding: 0 6px !important;
+  width: 72px !important;
+  min-width: 72px !important;
+  max-width: 88px !important;
+  flex: 0 0 auto;
+}
+.page-size :deep(.ui-select-trigger) {
+  height: var(--control-h-sm, 32px);
+  min-height: var(--control-h-sm, 32px);
+  padding: 0 8px 0 10px;
   font-size: 12px;
 }
 .pager-info {
@@ -4290,7 +4324,8 @@ th.col-act.sticky-act {
 @media (min-width: 1101px) {
   .console {
     display: grid !important;
-    grid-template-columns: 22% 6px 1fr !important;
+    /* Do NOT set grid-template-columns !important — Vue binds side width via :style */
+    grid-template-columns: minmax(200px, 22%) 10px minmax(0, 1fr);
     gap: 0 !important;
     height: calc(100vh - var(--nav-h, 56px));
     max-height: calc(100vh - var(--nav-h, 56px));
@@ -4299,7 +4334,7 @@ th.col-act.sticky-act {
     box-sizing: border-box;
   }
   .console.import-collapsed {
-    grid-template-columns: 48px 6px 1fr !important;
+    grid-template-columns: 48px 10px minmax(0, 1fr);
   }
   .console.import-collapsed .sidebar {
     display: none !important;
@@ -4348,24 +4383,65 @@ th.col-act.sticky-act {
   position: relative;
   z-index: 4;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease;
 }
 .splitter-v {
   cursor: col-resize;
-  width: 6px;
-  margin: 0 2px;
-}
-.splitter-v:hover,
-.splitter-v:active,
-.console.dragging .splitter-v {
-  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  width: 10px;
+  margin: 0;
+  touch-action: none;
 }
 .splitter-h {
   cursor: row-resize;
-  height: 6px;
+  height: 10px;
+  touch-action: none;
 }
-.splitter-h:hover,
-.console.dragging .splitter-h {
-  background: color-mix(in srgb, var(--accent) 35%, transparent);
+.splitter-grip {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-strong) 80%, transparent);
+  opacity: 0.55;
+  pointer-events: none;
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.splitter-grip span {
+  display: block;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.splitter-grip-h {
+  flex-direction: row;
+  padding: 2px 6px;
+}
+.splitter-grip-h span {
+  width: 3px;
+  height: 3px;
+}
+.splitter:hover,
+.splitter:active,
+.console.dragging .splitter {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.splitter:hover .splitter-grip,
+.console.dragging .splitter .splitter-grip {
+  opacity: 1;
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.splitter:hover .splitter-grip span,
+.console.dragging .splitter .splitter-grip span {
+  background: var(--accent);
 }
 .main-col {
   display: flex !important;

@@ -36,12 +36,33 @@ const open = ref(false)
 const root = ref<HTMLElement | null>(null)
 const listEl = ref<HTMLElement | null>(null)
 const highlight = ref(-1)
+/** Fixed-position menu so parent overflow:hidden (pager/table) cannot clip options */
+const menuStyle = ref<Record<string, string>>({})
 
 const selected = computed(() =>
   props.options.find((o) => String(o.value) === String(props.modelValue ?? '')),
 )
 
 const display = computed(() => selected.value?.label ?? props.placeholder)
+
+function placeMenu() {
+  const el = root.value
+  if (!el) return
+  const r = el.getBoundingClientRect()
+  const spaceBelow = window.innerHeight - r.bottom
+  const openUp = spaceBelow < 200 && r.top > spaceBelow
+  const width = Math.max(r.width, 64)
+  menuStyle.value = {
+    position: 'fixed',
+    left: `${Math.max(4, Math.min(r.left, window.innerWidth - width - 4))}px`,
+    width: `${width}px`,
+    minWidth: `${width}px`,
+    zIndex: 'var(--z-dropdown, 80)',
+    ...(openUp
+      ? { bottom: `${window.innerHeight - r.top + 4}px`, top: 'auto' }
+      : { top: `${r.bottom + 4}px`, bottom: 'auto' }),
+  }
+}
 
 function toggle() {
   if (props.disabled) return
@@ -51,6 +72,7 @@ function toggle() {
       (o) => String(o.value) === String(props.modelValue ?? ''),
     )
     highlight.value = idx >= 0 ? idx : 0
+    placeMenu()
     void nextTick(() => scrollHighlight())
   }
 }
@@ -58,6 +80,10 @@ function toggle() {
 function close() {
   open.value = false
   highlight.value = -1
+}
+
+function onWinChange() {
+  if (open.value) placeMenu()
 }
 
 function pick(opt: UiSelectOption) {
@@ -117,9 +143,13 @@ function onKey(e: KeyboardEvent) {
 
 onMounted(() => {
   document.addEventListener('pointerdown', onDocPointer, true)
+  window.addEventListener('resize', onWinChange)
+  window.addEventListener('scroll', onWinChange, true)
 })
 onUnmounted(() => {
   document.removeEventListener('pointerdown', onDocPointer, true)
+  window.removeEventListener('resize', onWinChange)
+  window.removeEventListener('scroll', onWinChange, true)
 })
 </script>
 
@@ -161,26 +191,34 @@ onUnmounted(() => {
         </svg>
       </span>
     </button>
-    <ul v-if="open" ref="listEl" class="ui-select-menu" role="listbox">
-      <li
-        v-for="(opt, i) in options"
-        :key="String(opt.value)"
-        role="option"
-        class="ui-select-option"
-        :class="{
-          active: String(opt.value) === String(modelValue ?? ''),
-          highlight: i === highlight,
-          disabled: opt.disabled,
-        }"
-        :aria-selected="String(opt.value) === String(modelValue ?? '')"
-        :title="opt.title || opt.label"
-        @click="pick(opt)"
-        @mouseenter="highlight = i"
+    <Teleport to="body">
+      <ul
+        v-if="open"
+        ref="listEl"
+        class="ui-select-menu"
+        role="listbox"
+        :style="menuStyle"
       >
-        {{ opt.label }}
-      </li>
-      <li v-if="!options.length" class="ui-select-empty">—</li>
-    </ul>
+        <li
+          v-for="(opt, i) in options"
+          :key="String(opt.value)"
+          role="option"
+          class="ui-select-option"
+          :class="{
+            active: String(opt.value) === String(modelValue ?? ''),
+            highlight: i === highlight,
+            disabled: opt.disabled,
+          }"
+          :aria-selected="String(opt.value) === String(modelValue ?? '')"
+          :title="opt.title || opt.label"
+          @click="pick(opt)"
+          @mouseenter="highlight = i"
+        >
+          {{ opt.label }}
+        </li>
+        <li v-if="!options.length" class="ui-select-empty">—</li>
+      </ul>
+    </Teleport>
   </div>
 </template>
 
@@ -268,12 +306,8 @@ onUnmounted(() => {
 }
 
 .ui-select-menu {
-  position: absolute;
-  z-index: var(--z-dropdown, 80);
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  min-width: 100%;
+  /* position/size set via fixed menuStyle (Teleport) */
+  box-sizing: border-box;
   max-height: min(280px, 50vh);
   overflow: auto;
   margin: 0;
@@ -285,6 +319,8 @@ onUnmounted(() => {
   box-shadow: var(--shadow-lg);
   overscroll-behavior: contain;
   animation: ui-menu-in 0.12s ease;
+  color: var(--text);
+  font-size: var(--control-font, 13px);
 }
 
 .ui-select-option {

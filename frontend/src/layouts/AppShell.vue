@@ -159,13 +159,16 @@ onMounted(async () => {
 }
 .topnav-inner {
   height: 100%;
-  max-width: var(--content-max, 1600px);
-  margin: 0 auto;
-  padding: 0 14px;
+  /* Full-bleed nav: no max-width gutters on ultra-wide screens */
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0 clamp(12px, 1.5vw, 28px);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  box-sizing: border-box;
 }
 .topnav-left {
   display: flex;

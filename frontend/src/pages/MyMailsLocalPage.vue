@@ -13,16 +13,25 @@ const mailCache = useMailCacheStore()
 const accounts = useAccountsStore()
 const { flashMsg } = useToast()
 
+type FolderTab = 'inbox' | 'spam' | 'sent'
+
 const q = ref('')
 const from = ref('')
 const subject = ref('')
 const hasCode = ref(false)
 const starredOnly = ref(localStorage.getItem('openmail.myMailsStarredOnly') === '1')
 const emailFilter = ref('')
+const folder = ref<FolderTab>(
+  (localStorage.getItem('openmail.myMailsFolder') as FolderTab) || 'inbox',
+)
 const selectedKey = ref<string | null>(null)
 const page = ref(1)
 const pageSize = ref(Number(localStorage.getItem('openmail.myMailsPageSize') || 20) || 20)
 const pageSizeOptions = [10, 20, 50]
+/** For enter/leave animation direction */
+const folderAnim = ref<'left' | 'right'>('right')
+
+const folderTabs: FolderTab[] = ['inbox', 'spam', 'sent']
 
 watch(pageSize, (n) => {
   localStorage.setItem('openmail.myMailsPageSize', String(n))
@@ -31,6 +40,14 @@ watch(pageSize, (n) => {
 watch(starredOnly, (v) => {
   localStorage.setItem('openmail.myMailsStarredOnly', v ? '1' : '0')
   page.value = 1
+})
+watch(folder, (next, prev) => {
+  localStorage.setItem('openmail.myMailsFolder', next)
+  const a = folderTabs.indexOf(prev)
+  const b = folderTabs.indexOf(next)
+  folderAnim.value = b >= a ? 'right' : 'left'
+  page.value = 1
+  selectedKey.value = null
 })
 
 const starredEmails = computed(() =>
@@ -47,8 +64,25 @@ const results = computed(() =>
     hasCode: hasCode.value,
     email: emailFilter.value || undefined,
     emails: starredOnly.value ? starredEmails.value : undefined,
+    folder: folder.value,
   }),
 )
+
+const folderCounts = computed(() => {
+  const base = {
+    q: q.value,
+    from: from.value,
+    subject: subject.value,
+    hasCode: hasCode.value,
+    email: emailFilter.value || undefined,
+    emails: starredOnly.value ? starredEmails.value : undefined,
+  }
+  return {
+    inbox: mailCache.search({ ...base, folder: 'inbox' }).length,
+    spam: mailCache.search({ ...base, folder: 'spam' }).length,
+    sent: mailCache.search({ ...base, folder: 'sent' }).length,
+  }
+})
 
 const totalPages = computed(() => Math.max(1, Math.ceil(results.value.length / pageSize.value)))
 const paged = computed(() => {
@@ -103,6 +137,12 @@ const pageSizeSelectOptions = computed<UiSelectOption[]>(() =>
   pageSizeOptions.map((n) => ({ value: n, label: String(n) })),
 )
 
+function folderLabel(f: FolderTab) {
+  if (f === 'spam') return t('console.folderSpam')
+  if (f === 'sent') return t('console.folderSent')
+  return t('console.folderInbox')
+}
+
 async function copyCode(code?: string | null) {
   if (!code) return
   if (await copyText(code)) flashMsg(t('common.copied'))
@@ -142,78 +182,103 @@ async function copyCode(code?: string | null) {
       {{ t('me.filterStarredEmpty') }}
     </p>
 
+    <div class="folder-bar card-solid">
+      <div class="mail-tabs" role="tablist">
+        <button
+          v-for="f in folderTabs"
+          :key="f"
+          type="button"
+          role="tab"
+          class="tab"
+          :class="{ active: folder === f }"
+          :aria-selected="folder === f"
+          @click="folder = f"
+        >
+          {{ folderLabel(f) }}
+          <span class="tab-count">{{ folderCounts[f] }}</span>
+        </button>
+        <span class="tab-indicator" :data-i="folderTabs.indexOf(folder)" aria-hidden="true" />
+      </div>
+    </div>
+
     <div class="body">
       <div class="list card-solid">
-        <div v-if="!results.length" class="empty">{{ t('me.noMailsLocal') }}</div>
-        <template v-else>
-          <button
-            v-for="m in paged"
-            :key="rowKey(m)"
-            type="button"
-            class="item"
-            :class="{ active: selected && rowKey(selected) === rowKey(m) }"
-            @click="selectedKey = rowKey(m)"
-          >
-            <div class="item-top">
-              <span class="email">{{ m.accountEmail }}</span>
-              <span
-                v-if="m.verification_code"
-                class="code"
-                @click.stop="copyCode(m.verification_code)"
+        <Transition :name="folderAnim === 'right' ? 'slide-r' : 'slide-l'" mode="out-in">
+          <div :key="folder" class="list-pane">
+            <div v-if="!results.length" class="empty">{{ t('me.noMailsLocal') }}</div>
+            <template v-else>
+              <button
+                v-for="m in paged"
+                :key="rowKey(m)"
+                type="button"
+                class="item"
+                :class="{ active: selected && rowKey(selected) === rowKey(m) }"
+                @click="selectedKey = rowKey(m)"
               >
-                {{ m.verification_code }}
-              </span>
-            </div>
-            <div class="subj">{{ m.subject || t('console.mailNoSubject') }}</div>
-            <div class="meta">{{ m.from || m.from_address }} · {{ m.date }}</div>
-          </button>
-          <div class="pager">
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              :disabled="page <= 1"
-              @click="page = Math.max(1, page - 1)"
-            >
-              {{ t('common.prev') }}
-            </button>
-            <span class="muted">{{ page }} / {{ totalPages }} · {{ results.length }}</span>
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              :disabled="page >= totalPages"
-              @click="page = Math.min(totalPages, page + 1)"
-            >
-              {{ t('common.next') }}
-            </button>
-            <UiSelect
-              :model-value="pageSize"
-              :options="pageSizeSelectOptions"
-              class="page-size"
-              size="sm"
-              :block="false"
-              @update:model-value="(v) => (pageSize = Number(v))"
-            />
+                <div class="item-top">
+                  <span class="email">{{ m.accountEmail }}</span>
+                  <span
+                    v-if="m.verification_code"
+                    class="code"
+                    @click.stop="copyCode(m.verification_code)"
+                  >
+                    {{ m.verification_code }}
+                  </span>
+                </div>
+                <div class="subj">{{ m.subject || t('console.mailNoSubject') }}</div>
+                <div class="meta">{{ m.from || m.from_address }} · {{ m.date }}</div>
+              </button>
+            </template>
           </div>
-        </template>
+        </Transition>
+        <div v-if="results.length" class="pager">
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            :disabled="page <= 1"
+            @click="page = Math.max(1, page - 1)"
+          >
+            {{ t('common.prev') }}
+          </button>
+          <span class="muted">{{ page }} / {{ totalPages }} · {{ results.length }}</span>
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            :disabled="page >= totalPages"
+            @click="page = Math.min(totalPages, page + 1)"
+          >
+            {{ t('common.next') }}
+          </button>
+          <UiSelect
+            :model-value="pageSize"
+            :options="pageSizeSelectOptions"
+            class="page-size"
+            size="sm"
+            :block="false"
+            @update:model-value="(v) => (pageSize = Number(v))"
+          />
+        </div>
       </div>
       <div class="detail card-solid">
-        <template v-if="selected">
-          <h2>{{ selected.subject || t('console.mailNoSubject') }}</h2>
-          <p class="meta">
-            {{ selected.accountEmail }} · {{ selected.from }} · {{ selected.date }}
-          </p>
-          <button
-            v-if="selected.verification_code"
-            type="button"
-            class="btn btn-primary btn-sm"
-            @click="copyCode(selected.verification_code)"
-          >
-            {{ t('console.mailCode') }}: {{ selected.verification_code }}
-          </button>
-          <div v-if="detailHtml" class="body-html" v-html="detailHtml" />
-          <pre v-else class="body-text">{{ detailText }}</pre>
-        </template>
-        <div v-else class="empty">{{ t('console.mailDetailEmpty') }}</div>
+        <Transition name="fade" mode="out-in">
+          <div v-if="selected" :key="rowKey(selected)" class="detail-inner">
+            <h2>{{ selected.subject || t('console.mailNoSubject') }}</h2>
+            <p class="meta">
+              {{ selected.accountEmail }} · {{ selected.from }} · {{ selected.date }}
+            </p>
+            <button
+              v-if="selected.verification_code"
+              type="button"
+              class="btn btn-primary btn-sm"
+              @click="copyCode(selected.verification_code)"
+            >
+              {{ t('console.mailCode') }}: {{ selected.verification_code }}
+            </button>
+            <div v-if="detailHtml" class="body-html" v-html="detailHtml" />
+            <pre v-else class="body-text">{{ detailText }}</pre>
+          </div>
+          <div v-else key="empty" class="empty">{{ t('console.mailDetailEmpty') }}</div>
+        </Transition>
       </div>
     </div>
   </div>
@@ -245,8 +310,73 @@ async function copyCode(code?: string | null) {
   min-width: min(100%, 260px);
   max-width: min(100%, 480px);
 }
+.folder-bar {
+  padding: 6px 10px;
+  flex-shrink: 0;
+}
+.mail-tabs {
+  position: relative;
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--panel-soft);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.tab {
+  position: relative;
+  z-index: 1;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 7px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.18s ease;
+}
+.tab.active {
+  color: var(--accent);
+}
+.tab-count {
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.tab.active .tab-count {
+  background: var(--accent-soft);
+}
+.tab-indicator {
+  position: absolute;
+  z-index: 0;
+  top: 3px;
+  bottom: 3px;
+  width: calc((100% - 6px - 8px) / 3);
+  left: 3px;
+  border-radius: 9px;
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tab-indicator[data-i='1'] {
+  transform: translateX(calc(100% + 4px));
+}
+.tab-indicator[data-i='2'] {
+  transform: translateX(calc(200% + 8px));
+}
 .pager .page-size {
   width: 72px;
+  flex: 0 0 auto;
 }
 .body {
   flex: 1;
@@ -256,8 +386,16 @@ async function copyCode(code?: string | null) {
   gap: 12px;
 }
 .list {
-  overflow: auto;
+  overflow: hidden;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.list-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   display: flex;
   flex-direction: column;
 }
@@ -311,14 +449,18 @@ async function copyCode(code?: string | null) {
   margin-top: auto;
   flex-wrap: wrap;
   font-size: 12px;
+  flex-shrink: 0;
+  overflow: visible;
+  position: relative;
+  z-index: 2;
 }
 .page-size {
-  height: 28px;
   width: 72px;
 }
 .detail {
   overflow: auto;
   padding: 16px;
+  min-height: 0;
 }
 .detail h2 {
   font-size: 16px;
@@ -351,16 +493,58 @@ async function copyCode(code?: string | null) {
   text-align: center;
   color: var(--muted);
 }
-.tog {
-  color: var(--muted);
-}
 .starred-empty {
   margin: -4px 0 0;
   padding: 0 4px;
 }
+
+/* Folder switch animations */
+.slide-r-enter-active,
+.slide-r-leave-active,
+.slide-l-enter-active,
+.slide-l-leave-active {
+  transition:
+    opacity 0.22s ease,
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.slide-r-enter-from {
+  opacity: 0;
+  transform: translateX(16px);
+}
+.slide-r-leave-to {
+  opacity: 0;
+  transform: translateX(-12px);
+}
+.slide-l-enter-from {
+  opacity: 0;
+  transform: translateX(-16px);
+}
+.slide-l-leave-to {
+  opacity: 0;
+  transform: translateX(12px);
+}
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
 @media (max-width: 800px) {
   .body {
     grid-template-columns: 1fr;
+  }
+  .mail-tabs {
+    width: 100%;
+  }
+  .tab {
+    flex: 1;
+    justify-content: center;
+  }
+  .tab-indicator {
+    width: calc((100% - 6px - 8px) / 3);
   }
 }
 </style>
