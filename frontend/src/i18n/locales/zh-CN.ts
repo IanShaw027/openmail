@@ -21,6 +21,7 @@ export default {
     transfer: '设备同步',
     changePassword: '修改密码',
     lockVault: '锁定',
+    github: 'GitHub 源码',
   },
   vault: {
     title: '本地保险库',

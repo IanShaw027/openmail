@@ -106,10 +106,12 @@ Stack: **Vue 3 + Vite + Pinia** frontend, **FastAPI + SQLite** backend, single D
 
 - **Multi-provider** mailbox console (see table below)
 - **Local vault** with recovery key, session resume (same tab), factory reset
-- **2FA manager** — TOTP/HOTP, QR / paste / bulk URI, bind to mailboxes
-- **Console** — batch import, groups, notes, batch fetch, code extract, send, body expand modal
+- **Device QR transfer** — PC ↔ phone vault sync (short-lived server ciphertext)
+- **2FA manager** — TOTP/HOTP/Steam, QR / paste / bulk URI, brand icons, filter + drag reorder, bind to mailboxes
+- **Console** — batch import, brand chips, groups, notes, batch fetch, code extract, send, body expand modal
+- **Mail list** — first 20 messages; load more (10 older) / clear & refetch
 - **Folders** — inbox / junk / sent (IMAP names include non-ASCII via modified UTF-7)
-- **Security** — vault device HMAC, SSRF host policy, HTML sanitize, CSP
+- **Security** — vault device HMAC, SSRF host policy, HTML sanitize, CSP, client-sealed cloud rows
 - **Ops** — optional 10× Cloudflare WARP SOCKS pool for concurrent egress
 - **i18n** — Chinese + English UI
 

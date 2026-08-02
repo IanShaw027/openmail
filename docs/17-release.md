@@ -34,10 +34,16 @@ gh secret set DOCKERHUB_TOKEN -R IanShaw027/openmail
 
 ## Cut a release
 
+1. Update **[CHANGELOG.md](../CHANGELOG.md)** — move items from `Unreleased` into a new `## [X.Y.Z] — YYYY-MM-DD` section (Keep a Changelog style: Added / Changed / Fixed / Security).
+2. Commit changelog (and any docs) on `main`.
+3. Run:
+
 ```bash
 make release V=0.2.0
 # or: ./scripts/release.sh 0.2.0
 ```
+
+This syncs version files, commits `chore(release): vX.Y.Z`, creates an annotated tag, and pushes `main` + tags so CI builds Hub images and a GitHub Release.
 
 Tag only (if version files already committed):
 
@@ -51,6 +57,13 @@ Re-publish an existing tag:
 ```bash
 gh workflow run release.yml -R IanShaw027/openmail -f tag=v0.1.0
 ```
+
+### Changelog conventions
+
+- File: root `CHANGELOG.md` (Keep a Changelog + SemVer).
+- Prefer user-facing bullets over commit dumps.
+- Link compare ranges at the bottom (`[0.2.0]: https://github.com/…/compare/v0.1.0...v0.2.0`).
+- Release notes on GitHub can reuse the section body for that version.
 
 ## Version surfaces
 

@@ -100,6 +100,28 @@ onMounted(async () => {
         </div>
 
         <div class="topnav-right">
+          <a
+            class="github-link"
+            href="https://github.com/IanShaw027/openmail"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="t('nav.github')"
+            :aria-label="t('nav.github')"
+          >
+            <svg
+              class="github-icon"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                fill="currentColor"
+                d="M12 2C6.48 2 2 6.58 2 12.26c0 4.52 2.87 8.35 6.84 9.7.5.1.68-.22.68-.49 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.55-1.14-4.55-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.32.1-2.75 0 0 .84-.27 2.75 1.05A9.3 9.3 0 0 1 12 6.84c.85 0 1.71.12 2.51.34 1.91-1.32 2.75-1.05 2.75-1.05.55 1.43.2 2.49.1 2.75.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.95.68 1.92 0 1.38-.01 2.5-.01 2.84 0 .27.18.59.69.49A10.03 10.03 0 0 0 22 12.26C22 6.58 17.52 2 12 2z"
+              />
+            </svg>
+          </a>
           <button
             v-if="vault.unlocked"
             type="button"
@@ -235,6 +257,26 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--control-radius-sm, 8px);
+  color: var(--muted);
+  text-decoration: none;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.github-link:hover {
+  color: var(--text, #0f172a);
+  background: var(--panel-soft, rgba(15, 23, 42, 0.06));
+}
+.github-icon {
+  display: block;
 }
 .menu-toggle {
   display: none;

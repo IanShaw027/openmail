@@ -22,6 +22,7 @@ export default {
     transfer: 'Device sync',
     changePassword: 'Change password',
     lockVault: 'Lock',
+    github: 'GitHub repository',
   },
   vault: {
     title: 'Local vault',
