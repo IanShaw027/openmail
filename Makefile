@@ -6,7 +6,7 @@ BACKEND := $(ROOT)/backend
 FRONTEND := $(ROOT)/frontend
 BASE_URL ?= http://127.0.0.1:8000
 
-.PHONY: help dev-backend dev-frontend test docker-up docker-pull docker-down smoke
+.PHONY: help dev-backend dev-frontend test docker-up docker-pull docker-down smoke release sync-version
 
 help:
 	@echo "OpenMail targets:"
@@ -17,6 +17,8 @@ help:
 	@echo "  make docker-pull   - pull published image + up -d"
 	@echo "  make docker-up     - docker compose up -d --build (local build)"
 	@echo "  make docker-down   - docker compose down"
+	@echo "  make sync-version V=0.2.0  - rewrite VERSION sources only"
+	@echo "  make release V=0.2.0       - sync, commit, tag, push (CI packages)"
 
 dev-backend:
 	@cd "$(BACKEND)" && \
@@ -61,3 +63,12 @@ docker-down:
 	    echo "No compose file; nothing to tear down."; \
 	    exit 0; \
 	  fi
+
+# V=0.2.0  (with or without leading v)
+sync-version:
+	@test -n "$(V)" || (echo "usage: make sync-version V=0.2.0" >&2; exit 1)
+	@bash "$(ROOT)/scripts/sync-version.sh" "$(V)"
+
+release:
+	@test -n "$(V)" || (echo "usage: make release V=0.2.0" >&2; exit 1)
+	@bash "$(ROOT)/scripts/release.sh" "$(V)"

@@ -98,10 +98,12 @@ docker run -d --name openmail -p 8000:8000 \
 
 | Image | Tags |
 |-------|------|
-| [ianshaw027/openmail](https://hub.docker.com/r/ianshaw027/openmail) | `v0.1.0`, `latest` |
-| `ghcr.io/ianshaw027/openmail` | same tags when CI packages are published |
+| [ianshaw027/openmail](https://hub.docker.com/r/ianshaw027/openmail) | `v0.1.0`, `latest` (Hub secret or manual push) |
+| `ghcr.io/ianshaw027/openmail` | **every `v*` tag** via GitHub Actions |
 
-Override image: `OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0` in `.env` or the environment.
+Override image: `OPENMAIL_IMAGE=ghcr.io/ianshaw027/openmail:v0.1.0` in `.env` or the environment.
+
+**Release:** each git tag `vX.Y.Z` builds the package and GitHub Release (auto version bake). See [docs/17-release.md](docs/17-release.md) — `make release V=0.2.0`.
 
 **Build from source** instead of pulling:
 

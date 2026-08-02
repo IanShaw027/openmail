@@ -1,0 +1,187 @@
+name: Release
+
+# On every v* tag: sync version into tree (for image bake), push package, create GitHub Release.
+# Auth: GITHUB_TOKEN (packages + releases). Optional Hub: DOCKERHUB_TOKEN (+ DOCKERHUB_USERNAME).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to re-publish (e.g. v0.1.0)"
+        required: true
+        type: string
+
+env:
+  HUB_IMAGE: ianshaw027/openmail
+  GHCR_IMAGE: ghcr.io/ianshaw027/openmail
+
+jobs:
+  release:
+    name: Package + GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Resolve ref
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REF="${{ inputs.tag }}"
+          else
+            REF="${GITHUB_REF_NAME}"
+          fi
+          case "$REF" in
+            v*) ;;
+            *) echo "tag must start with v: $REF" >&2; exit 1 ;;
+          esac
+          VERSION="${REF#v}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.+-]+)?$'; then
+            echo "invalid semver after v: $VERSION" >&2
+            exit 1
+          fi
+          echo "tag=$REF" >>"$GITHUB_OUTPUT"
+          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+          echo "Resolved $REF → $VERSION"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Sync version into sources (image bake)
+        run: bash scripts/sync-version.sh "${{ steps.ref.outputs.version }}"
+
+      - name: Detect Docker Hub credentials
+        id: hub
+        env:
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "enabled=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >>"$GITHUB_OUTPUT"
+            echo "DOCKERHUB_TOKEN not set — pushing GHCR only"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta (GHCR always; Hub optional)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.hub.outputs.enabled == 'true' && format('{0}\n{1}', env.GHCR_IMAGE, env.HUB_IMAGE) || env.GHCR_IMAGE }}
+          tags: |
+            type=raw,value=v${{ steps.ref.outputs.version }}
+            type=raw,value=${{ steps.ref.outputs.version }}
+            type=raw,value=latest
+            type=sha,prefix=,format=short
+          labels: |
+            org.opencontainers.image.title=OpenMail
+            org.opencontainers.image.description=Local-first multi-source mail console
+            org.opencontainers.image.version=${{ steps.ref.outputs.version }}
+            org.opencontainers.image.source=https://github.com/IanShaw027/openmail
+
+      - name: Login to Docker Hub
+        if: steps.hub.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_USERNAME || 'ianshaw027' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            OPENMAIL_VERSION=${{ steps.ref.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Make GHCR package public (best-effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/user/packages/container/openmail" \
+            -f visibility=public \
+            || true
+
+      - name: Generate release notes
+        id: notes
+        env:
+          TAG: ${{ steps.ref.outputs.tag }}
+          VERSION: ${{ steps.ref.outputs.version }}
+          HUB_OK: ${{ steps.hub.outputs.enabled }}
+        run: |
+          NOTES="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "## OpenMail ${TAG}"
+            echo
+            echo "### Images"
+            echo
+            echo '```'
+            echo "docker pull ${GHCR_IMAGE}:${TAG}"
+            echo "docker pull ${GHCR_IMAGE}:latest"
+            if [ "$HUB_OK" = "true" ]; then
+              echo "docker pull ${HUB_IMAGE}:${TAG}"
+              echo "docker pull ${HUB_IMAGE}:latest"
+            else
+              echo "# Docker Hub: set repo secrets DOCKERHUB_TOKEN (+ DOCKERHUB_USERNAME) to enable CI push"
+            fi
+            echo '```'
+            echo
+            echo "### Run"
+            echo
+            echo '```bash'
+            echo "export OPENMAIL_IMAGE=${GHCR_IMAGE}:${TAG}"
+            echo "docker compose pull && docker compose up -d"
+            echo '```'
+            echo
+            echo "\`/api/health\` reports \`version: ${VERSION}\`."
+            echo
+            if [ -f CHANGELOG.md ]; then
+              echo "### Changelog"
+              echo
+              awk -v ver="$VERSION" '
+                BEGIN { p=0 }
+                $0 ~ "^## " ver "$" || $0 ~ "^## \\[" ver "\\]" { p=1; next }
+                p && /^## / { exit }
+                p { print }
+              ' CHANGELOG.md || true
+            fi
+          } >"$NOTES"
+          echo "path=$NOTES" >>"$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ref.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file "${{ steps.notes.outputs.path }}" --latest
+          else
+            gh release create "$TAG" \
+              --title "OpenMail ${TAG}" \
+              --notes-file "${{ steps.notes.outputs.path }}" \
+              --latest \
+              --verify-tag
+          fi

@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Tag-driven release: each `v*` tag builds GHCR (and optional Hub) package, bakes version, creates GitHub Release (`docs/17-release.md`, `make release V=…`)
+
 ### Changed
 
 - Document Docker Hub / GHCR image pull path in README and ops docs
