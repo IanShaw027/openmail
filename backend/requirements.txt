@@ -10,4 +10,4 @@ httpx>=0.27.0
 socksio>=1.0.0
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
-curl_cffi>=0.7.0
+curl_cffi>=0.15.0
