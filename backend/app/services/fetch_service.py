@@ -32,6 +32,12 @@ from app.services.credentials import (
 )
 from app.services.parser import annotate_message_code, extract_verification_code
 
+# Interactive browser clients abort ~55s (DEFAULT_API_TIMEOUT_MS). Walking the
+# entire 10-node WARP pool × multi-attempt mail.com login easily exceeds that
+# and surfaces as nginx 499 / browser "Request timed out".
+# Cap: sticky + a few alternates + optional direct.
+MAX_EGRESS_ATTEMPTS = 3
+
 
 @dataclass
 class FetchServiceResult:
@@ -342,6 +348,7 @@ def fetch_account(
                 ordered.append(p)
             if not ordered:
                 ordered = [None]
+            ordered = _cap_egress_candidates(ordered)
 
             result = FetchResult(ok=False, folder=folder, error="取件失败 / Fetch failed")
             for idx, egress in enumerate(ordered):
@@ -548,6 +555,38 @@ def _is_retryable_egress_error(err: str | None) -> bool:
     return any(x in e or x in (err or "") for x in markers)
 
 
+def _cap_egress_candidates(
+    candidates: list[str | None],
+    *,
+    max_attempts: int = MAX_EGRESS_ATTEMPTS,
+) -> list[str | None]:
+    """Keep sticky / early pool entries + direct; drop the long tail.
+
+    Order preserved. ``None`` (direct) is always kept if present in input, but
+    total length is capped so a single interactive fetch cannot burn 10×25s.
+    """
+    if max_attempts < 1:
+        max_attempts = 1
+    proxies: list[str] = []
+    has_direct = False
+    for p in candidates:
+        if p is None:
+            has_direct = True
+            continue
+        if p not in proxies:
+            proxies.append(p)
+    # Reserve one slot for direct when available
+    proxy_slots = max_attempts - 1 if has_direct else max_attempts
+    if proxy_slots < 1 and not has_direct:
+        proxy_slots = 1
+    out: list[str | None] = list(proxies[: max(0, proxy_slots)])
+    if has_direct:
+        out.append(None)
+    if not out:
+        out = [None]
+    return out[:max_attempts] if not has_direct else out
+
+
 def _session_fields_from_result(result: FetchResult) -> dict[str, Any]:
     """Extract cookie / mailbox write-back for local-first clients."""
     out: dict[str, Any] = {
@@ -688,6 +727,8 @@ def fetch_proxy(
         ordered.append(p)
     if not ordered:
         ordered = [None]
+    # Avoid 10× WARP walk blowing past browser 55s timeout (nginx 499)
+    ordered = _cap_egress_candidates(ordered)
 
     result: FetchResult | None = None
     last_err: str | None = None

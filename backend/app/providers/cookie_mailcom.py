@@ -796,8 +796,10 @@ class MailcomCookieProvider:
                         session_restored=False,
                     )
                 # mail.com SSO is flaky (form/ott/CDN + false "bad password");
-                # always retry with a clean jar — only trust final attempt error.
-                max_login_attempts = 3
+                # retry once with a clean jar. Keep attempts low: outer fetch
+                # already walks a few WARP egresses; 3×login × 10×proxy >> 55s
+                # browser timeout (nginx 499 / client TimeoutError).
+                max_login_attempts = 2
                 ok = False
                 login_error = None
                 meta_update = None
@@ -808,8 +810,7 @@ class MailcomCookieProvider:
                             client.cookies.clear()
                         except Exception:
                             pass
-                        # short backoff — reduces false "bad password" under rate limits
-                        time.sleep(0.8 * attempt)
+                        time.sleep(0.5 * attempt)
                     ok, login_error, meta_update = self.full_login(
                         client, email_addr, str(password), site=site
                     )
