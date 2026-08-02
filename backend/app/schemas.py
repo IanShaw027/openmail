@@ -142,6 +142,10 @@ class ProxyFetchRequest(BaseModel):
     proxy: str | None = None
     # ISO datetime: only messages after this (incremental)
     since: str | None = None
+    # ISO datetime: only messages strictly before this (load older / pagination)
+    before: str | None = None
+    # Cap how many messages to return (default provider quick ~15–20)
+    max_messages: int | None = Field(default=None, ge=1, le=100)
     # Force full recent window (ignore since)
     full: bool = False
 

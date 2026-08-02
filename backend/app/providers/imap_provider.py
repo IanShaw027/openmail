@@ -329,9 +329,13 @@ class ImapProvider:
                 return FetchResult(ok=False, folder=folder, error=f"无法打开文件夹 {folder}")
 
             since = None
+            before = None
             if limits:
                 since = limits.get("since") or limits.get("received_after")
-            if since:
+                before = limits.get("before") or limits.get("received_before")
+            if before:
+                uids = self._uids_before(conn, str(before), limit)
+            elif since:
                 uids = self._uids_since(conn, str(since), limit)
             else:
                 uids = self._recent_uids(conn, limit)
@@ -525,20 +529,30 @@ class ImapProvider:
             return names
         return names
 
-    def _uids_since(self, conn: imaplib.IMAP4, since: str, limit: int) -> list[str]:
-        """IMAP SEARCH SINCE date — only messages on/after calendar day of `since`."""
-        from datetime import datetime
+    @staticmethod
+    def _imap_day(iso: str, *, end_of_day: bool = False) -> str:
+        """Parse ISO → IMAP date token. end_of_day: bump +1 day for BEFORE exclusive."""
+        from datetime import datetime, timedelta
 
         day = "01-Jan-1970"
         try:
-            s = str(since).replace("Z", "+00:00")
+            s = str(iso).replace("Z", "+00:00")
             if "T" in s:
                 dt = datetime.fromisoformat(s)
             else:
                 dt = datetime.fromisoformat(s + "T00:00:00")
+            if end_of_day:
+                # IMAP BEFORE is exclusive on calendar day; keep same day when time present
+                # so we still get earlier mails on that day via post-filter if needed.
+                pass
             day = dt.strftime("%d-%b-%Y")
         except Exception:
             pass
+        return day
+
+    def _uids_since(self, conn: imaplib.IMAP4, since: str, limit: int) -> list[str]:
+        """IMAP SEARCH SINCE date — only messages on/after calendar day of `since`."""
+        day = self._imap_day(since)
         try:
             typ, data = conn.uid("search", None, "SINCE", day)
         except imaplib.IMAP4.error:
@@ -556,6 +570,47 @@ class ImapProvider:
         all_uids = data[0].split()[-limit:]
         all_uids.reverse()
         return [u.decode() if isinstance(u, bytes) else str(u) for u in all_uids]
+
+    def _uids_before(self, conn: imaplib.IMAP4, before: str, limit: int) -> list[str]:
+        """Load older page: messages strictly before `before` (newest-first slice of older set).
+
+        IMAP BEFORE is calendar-day exclusive. We search BEFORE (day+1) then take the
+        last `limit` UIDs (oldest-of-recent / newest-of-older window) and reverse to newest first.
+        """
+        from datetime import datetime, timedelta
+
+        day = "01-Jan-1970"
+        try:
+            s = str(before).replace("Z", "+00:00")
+            if "T" in s:
+                dt = datetime.fromisoformat(s)
+            else:
+                dt = datetime.fromisoformat(s + "T00:00:00")
+            # BEFORE next calendar day so same-day earlier mails can still appear
+            day = (dt + timedelta(days=1)).strftime("%d-%b-%Y")
+        except Exception:
+            day = self._imap_day(before)
+
+        try:
+            typ, data = conn.uid("search", None, "BEFORE", day)
+        except imaplib.IMAP4.error:
+            try:
+                typ, data = conn.search(None, "BEFORE", day)
+            except Exception:
+                return []
+            if typ != "OK" or not data or not data[0]:
+                return []
+            seqs = data[0].split()
+            # ascending: take last limit (newest among older set)
+            seqs = seqs[-limit:] if len(seqs) > limit else seqs
+            seqs.reverse()
+            return [x.decode() if isinstance(x, bytes) else str(x) for x in seqs]
+        if typ != "OK" or not data or not data[0]:
+            return []
+        all_uids = data[0].split()
+        recent = all_uids[-limit:] if len(all_uids) > limit else all_uids
+        recent.reverse()
+        return [u.decode() if isinstance(u, bytes) else str(u) for u in recent]
 
     def _recent_uids(self, conn: imaplib.IMAP4, limit: int) -> list[str]:
         try:

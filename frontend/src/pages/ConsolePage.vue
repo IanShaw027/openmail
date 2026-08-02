@@ -125,9 +125,6 @@ const moveGroupOptions = computed<UiSelectOption[]>(() => [
 const pageSizeSelectOptions = computed<UiSelectOption[]>(() =>
   pageSizeOptions.map((n) => ({ value: n, label: String(n) })),
 )
-const mailPageSizeSelectOptions = computed<UiSelectOption[]>(() =>
-  mailPageSizeOptions.map((n) => ({ value: n, label: String(n) })),
-)
 const apiAuthStyleOptions = computed<UiSelectOption[]>(() => [
   { value: 'auto', label: t('console.apiAuthAuto') },
   { value: 'none', label: t('console.apiAuthNone') },
@@ -288,29 +285,22 @@ function clearFilters() {
 const messages = ref<MailMessage[]>([])
 const selectedMessageId = ref<string | null>(null)
 const mailLoading = ref(false)
-/** Mail list pagination (right panel) */
-const mailPage = ref(1)
-const mailPageSize = ref(Number(localStorage.getItem('openmail.mailPageSize') || 20) || 20)
-const mailPageSizeOptions = [10, 20, 50]
-
-watch(mailPageSize, (n) => {
-  localStorage.setItem('openmail.mailPageSize', String(n))
-  mailPage.value = 1
-})
+/** How many cached mails to show in the panel (scroll load-more grows this). */
+const mailVisibleCount = ref(20)
+const MAIL_FIRST_PAGE = 20
+const MAIL_LOAD_MORE = 10
+/** Server fetch: loading older messages beyond cache */
+const mailLoadingMore = ref(false)
+/** Last load-more returned 0 new messages */
+const mailNoMoreRemote = ref(false)
+/** Mobile: expand sticky actions for a single row */
+const expandedActId = ref<string | null>(null)
 
 const listAll = computed(() => accounts.filtered)
 
-const mailTotalPages = computed(() =>
-  Math.max(1, Math.ceil(messages.value.length / mailPageSize.value)),
-)
-const pagedMessages = computed(() => {
-  const p = Math.min(Math.max(1, mailPage.value), mailTotalPages.value)
-  const start = (p - 1) * mailPageSize.value
-  return messages.value.slice(start, start + mailPageSize.value)
-})
-watch(messages, () => {
-  if (mailPage.value > mailTotalPages.value) mailPage.value = mailTotalPages.value
-})
+/** Visible slice (newest-first); grows via "load more" without classic page numbers. */
+const visibleMessages = computed(() => messages.value.slice(0, mailVisibleCount.value))
+const hasMoreCached = computed(() => messages.value.length > mailVisibleCount.value)
 
 const totalPages = computed(() =>
   Math.max(1, Math.ceil(listAll.value.length / pageSize.value)),
@@ -377,12 +367,34 @@ const mailEmptyKind = computed(() => {
   return 'need_fetch' as const
 })
 
-/** Load messages for account from local cache (filtered by current folder tab). */
-function loadMessagesFromCache(acc: MailAccount) {
+/**
+ * Load messages for account from local cache (filtered by current folder tab).
+ * @param opts.preserveVisible — keep expanded load-more window (after merge)
+ * @param opts.resetRemoteFlag — clear “no more older” (default true on select)
+ */
+function loadMessagesFromCache(
+  acc: MailAccount,
+  opts: { preserveVisible?: boolean; resetRemoteFlag?: boolean } = {},
+) {
   const cached = mailCache.listFor(acc.email, mailFolder.value)
   messages.value = cached
-  selectedMessageId.value = cached[0]?.id ?? null
-  mailPage.value = 1
+  if (!opts.preserveVisible || !selectedMessageId.value) {
+    selectedMessageId.value = cached[0]?.id ?? null
+  } else if (!cached.some((m) => m.id === selectedMessageId.value)) {
+    selectedMessageId.value = cached[0]?.id ?? null
+  }
+  if (opts.preserveVisible) {
+    // Grow or clamp; never collapse below previous window after load-more merge
+    mailVisibleCount.value = Math.min(
+      Math.max(mailVisibleCount.value, Math.min(MAIL_FIRST_PAGE, cached.length)),
+      cached.length || 0,
+    )
+  } else {
+    mailVisibleCount.value = Math.min(MAIL_FIRST_PAGE, cached.length)
+  }
+  if (opts.resetRemoteFlag !== false && !opts.preserveVisible) {
+    mailNoMoreRemote.value = false
+  }
   lastFetchOk.value = cached.length > 0
   lastFetchEmpty.value = false
 }
@@ -416,9 +428,27 @@ async function doCopy(key: string, text: string | undefined | null) {
 const batchConcurrency = ref(Number(localStorage.getItem('openmail.batchConcurrency') || 5) || 5)
 watch(batchConcurrency, (v) => localStorage.setItem('openmail.batchConcurrency', String(v)))
 
-function onCopyCell(e: Event, key: string, text: string | undefined | null) {
+/**
+ * Copy a cell value and also select that mailbox row (mobile often hits copy
+ * instead of the row; we still want the mail panel to follow).
+ */
+function onCopyCell(
+  e: Event,
+  key: string,
+  text: string | undefined | null,
+  acc?: MailAccount,
+) {
   e.stopPropagation()
+  if (acc) {
+    accounts.select(acc.id)
+    if (fetchingId.value !== acc.id) loadMessagesFromCache(acc)
+  }
   void doCopy(key, text)
+}
+
+function toggleRowActs(acc: MailAccount, e?: Event) {
+  e?.stopPropagation()
+  expandedActId.value = expandedActId.value === acc.id ? null : acc.id
 }
 
 function onImport() {
@@ -1120,7 +1150,8 @@ function applyFetchResult(acc: MailAccount, result: FetchResult) {
         acc.email,
         userSettings.needsFullFetch(acc.email) || tagged.length > 0,
       )
-      loadMessagesFromCache(acc)
+      // Preserve expanded list when appending older pages
+      loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
       lastFetchEmpty.value = messages.value.length === 0
     } catch {
       messages.value = msgs
@@ -1171,10 +1202,21 @@ function resolveFetchAccount(acc: MailAccount): MailAccount {
   }
 }
 
+type FetchOneOpts = {
+  silent?: boolean
+  /** Load older messages before this ISO (pagination). */
+  before?: string
+  maxMessages?: number
+  /** Clear local cache first, then pull latest N. */
+  clearFirst?: boolean
+  /** Skip incremental `since` (always recent window). */
+  forceRecent?: boolean
+}
+
 async function fetchOne(
   acc: MailAccount,
   quick = true,
-  opts: { silent?: boolean } = {},
+  opts: FetchOneOpts = {},
 ): Promise<boolean> {
   const silent = Boolean(opts.silent)
   if (!silent) {
@@ -1182,15 +1224,33 @@ async function fetchOne(
     mailLoading.value = true
     accounts.select(acc.id)
     // Keep showing cache while fetching
-    if (!messages.value.length) loadMessagesFromCache(acc)
+    if (!messages.value.length && !opts.clearFirst) loadMessagesFromCache(acc)
     lastFetchEmpty.value = false
     lastFetchOk.value = false
   }
   try {
+    if (opts.clearFirst) {
+      mailCache.clearMailbox(acc.email)
+      messages.value = []
+      selectedMessageId.value = null
+      mailVisibleCount.value = MAIL_FIRST_PAGE
+      mailNoMoreRemote.value = false
+    }
     const folder = mailFolder.value
     // Incremental since: newest cached mail time (UTC) or lastFetchAt
-    const since = userSettings.sinceFor(acc.email)
-    const full = userSettings.needsFullFetch(acc.email)
+    const since =
+      opts.before || opts.forceRecent || opts.clearFirst
+        ? undefined
+        : userSettings.sinceFor(acc.email)
+    const full =
+      opts.forceRecent || opts.clearFirst
+        ? true
+        : opts.before
+          ? false
+          : userSettings.needsFullFetch(acc.email)
+    const maxMessages =
+      opts.maxMessages ??
+      (opts.before ? MAIL_LOAD_MORE : opts.clearFirst || full || !since ? MAIL_FIRST_PAGE : undefined)
     // Prefer local-vault secrets (cloud mirror of client-sealed rows has none)
     const src = resolveFetchAccount(acc)
     // Child mailbox under HttpApi: fetch with parent api_url + this address as filter
@@ -1254,8 +1314,10 @@ async function fetchOne(
         credential,
         cookies: src.sessionCookies?.length ? src.sessionCookies : undefined,
         proxy: src.proxy || parent?.proxy || undefined,
-        since: full ? undefined : since,
-        full,
+        since: full || opts.before ? undefined : since,
+        before: opts.before,
+        max_messages: maxMessages,
+        full: full && !opts.before,
       })
     }
 
@@ -1335,7 +1397,108 @@ async function onFetchSelected(quick = true) {
     flashMsg(t('console.needSelectAccount'), 'danger')
     return
   }
-  await fetchOne(acc, quick, { silent: false })
+  mailNoMoreRemote.value = false
+  await fetchOne(acc, quick, {
+    silent: false,
+    maxMessages: MAIL_FIRST_PAGE,
+    forceRecent: true,
+  })
+}
+
+/** Expand visible list from cache, or fetch older from server. */
+async function onLoadMoreMails() {
+  const acc = selected.value
+  if (!acc) {
+    flashMsg(t('console.needSelectAccount'), 'danger')
+    return
+  }
+  // 1) Still more in local cache → just grow the window
+  if (messages.value.length > mailVisibleCount.value) {
+    mailVisibleCount.value = Math.min(
+      mailVisibleCount.value + MAIL_LOAD_MORE,
+      messages.value.length,
+    )
+    return
+  }
+  if (mailNoMoreRemote.value || mailLoadingMore.value || mailLoading.value) return
+
+  // 2) Pull older page from server (before oldest cached)
+  const before =
+    mailCache.oldestUtcIso(acc.email, mailFolder.value) ||
+    messages.value[messages.value.length - 1]?.date ||
+    undefined
+  if (!before) {
+    // No date anchor — try a larger recent window instead
+    mailLoadingMore.value = true
+    try {
+      const prevCount = messages.value.length
+      await fetchOne(acc, false, {
+        silent: false,
+        maxMessages: Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE),
+        forceRecent: true,
+      })
+      if (messages.value.length <= prevCount) {
+        mailNoMoreRemote.value = true
+        flashMsg(t('console.mailNoMore'), 'danger')
+      } else {
+        mailVisibleCount.value = Math.min(
+          messages.value.length,
+          mailVisibleCount.value + MAIL_LOAD_MORE,
+        )
+      }
+    } finally {
+      mailLoadingMore.value = false
+    }
+    return
+  }
+
+  mailLoadingMore.value = true
+  try {
+    const prevIds = new Set(messages.value.map((m) => m.id))
+    const prevCount = messages.value.length
+    const ok = await fetchOne(acc, true, {
+      silent: false,
+      before: String(before),
+      maxMessages: MAIL_LOAD_MORE,
+    })
+    if (!ok) return
+    const added = messages.value.filter((m) => !prevIds.has(m.id)).length
+    if (added === 0 && messages.value.length <= prevCount) {
+      mailNoMoreRemote.value = true
+      flashMsg(t('console.mailNoMore'), 'danger')
+    } else {
+      mailVisibleCount.value = Math.min(
+        messages.value.length,
+        Math.max(mailVisibleCount.value + Math.max(added, MAIL_LOAD_MORE), mailVisibleCount.value + 1),
+      )
+      if (added === 0) {
+        // Merge may have refreshed same ids — still grow window if cache grew somehow
+        mailVisibleCount.value = Math.min(
+          messages.value.length,
+          mailVisibleCount.value + MAIL_LOAD_MORE,
+        )
+      }
+    }
+  } finally {
+    mailLoadingMore.value = false
+  }
+}
+
+/** Clear local mails for selected mailbox, then pull latest 20. */
+async function onClearAndRefetch() {
+  const acc = selected.value
+  if (!acc) {
+    flashMsg(t('console.needSelectAccount'), 'danger')
+    return
+  }
+  if (!window.confirm(t('console.mailClearConfirm'))) return
+  mailNoMoreRemote.value = false
+  await fetchOne(acc, true, {
+    silent: false,
+    clearFirst: true,
+    forceRecent: true,
+    maxMessages: MAIL_FIRST_PAGE,
+  })
 }
 
 async function onBatchFetch() {
@@ -1429,6 +1592,7 @@ function stopAutoDetect() {
 /** Click row = select + load local cache (no network). Fetch button pulls remote. */
 function onRowClick(acc: MailAccount) {
   accounts.select(acc.id)
+  if (expandedActId.value && expandedActId.value !== acc.id) expandedActId.value = null
   if (fetchingId.value === acc.id) return
   loadMessagesFromCache(acc)
 }
@@ -1608,6 +1772,8 @@ function twoFaRemain(acc: MailAccount): number {
 
 async function copyTwoFa(acc: MailAccount, e?: Event) {
   e?.stopPropagation()
+  accounts.select(acc.id)
+  if (fetchingId.value !== acc.id) loadMessagesFromCache(acc)
   const entry = twoFaFor(acc)
   if (!entry) return
   const code = twofa.codeFor(entry)
@@ -2132,7 +2298,9 @@ onUnmounted(() => {
                 <th>{{ t('console.colStatus') }}</th>
                 <th v-if="!effectiveDense">{{ t('console.colStorage') }}</th>
                 <th v-if="!effectiveDense">{{ t('console.colUpdated') }}</th>
-                <th class="col-act sticky-act">{{ t('console.colActions') }}</th>
+                <th class="col-act" :class="{ 'sticky-act': !isNarrow }">
+                  {{ t('console.colActions') }}
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -2175,7 +2343,7 @@ onUnmounted(() => {
                       class="copy-cell email"
                       :class="{ copied: copiedKey === `email-${acc.id}` }"
                       :title="t('console.clickToCopy')"
-                      @click="onCopyCell($event, `email-${acc.id}`, acc.email)"
+                      @click="onCopyCell($event, `email-${acc.id}`, acc.email, acc)"
                     >
                       {{ acc.isApiSource ? (acc.note || acc.email) : acc.email }}
                     </button>
@@ -2216,7 +2384,7 @@ onUnmounted(() => {
                     class="type-chip copy-cell"
                     :class="`type-${accountBrand(acc)}`"
                     :title="`${brandLabel(accountBrand(acc))} · ${typeLabel(acc.type)}${acc.imapHost ? ' · ' + acc.imapHost : ''}`"
-                    @click="onCopyCell($event, `brand-${acc.id}`, brandLabel(accountBrand(acc)))"
+                    @click="onCopyCell($event, `brand-${acc.id}`, brandLabel(accountBrand(acc)), acc)"
                   >
                     <BrandMark :brand="accountBrand(acc)" :size="15" />
                     <span>{{ brandLabel(accountBrand(acc)) }}</span>
@@ -2229,7 +2397,7 @@ onUnmounted(() => {
                     class="copy-cell mono host"
                     :class="{ copied: copiedKey === `host-${acc.id}` }"
                     :title="hostCopyValue(acc)"
-                    @click="onCopyCell($event, `host-${acc.id}`, hostCopyValue(acc))"
+                    @click="onCopyCell($event, `host-${acc.id}`, hostCopyValue(acc), acc)"
                   >
                     {{ hostLabel(acc) }}
                   </button>
@@ -2245,7 +2413,7 @@ onUnmounted(() => {
                         acc.type === 'oauth' && (!acc.refreshToken || !acc.clientId),
                     }"
                     :title="t('console.clickToCopySecret')"
-                    @click="onCopyCell($event, `sec-${acc.id}`, copyableSecret(acc))"
+                    @click="onCopyCell($event, `sec-${acc.id}`, copyableSecret(acc), acc)"
                   >
                     {{ secretHint(acc) }}
                   </button>
@@ -2262,7 +2430,11 @@ onUnmounted(() => {
                         ? t('console.codeClickReveal')
                         : t('console.clickToCopy')
                     "
-                    @click="toggleRevealCode($event, acc.id, acc.latestCode)"
+                    @click="
+                      accounts.select(acc.id);
+                      if (fetchingId !== acc.id) loadMessagesFromCache(acc);
+                      toggleRevealCode($event, acc.id, acc.latestCode)
+                    "
                   >
                     {{ displayCode(acc.latestCode, acc.id) }}
                   </button>
@@ -2322,20 +2494,51 @@ onUnmounted(() => {
                     type="button"
                     class="copy-cell muted time"
                     :title="acc.updatedAt ? new Date(acc.updatedAt).toLocaleString() : ''"
-                    @click="onCopyCell($event, `time-${acc.id}`, formatTime(acc.updatedAt))"
+                    @click="onCopyCell($event, `time-${acc.id}`, formatTime(acc.updatedAt), acc)"
                   >
                     {{ formatTime(acc.updatedAt) }}
                   </button>
                 </td>
 
-                <td class="col-act sticky-act" @click.stop>
-                  <div class="row-acts">
+                <td
+                  class="col-act"
+                  :class="{
+                    'sticky-act': !isNarrow,
+                    'acts-expanded': isNarrow && expandedActId === acc.id,
+                    'acts-collapsed': isNarrow && expandedActId !== acc.id,
+                  }"
+                  @click.stop
+                >
+                  <!-- Mobile: collapsed ⋯ toggle; expanded shows full actions -->
+                  <button
+                    v-if="isNarrow && expandedActId !== acc.id"
+                    type="button"
+                    class="btn btn-ghost btn-xs act-more"
+                    :title="t('console.expandActions')"
+                    @click="toggleRowActs(acc, $event)"
+                  >
+                    ⋯
+                  </button>
+                  <div
+                    v-else
+                    class="row-acts"
+                    :class="{ 'row-acts-mobile': isNarrow }"
+                  >
+                    <button
+                      v-if="isNarrow"
+                      type="button"
+                      class="btn btn-ghost btn-xs act-more"
+                      :title="t('console.collapseActions')"
+                      @click="toggleRowActs(acc, $event)"
+                    >
+                      ×
+                    </button>
                     <button
                       type="button"
                       class="btn btn-primary btn-xs act-btn"
                       :disabled="fetchingId === acc.id || !canFetch(acc)"
                       :title="fetchDisabledReason(acc)"
-                      @click="fetchOne(acc, true)"
+                      @click="fetchOne(acc, true, { maxMessages: MAIL_FIRST_PAGE, forceRecent: true })"
                     >
                       {{ fetchingId === acc.id ? '…' : t('console.quickFetch') }}
                     </button>
@@ -2458,6 +2661,15 @@ onUnmounted(() => {
             >
               {{ mailLoading ? t('common.loading') : t('console.quickFetch') }}
             </button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              :disabled="!hasSelection || mailLoading"
+              :title="t('console.mailClearHint')"
+              @click="onClearAndRefetch"
+            >
+              {{ t('console.mailClearRefetch') }}
+            </button>
           </div>
         </div>
 
@@ -2538,7 +2750,7 @@ onUnmounted(() => {
             </div>
             <template v-else>
               <button
-                v-for="m in pagedMessages"
+                v-for="m in visibleMessages"
                 :key="m.id"
                 type="button"
                 class="mail-item"
@@ -2569,32 +2781,28 @@ onUnmounted(() => {
                   {{ m.subject || t('console.mailNoSubject') }}
                 </div>
               </button>
-              <div v-if="messages.length > mailPageSize" class="mail-pager">
+              <div class="mail-load-more">
+                <span class="muted mail-count">
+                  {{ t('console.mailShowing', { n: visibleMessages.length, total: messages.length }) }}
+                </span>
                 <button
+                  v-if="hasMoreCached || !mailNoMoreRemote"
                   type="button"
-                  class="btn btn-ghost btn-xs"
-                  :disabled="mailPage <= 1"
-                  @click="mailPage = Math.max(1, mailPage - 1)"
+                  class="btn btn-outline btn-sm"
+                  :disabled="mailLoading || mailLoadingMore"
+                  @click="onLoadMoreMails"
                 >
-                  {{ t('common.prev') }}
+                  {{
+                    mailLoadingMore
+                      ? t('common.loading')
+                      : hasMoreCached
+                        ? t('console.mailLoadMoreCache')
+                        : t('console.mailLoadMore')
+                  }}
                 </button>
-                <span class="muted">{{ mailPage }} / {{ mailTotalPages }} · {{ messages.length }}</span>
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-xs"
-                  :disabled="mailPage >= mailTotalPages"
-                  @click="mailPage = Math.min(mailTotalPages, mailPage + 1)"
-                >
-                  {{ t('common.next') }}
-                </button>
-                <UiSelect
-                  :model-value="mailPageSize"
-                  :options="mailPageSizeSelectOptions"
-                  class="page-size-sm"
-                  size="sm"
-                  :block="false"
-                  @update:model-value="(v) => (mailPageSize = Number(v))"
-                />
+                <p v-if="mailNoMoreRemote && !hasMoreCached" class="muted mail-no-more">
+                  {{ t('console.mailNoMore') }}
+                </p>
               </div>
             </template>
           </div>
@@ -3640,7 +3848,7 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
   background: var(--accent-soft);
   border-color: transparent;
 }
-/* Freeze actions column on the right while scrolling horizontally */
+/* Freeze actions column on desktop only (sticky-act class omitted on narrow) */
 .col-act.sticky-act,
 th.col-act.sticky-act {
   position: sticky;
@@ -3662,11 +3870,52 @@ th.col-act.sticky-act {
 .data tbody tr.is-selected .col-act.sticky-act {
   background: color-mix(in srgb, var(--panel-solid) 82%, var(--accent) 12%);
 }
+.col-act {
+  white-space: nowrap;
+  width: 1%;
+  vertical-align: middle;
+}
+.col-act.acts-collapsed {
+  min-width: 40px;
+  width: 40px;
+  box-shadow: none;
+  position: static;
+}
+.col-act.acts-expanded {
+  min-width: 0;
+  position: static;
+  box-shadow: none;
+}
+.act-more {
+  min-width: 32px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
 .act-btn {
   min-width: 52px;
 }
 .row-acts {
   justify-content: flex-end;
+}
+.row-acts-mobile {
+  flex-wrap: wrap;
+  max-width: 200px;
+  justify-content: flex-end;
+}
+.mail-load-more {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px 16px;
+}
+.mail-count {
+  font-size: 11px;
+}
+.mail-no-more {
+  margin: 0;
+  font-size: 12px;
+  text-align: center;
 }
 
 .copy-cell {
@@ -4878,11 +5127,23 @@ th.col-act.sticky-act {
   .note-quick {
     display: none;
   }
-  .row-acts {
-    max-width: 140px;
-    gap: 2px;
+  .col-act.sticky-act,
+  th.col-act.sticky-act {
+    position: static !important;
+    box-shadow: none !important;
+    min-width: 40px;
   }
-  .row-acts .btn-sm {
+  .col-act.acts-collapsed {
+    min-width: 40px;
+    width: 40px;
+  }
+  .row-acts {
+    max-width: 200px;
+    gap: 2px;
+    flex-wrap: wrap;
+  }
+  .row-acts .btn-sm,
+  .row-acts .btn-xs {
     padding: 4px 6px;
     font-size: 11px;
   }

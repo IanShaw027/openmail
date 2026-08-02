@@ -604,6 +604,16 @@ export default {
     fetchFailed: '取信失败',
     fetchDone: '已拉取 {n} 封邮件',
     fetchGotCode: '验证码：{code}',
+    expandActions: '展开操作',
+    collapseActions: '收起操作',
+    mailLoadMore: '加载更多（更早 10 封）',
+    mailLoadMoreCache: '显示更多',
+    mailNoMore: '没有更早的邮件了',
+    mailShowing: '显示 {n} / {total}',
+    mailClearRefetch: '清空重拉',
+    mailClearHint: '清空本邮箱本地缓存后重新拉取最近 20 封',
+    mailClearConfirm: '清空该邮箱本地邮件缓存，并重新拉取最近 20 封？',
+
     clientSealedNeedLocal:
       '该账号凭证仅保存在本机保险库（服务端无法解密）。请先解锁保险库；若换了浏览器/清了数据，请重新导入账号密码后再取信。',
     needLocalSecrets: '本机没有该账号的密码/授权码/会话，无法取信。请重新编辑账号并填入凭证。',

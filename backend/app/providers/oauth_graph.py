@@ -208,7 +208,13 @@ class OAuthGraphProvider:
         proxy = creds.get("proxy") or getattr(account, "proxy", None)
         proxy_str = str(proxy).strip() if proxy else None
 
-        top = 5 if quick else int((limits or {}).get("top", 20))
+        if limits and ("top" in limits or "max_messages" in limits):
+            try:
+                top = int((limits or {}).get("top") or (limits or {}).get("max_messages") or 20)
+            except (TypeError, ValueError):
+                top = 5 if quick else 20
+        else:
+            top = 5 if quick else int((limits or {}).get("top", 20))
         top = max(1, min(top, 50))
         graph_folder = _FOLDER_MAP.get((folder or "inbox").lower(), "inbox")
         if graph_folder == "junkemail":
@@ -254,17 +260,24 @@ class OAuthGraphProvider:
             }
 
         headers = {"Authorization": f"Bearer {access_token}"}
-        # Incremental: only messages after since (ISO) when provided in limits
+        # Incremental / older-page filters
         since = None
+        before = None
         if limits:
             since = limits.get("since") or limits.get("received_after")
-        filter_q = ""
-        if since:
-            # Graph prefers datetime without microseconds / with Z
+            before = limits.get("before") or limits.get("received_before")
+        filters: list[str] = []
+        if since and not before:
             since_s = str(since).replace("+00:00", "Z")
             if "T" not in since_s:
                 since_s = f"{since_s}T00:00:00Z"
-            filter_q = f"&$filter=receivedDateTime ge {since_s}"
+            filters.append(f"receivedDateTime ge {since_s}")
+        if before:
+            before_s = str(before).replace("+00:00", "Z")
+            if "T" not in before_s:
+                before_s = f"{before_s}T00:00:00Z"
+            filters.append(f"receivedDateTime lt {before_s}")
+        filter_q = f"&$filter={' and '.join(filters)}" if filters else ""
         list_url = (
             f"{GRAPH_BASE}/me/mailFolders/{graph_folder}/messages"
             f"?$top={top}&$select={_SELECT}&$orderby=receivedDateTime desc{filter_q}"

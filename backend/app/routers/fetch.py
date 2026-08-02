@@ -135,6 +135,8 @@ def proxy_fetch(
         settings=settings,
         proxy=body.proxy,
         since=body.since,
+        before=body.before,
+        max_messages=body.max_messages,
         full=bool(body.full),
     )
     return _to_response(result)

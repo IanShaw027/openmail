@@ -178,6 +178,27 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     return best == null ? undefined : new Date(best).toISOString()
   }
 
+  /** Oldest cached message date as UTC ISO (optionally folder-scoped), for load-older. */
+  function oldestUtcIso(email: string, folder?: string): string | undefined {
+    const list = listFor(email, folder)
+    let best: number | null = null
+    for (const m of list) {
+      const t = parseMessageDateMs(m.date)
+      if (t == null) continue
+      if (best === null || t < best) best = t
+    }
+    return best == null ? undefined : new Date(best).toISOString()
+  }
+
+  /** Replace mailbox cache (used by clear + refetch). */
+  function clearMailbox(email: string) {
+    const key = email.toLowerCase()
+    if (!byEmail.value[key]?.length) return
+    const next = { ...byEmail.value }
+    delete next[key]
+    byEmail.value = next
+  }
+
   /** Prune all mailboxes to retention window (call on settings load / change). */
   function pruneAll(retentionDays: number) {
     const days = Math.max(0, Number(retentionDays) || 0)
@@ -262,6 +283,8 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     normalizeFolder,
     merge,
     newestUtcIso,
+    oldestUtcIso,
+    clearMailbox,
     pruneAll,
     search,
     replaceAll,

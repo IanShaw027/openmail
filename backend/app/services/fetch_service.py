@@ -632,6 +632,8 @@ def fetch_proxy(
     settings: Settings | None = None,
     proxy: str | None = None,
     since: str | None = None,
+    before: str | None = None,
+    max_messages: int | None = None,
     full: bool = False,
 ) -> FetchServiceResult:
     """Guest/proxy fetch: credentials in memory only, never persisted.
@@ -707,12 +709,20 @@ def fetch_proxy(
         )
 
     limits: dict[str, Any] = {}
-    if since and not full:
+    if since and not full and not before:
         limits["since"] = since
-    elif not full and quick:
-        limits["max_messages"] = 15
-    if quick:
-        limits.setdefault("max_messages", 15)
+    if before:
+        limits["before"] = before
+    # Explicit page size wins; else quick defaults to 20 recent
+    if max_messages is not None:
+        try:
+            limits["max_messages"] = max(1, min(int(max_messages), 100))
+        except (TypeError, ValueError):
+            limits["max_messages"] = 20 if quick else 50
+    elif quick:
+        limits.setdefault("max_messages", 20)
+    elif not full:
+        limits.setdefault("max_messages", 50)
 
     def _do_fetch(c: dict[str, Any]) -> FetchResult:
         return provider_impl.fetch(

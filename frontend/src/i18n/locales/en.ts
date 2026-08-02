@@ -607,6 +607,16 @@ export default {
     fetchFailed: 'Fetch failed',
     fetchDone: 'Fetched {n} message(s)',
     fetchGotCode: 'Code: {code}',
+    expandActions: 'Show actions',
+    collapseActions: 'Hide actions',
+    mailLoadMore: 'Load more (10 older)',
+    mailLoadMoreCache: 'Show more',
+    mailNoMore: 'No older messages',
+    mailShowing: 'Showing {n} / {total}',
+    mailClearRefetch: 'Clear & refetch',
+    mailClearHint: 'Clear local cache for this mailbox, then fetch the latest 20',
+    mailClearConfirm: 'Clear local mail cache for this mailbox and fetch the latest 20?',
+
     clientSealedNeedLocal:
       'Credentials for this account are sealed in your browser vault (server cannot decrypt). Unlock the vault; if this is a new browser or data was cleared, re-import the account with password, then fetch.',
     needLocalSecrets:

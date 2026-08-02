@@ -47,6 +47,10 @@ export interface ProxyFetchBody {
   proxy?: string | null
   /** ISO: only messages after this (incremental) */
   since?: string | null
+  /** ISO: only messages strictly before this (load older) */
+  before?: string | null
+  /** Cap message count (e.g. 20 first page, 10 load-more) */
+  max_messages?: number | null
   /** Force full recent list */
   full?: boolean
 }
@@ -186,6 +190,8 @@ export async function proxyFetchMail(
       cookies: body.cookies ?? undefined,
       proxy: body.proxy || undefined,
       since: body.since || undefined,
+      before: body.before || undefined,
+      max_messages: body.max_messages ?? undefined,
       full: body.full || undefined,
     },
   })
