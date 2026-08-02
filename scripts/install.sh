@@ -47,7 +47,7 @@ else
   echo "==> OPENMAIL_MASTER_KEY already set"
 fi
 
-IMAGE="${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.1.0}"
+IMAGE="${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.2.0}"
 echo "==> image: $IMAGE"
 # Prefer pull of published image; fall back to local build if pull fails (offline / private).
 if docker compose pull openmail 2>/dev/null; then
