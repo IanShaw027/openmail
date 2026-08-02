@@ -11,10 +11,9 @@
 #   ./scripts/up-with-warp.sh
 #   # or: docker compose --profile warp up -d
 #
-# Images:
-#   GHCR (default, CI on every v* tag):  ghcr.io/ianshaw027/openmail:v0.1.0 | :latest
-#   Docker Hub (optional dual-publish):  ianshaw027/openmail:v0.1.0
-#   Override:    OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0
+# Image (Docker Hub, CI on every v* tag):
+#   ianshaw027/openmail:v0.1.0 | :latest
+#   Override: OPENMAIL_IMAGE=ianshaw027/openmail:v0.2.0
 #
 # Docs: docs/14-ops-and-smoke.md · docs/16-warp-proxy-pool.md · docs/17-release.md
 
@@ -51,8 +50,8 @@ x-warp-common: &warp-common
 
 services:
   openmail:
-    # Default: GHCR (CI release). `docker compose build` still works (build: .).
-    image: ${OPENMAIL_IMAGE:-ghcr.io/ianshaw027/openmail:v0.1.0}
+    # Default: Docker Hub (CI release). `docker compose build` still works (build: .).
+    image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.1.0}
     build: .
     pull_policy: ${OPENMAIL_PULL_POLICY:-missing}
     container_name: openmail

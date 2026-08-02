@@ -53,8 +53,7 @@ CI badge needs Actions enabled on the default branch after first push of `.githu
 
 | Registry | Image |
 |----------|--------|
-| Docker Hub | https://hub.docker.com/r/ianshaw027/openmail |
-| GHCR | `ghcr.io/ianshaw027/openmail` (CI push) |
+| Docker Hub (only) | https://hub.docker.com/r/ianshaw027/openmail |
 
 ### Docker Hub CI secret
 
@@ -62,10 +61,5 @@ Repo → **Settings → Secrets and variables → Actions**:
 
 | Secret | Purpose |
 |--------|---------|
-| `DOCKERHUB_TOKEN` | Access token with write (or `DOCKERHUB_USERNAME` + token) |
-
-Without `DOCKERHUB_TOKEN`, the docker workflow still builds and can push to **GHCR** via `GITHUB_TOKEN`.
-
-### Make GHCR package public
-
-GitHub → profile/org → **Packages** → `openmail` → **Package settings** → Change visibility → Public.
+| `DOCKERHUB_TOKEN` | Access token with write (**required** to publish) |
+| `DOCKERHUB_USERNAME` | optional (default `ianshaw027`) |
