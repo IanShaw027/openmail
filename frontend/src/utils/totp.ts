@@ -31,15 +31,59 @@ export function isValidBase32Secret(raw: string): boolean {
   return BASE32_RE.test(s)
 }
 
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s.replace(/\+/g, ' '))
+  } catch {
+    return s.replace(/\+/g, ' ')
+  }
+}
+
+/** Manual fallback when OTPAuth.URI.parse rejects edge-case QR payloads. */
+function parseOtpauthUriManual(text: string): TotpEntryDraft | null {
+  // otpauth://totp/Issuer:label?secret=...&issuer=...
+  const m = text.match(/^otpauth:\/\/(totp|hotp)\/([^?]*)\?(.*)$/i)
+  if (!m) return null
+  const type = (m[1] || 'totp').toLowerCase() === 'hotp' ? 'hotp' : 'totp'
+  const path = safeDecode(m[2] || '')
+  const qs = new URLSearchParams(m[3] || '')
+  const secret = normalizeSecret(qs.get('secret') || '')
+  if (!isValidBase32Secret(secret)) return null
+  const issuerQ = safeDecode(qs.get('issuer') || '')
+  const algorithm = String(qs.get('algorithm') || 'SHA1').toUpperCase() as TotpAlgorithm
+  const digits = Number(qs.get('digits') || 6) === 8 ? 8 : 6
+  const period = Math.max(15, Math.min(120, Number(qs.get('period') || 30)))
+  const counter = Math.max(0, Number(qs.get('counter') || 0))
+  const issuer = issuerQ || guessIssuerFromLabel(path)
+  const label = stripIssuerFromLabel(path, issuer) || path || 'Account'
+  return {
+    issuer,
+    label,
+    secret,
+    type,
+    algorithm: ['SHA1', 'SHA256', 'SHA512'].includes(algorithm) ? algorithm : 'SHA1',
+    digits,
+    period,
+    counter,
+  }
+}
+
 export function parseOtpauthUri(uri: string): TotpEntryDraft | null {
-  const text = String(uri || '').trim()
+  let text = String(uri || '').trim()
+  // Some scanners wrap URI in quotes / whitespace / BOM
+  text = text.replace(/^\uFEFF/, '').replace(/^["']|["']$/g, '').trim()
+  // Google Authenticator export sometimes embeds otpauth inside a larger string
+  const embedded = text.match(/otpauth:\/\/[^\s"'<>]+/i)
+  if (embedded && !text.toLowerCase().startsWith('otpauth://')) {
+    text = embedded[0]!
+  }
   if (!text.toLowerCase().startsWith('otpauth://')) return null
   try {
     const parsed = OTPAuth.URI.parse(text)
     const isHotp = parsed instanceof OTPAuth.HOTP
     const issuer =
       (parsed as OTPAuth.TOTP).issuer ||
-      decodeURIComponent((text.match(/issuer=([^&]+)/i)?.[1] || '').replace(/\+/g, ' ')) ||
+      safeDecode(text.match(/[?&]issuer=([^&]+)/i)?.[1] || '') ||
       ''
     const label = (parsed as OTPAuth.TOTP).label || issuer || '2FA'
     const secret = parsed.secret.base32
@@ -64,7 +108,7 @@ export function parseOtpauthUri(uri: string): TotpEntryDraft | null {
       counter: Math.max(0, counter),
     }
   } catch {
-    return null
+    return parseOtpauthUriManual(text)
   }
 }
 

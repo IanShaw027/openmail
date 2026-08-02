@@ -48,6 +48,8 @@ import {
 import ConsoleSendModal from '@/components/console/ConsoleSendModal.vue'
 import ConsoleGroupModal from '@/components/console/ConsoleGroupModal.vue'
 import NotePurposeCell from '@/components/console/NotePurposeCell.vue'
+import BrandMark from '@/components/BrandMark.vue'
+import { resolveAccountBrand } from '@/utils/domainBrand'
 
 const { t, locale } = useI18n()
 const accounts = useAccountsStore()
@@ -1026,6 +1028,17 @@ async function toggleStar(acc: MailAccount, e?: Event) {
 
 function brandLabel(b?: string) {
   return brandLabelUtil(t, b)
+}
+
+/** Prefer IMAP host brand so custom domains on Gmail/QQ IMAP show the right chip. */
+function accountBrand(acc: MailAccount): string {
+  return resolveAccountBrand({
+    email: acc.email,
+    imapHost: acc.imapHost,
+    smtpHost: acc.smtpHost,
+    type: acc.type,
+    brand: acc.brand,
+  })
 }
 function typeLabel(type: MailAccount['type']) {
   return typeLabelUtil(t, type)
@@ -2052,11 +2065,12 @@ onUnmounted(() => {
                   <button
                     type="button"
                     class="type-chip copy-cell"
-                    :class="`type-${acc.brand || 'other'}`"
-                    :title="`${brandLabel(acc.brand)} · ${typeLabel(acc.type)}`"
-                    @click="onCopyCell($event, `brand-${acc.id}`, brandLabel(acc.brand))"
+                    :class="`type-${accountBrand(acc)}`"
+                    :title="`${brandLabel(accountBrand(acc))} · ${typeLabel(acc.type)}${acc.imapHost ? ' · ' + acc.imapHost : ''}`"
+                    @click="onCopyCell($event, `brand-${acc.id}`, brandLabel(accountBrand(acc)))"
                   >
-                    {{ brandLabel(acc.brand) }}
+                    <BrandMark :brand="accountBrand(acc)" :size="13" />
+                    <span>{{ brandLabel(accountBrand(acc)) }}</span>
                   </button>
                 </td>
 
@@ -3594,8 +3608,9 @@ th.col-act.sticky-act {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 5px;
   height: 24px;
-  padding: 0 10px;
+  padding: 0 10px 0 7px;
   border-radius: 999px;
   border: 1px solid transparent;
   font-size: 11px;
@@ -3606,6 +3621,9 @@ th.col-act.sticky-act {
   max-width: 100%;
   background: #eef2ff;
   color: #4338ca;
+}
+.type-chip :deep(.brand-mark) {
+  opacity: 0.95;
 }
 .type-chip:hover {
   filter: brightness(0.97);

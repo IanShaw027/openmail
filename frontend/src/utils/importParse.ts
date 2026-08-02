@@ -1,5 +1,5 @@
 import type { MailAccount } from '@/types/account'
-import { resolveDomainProfile } from '@/utils/domainBrand'
+import { resolveAccountBrand, resolveDomainProfile } from '@/utils/domainBrand'
 
 function uid(): string {
   return `acc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`
@@ -142,7 +142,6 @@ function enrichAccount(
   line?: ParsedLine,
 ): NonNullable<ParsedLine['account']> {
   const profile = resolveDomainProfile(account.email)
-  const brand = profile.brand
   // Normalize app-password display forms (Gmail "xxxx xxxx xxxx xxxx")
   if (account.password) {
     account = {
@@ -175,14 +174,24 @@ function enrichAccount(
   if (profile.oauthPreferred && account.refreshToken && account.clientId) {
     account = { ...account, type: 'oauth' }
   }
-  // Microsoft without OAuth tokens → warn (password alone cannot fetch Graph)
+  // Brand: IMAP/SMTP host takes priority over email domain (custom domains on Gmail IMAP etc.)
+  const brand = resolveAccountBrand({
+    email: account.email,
+    imapHost: account.imapHost,
+    smtpHost: account.smtpHost,
+    type: account.type,
+    brand: profile.brand,
+  })
+  // Microsoft without OAuth tokens → warn only when brand is microsoft and no IMAP host
+  // (password+IMAP on outlook.office365.com may still work with app password in some tenants)
   if (
-    profile.oauthPreferred &&
+    brand === 'microsoft' &&
     account.type !== 'http_api' &&
+    account.type !== 'imap' &&
     (!account.refreshToken || !account.clientId)
   ) {
     const warn =
-      '微软邮箱缺少 refresh_token / client_id，仅密码无法取信，请按 OAuth 格式重新导入'
+      '微软邮箱缺少 refresh_token / client_id，仅密码无法 Graph 取信；若用 IMAP 请写明主机 outlook.office365.com'
     if (line) {
       line.warnings = [...(line.warnings || []), warn]
     }

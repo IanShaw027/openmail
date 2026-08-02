@@ -270,7 +270,10 @@ function downloadBlob(text: string, name: string, type: string) {
 }
 
 function applyParsedDraft(raw: string): boolean {
-  const d = parseOtpauthUri(raw) || parseSecretOrUri(raw)
+  const cleaned = String(raw || '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+  const d = parseOtpauthUri(cleaned) || parseSecretOrUri(cleaned)
   if (!d) return false
   form.value.secret = d.secret
   form.value.issuer = d.issuer || form.value.issuer
@@ -280,14 +283,88 @@ function applyParsedDraft(raw: string): boolean {
   form.value.digits = d.digits
   form.value.period = d.period
   form.value.counter = d.counter
+  // Map known issuer → service preset
+  const iss = (d.issuer || '').toLowerCase()
+  const preset =
+    SERVICE_PRESETS.find((p) => p.issuer && p.issuer.toLowerCase() === iss) ||
+    SERVICE_PRESETS.find((p) => p.name.toLowerCase() === iss)
+  if (preset) form.value.serviceId = preset.id
   showForm.value = true
   flashMsg(t('twofa.scanOk'))
   return true
 }
 
+function decodeWithJsQR(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+): string | null {
+  try {
+    const code = jsQR(data, width, height, { inversionAttempts: 'attemptBoth' })
+    return code?.data || null
+  } catch {
+    return null
+  }
+}
+
+/** Prefer native BarcodeDetector when available (Chrome/Android); fall back to jsQR. */
+async function decodeQrNative(source: ImageBitmapSource): Promise<string | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const BD = (window as any).BarcodeDetector
+    if (!BD) return null
+    const detector = new BD({ formats: ['qr_code'] })
+    const codes = await detector.detect(source)
+    const raw = codes?.[0]?.rawValue
+    return typeof raw === 'string' && raw ? raw : null
+  } catch {
+    return null
+  }
+}
+
+function drawScaled(
+  source: CanvasImageSource,
+  srcW: number,
+  srcH: number,
+  maxSide: number,
+): { data: ImageData; w: number; h: number } | null {
+  if (!srcW || !srcH) return null
+  const scale = Math.min(1, maxSide / Math.max(srcW, srcH))
+  const dw = Math.max(1, Math.floor(srcW * scale))
+  const dh = Math.max(1, Math.floor(srcH * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = dw
+  canvas.height = dh
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  ctx.imageSmoothingEnabled = false
+  ctx.drawImage(source, 0, 0, dw, dh)
+  return { data: ctx.getImageData(0, 0, dw, dh), w: dw, h: dh }
+}
+
+async function decodeQrFromImage(img: HTMLImageElement | ImageBitmap): Promise<string | null> {
+  const w = 'naturalWidth' in img ? img.naturalWidth || img.width : img.width
+  const h = 'naturalHeight' in img ? img.naturalHeight || img.height : img.height
+  if (!w || !h) return null
+
+  const native = await decodeQrNative(img)
+  if (native) return native
+
+  // Multi-scale jsQR (small screenshots + high-res photos)
+  for (const maxSide of [480, 720, 1080, 1600, 2400]) {
+    if (maxSide > Math.max(w, h) * 1.1 && maxSide !== 480) continue
+    const drawn = drawScaled(img, w, h, maxSide)
+    if (!drawn) continue
+    const hit = decodeWithJsQR(drawn.data.data, drawn.w, drawn.h)
+    if (hit) return hit
+  }
+  return null
+}
+
 async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
     flashMsg(t('twofa.cameraDenied'), 'danger')
+    if (isMobile.value) openImagePicker()
     return
   }
   try {
@@ -308,19 +385,35 @@ async function startCamera() {
       })
     }
     cameraOn.value = true
-    await new Promise((r) => setTimeout(r, 50))
-    if (videoEl.value) {
-      videoEl.value.setAttribute('playsinline', 'true')
-      videoEl.value.muted = true
-      videoEl.value.srcObject = stream
-      await videoEl.value.play()
+    await new Promise((r) => setTimeout(r, 80))
+    const video = videoEl.value
+    if (video) {
+      video.setAttribute('playsinline', 'true')
+      video.setAttribute('webkit-playsinline', 'true')
+      video.muted = true
+      video.srcObject = stream
+      // Wait until we actually have frames
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          video.removeEventListener('loadeddata', done)
+          resolve()
+        }
+        if (video.readyState >= 2) resolve()
+        else video.addEventListener('loadeddata', done)
+        setTimeout(done, 1500)
+      })
+      try {
+        await video.play()
+      } catch {
+        /* autoplay policies — user gesture already happened */
+      }
       scanLoop()
     }
   } catch {
     flashMsg(t('twofa.cameraDenied'), 'danger')
     cameraOn.value = false
     // 移动端相机失败时仍可落到相册选图
-    if (isMobile.value) fileInputEl.value?.click()
+    if (isMobile.value) openImagePicker()
   }
 }
 
@@ -333,75 +426,94 @@ function stopCamera() {
   if (videoEl.value) videoEl.value.srcObject = null
 }
 
-function scanLoop() {
+let scanBusy = false
+async function scanLoop() {
   const video = videoEl.value
   const canvas = canvasEl.value
   if (!video || !canvas || !cameraOn.value) return
   const w = video.videoWidth
   const h = video.videoHeight
-  if (w && h) {
-    // 限制解码分辨率，兼顾移动端性能
-    const maxSide = 720
-    const scale = Math.min(1, maxSide / Math.max(w, h))
-    const dw = Math.max(1, Math.floor(w * scale))
-    const dh = Math.max(1, Math.floor(h * scale))
-    canvas.width = dw
-    canvas.height = dh
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })
-    if (ctx) {
-      ctx.drawImage(video, 0, 0, dw, dh)
-      const img = ctx.getImageData(0, 0, dw, dh)
-      const code = jsQR(img.data, dw, dh, { inversionAttempts: 'attemptBoth' })
-      if (code?.data && applyParsedDraft(code.data)) {
+  if (w && h && !scanBusy) {
+    scanBusy = true
+    try {
+      // Native path on capable browsers
+      const native = await decodeQrNative(video)
+      if (native && applyParsedDraft(native)) {
         stopCamera()
         return
       }
+      const maxSide = 720
+      const scale = Math.min(1, maxSide / Math.max(w, h))
+      const dw = Math.max(1, Math.floor(w * scale))
+      const dh = Math.max(1, Math.floor(h * scale))
+      canvas.width = dw
+      canvas.height = dh
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, dw, dh)
+        // Center crop (scan frame region) for higher hit-rate
+        const crop = 0.55
+        const cw = Math.floor(dw * crop)
+        const ch = Math.floor(dh * crop)
+        const sx = Math.floor((dw - cw) / 2)
+        const sy = Math.floor((dh - ch) / 2)
+        const full = ctx.getImageData(0, 0, dw, dh)
+        let hit = decodeWithJsQR(full.data, dw, dh)
+        if (!hit) {
+          const region = ctx.getImageData(sx, sy, cw, ch)
+          hit = decodeWithJsQR(region.data, cw, ch)
+        }
+        if (hit && applyParsedDraft(hit)) {
+          stopCamera()
+          return
+        }
+      }
+    } finally {
+      scanBusy = false
     }
   }
-  raf = requestAnimationFrame(scanLoop)
+  raf = requestAnimationFrame(() => {
+    void scanLoop()
+  })
 }
 
-function decodeQrFromImage(img: HTMLImageElement | ImageBitmap): string | null {
-  const w = 'naturalWidth' in img ? img.naturalWidth || img.width : img.width
-  const h = 'naturalHeight' in img ? img.naturalHeight || img.height : img.height
-  if (!w || !h) return null
-  const maxSide = 1600
-  const scale = Math.min(1, maxSide / Math.max(w, h))
-  const dw = Math.max(1, Math.floor(w * scale))
-  const dh = Math.max(1, Math.floor(h * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = dw
-  canvas.height = dh
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return null
-  ctx.drawImage(img, 0, 0, dw, dh)
-  const data = ctx.getImageData(0, 0, dw, dh)
-  const code = jsQR(data.data, dw, dh, { inversionAttempts: 'attemptBoth' })
-  return code?.data || null
-}
-
-function onFileQr(ev: Event) {
+async function onFileQr(ev: Event) {
   const input = ev.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
-  const url = URL.createObjectURL(file)
-  const img = new Image()
-  img.onload = () => {
+  try {
+    // createImageBitmap handles more formats / orientations than Image()
+    let source: HTMLImageElement | ImageBitmap | null = null
     try {
-      const raw = decodeQrFromImage(img)
-      if (raw && applyParsedDraft(raw)) return
-      flashMsg(t('twofa.scanFail'), 'danger')
-    } finally {
-      URL.revokeObjectURL(url)
-      input.value = ''
+      source = await createImageBitmap(file)
+    } catch {
+      source = await new Promise<HTMLImageElement | null>((resolve) => {
+        const url = URL.createObjectURL(file)
+        const img = new Image()
+        img.onload = () => {
+          URL.revokeObjectURL(url)
+          resolve(img)
+        }
+        img.onerror = () => {
+          URL.revokeObjectURL(url)
+          resolve(null)
+        }
+        img.src = url
+      })
     }
-  }
-  img.onerror = () => {
-    URL.revokeObjectURL(url)
-    input.value = ''
+    if (!source) {
+      flashMsg(t('twofa.scanFail'), 'danger')
+      return
+    }
+    const raw = await decodeQrFromImage(source)
+    if ('close' in source && typeof source.close === 'function') source.close()
+    if (raw && applyParsedDraft(raw)) return
     flashMsg(t('twofa.scanFail'), 'danger')
+  } catch {
+    flashMsg(t('twofa.scanFail'), 'danger')
+  } finally {
+    input.value = ''
   }
-  img.src = url
 }
 
 function openImagePicker() {
@@ -484,7 +596,7 @@ onUnmounted(() => {
         <input
           ref="fileInputEl"
           type="file"
-          accept="image/*"
+          accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.bmp"
           class="sr-only"
           @change="onFileQr"
         />

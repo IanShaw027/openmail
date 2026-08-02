@@ -210,6 +210,75 @@ export function resolveDomainProfile(email: string): DomainProfile {
   return { brand: 'other', labelKey: 'brand.other', protocol: 'imap' }
 }
 
+/**
+ * Map IMAP / SMTP hostnames → brand (overrides weak email-domain "other").
+ * e.g. imap.gmail.com, outlook.office365.com, imap.qq.com
+ */
+const IMAP_HOST_BRAND: Array<{ test: RegExp; brand: MailBrand; profile?: Partial<DomainProfile> }> = [
+  { test: /(^|\.)gmail\.com$/i, brand: 'gmail' },
+  { test: /(^|\.)googlemail\.com$/i, brand: 'gmail' },
+  { test: /(^|\.)google\.com$/i, brand: 'gmail' },
+  { test: /outlook\.office365\.com$/i, brand: 'microsoft' },
+  { test: /smtp\.office365\.com$/i, brand: 'microsoft' },
+  { test: /office365\.com$/i, brand: 'microsoft' },
+  { test: /(^|\.)outlook\.com$/i, brand: 'microsoft' },
+  { test: /(^|\.)hotmail\.com$/i, brand: 'microsoft' },
+  { test: /qq\.com$/i, brand: 'qq' },
+  { test: /foxmail\.com$/i, brand: 'qq' },
+  { test: /163\.com$/i, brand: 'netease' },
+  { test: /126\.com$/i, brand: 'netease' },
+  { test: /yeah\.net$/i, brand: 'netease' },
+  { test: /mail\.yahoo\./i, brand: 'yahoo' },
+  { test: /yahoo\./i, brand: 'yahoo' },
+  { test: /mail\.me\.com$/i, brand: 'icloud' },
+  { test: /icloud\.com$/i, brand: 'icloud' },
+  { test: /aliyun\.com$/i, brand: 'aliyun' },
+  { test: /mxhichina\.com$/i, brand: 'aliyun' },
+  { test: /qiye\.aliyun/i, brand: 'aliyun' },
+  { test: /(^|\.)mail\.com$/i, brand: 'mailcom' },
+]
+
+export function normalizeMailHost(host?: string | null): string {
+  return String(host || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/:\d+$/, '')
+    .replace(/^\./, '')
+}
+
+/** Resolve brand primarily from IMAP/SMTP server hostname. */
+export function resolveBrandFromHost(host?: string | null): MailBrand | null {
+  const h = normalizeMailHost(host)
+  if (!h) return null
+  for (const row of IMAP_HOST_BRAND) {
+    if (row.test.test(h)) return row.brand
+  }
+  return null
+}
+
+/**
+ * Best brand for an account: IMAP host wins when present, else email domain.
+ */
+export function resolveAccountBrand(opts: {
+  email?: string
+  imapHost?: string | null
+  smtpHost?: string | null
+  type?: string
+  brand?: MailBrand | string | null
+}): MailBrand {
+  const fromHost =
+    resolveBrandFromHost(opts.imapHost) || resolveBrandFromHost(opts.smtpHost)
+  if (fromHost) return fromHost
+  if (opts.type === 'http_api') return 'http_api'
+  if (opts.type === 'cookie') {
+    const d = resolveDomainProfile(opts.email || '')
+    if (d.brand === 'mailcom') return 'mailcom'
+  }
+  if (opts.brand && opts.brand !== 'other') return opts.brand as MailBrand
+  return resolveDomainProfile(opts.email || '').brand
+}
+
 export const BRAND_OPTIONS: MailBrand[] = [
   'microsoft',
   'gmail',

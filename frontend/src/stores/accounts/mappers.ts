@@ -1,5 +1,5 @@
 import type { MailAccount } from '@/types/account'
-import { resolveDomainProfile } from '@/utils/domainBrand'
+import { resolveAccountBrand, resolveDomainProfile } from '@/utils/domainBrand'
 import type { ServerAccountOut } from '@/api/accounts'
 
 export const LOCAL_ACCOUNTS_KEY = 'openmail.accounts.local'
@@ -8,7 +8,15 @@ export function normalizeLocalAccounts(parsed: MailAccount[]): MailAccount[] {
   if (!Array.isArray(parsed)) return []
   return parsed.map((a) => {
     let next = a
-    if (!next.brand) next = { ...next, brand: resolveDomainProfile(a.email).brand }
+    // Always re-resolve so IMAP host brands win over stale "other"
+    const brand = resolveAccountBrand({
+      email: next.email,
+      imapHost: next.imapHost,
+      smtpHost: next.smtpHost,
+      type: next.type,
+      brand: next.brand,
+    })
+    if (next.brand !== brand) next = { ...next, brand }
     if (!next.groupId) next = { ...next, groupId: 'default' }
     if (next.storage !== 'local') next = { ...next, storage: 'local' }
     return next
@@ -29,7 +37,14 @@ export function loadAccountsPlain(): MailAccount[] {
 export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): MailAccount {
   const email = row.email
   const provider = String(row.provider || 'unknown') as MailAccount['type']
-  const brand = prev?.brand || resolveDomainProfile(email).brand
+  const type = provider === 'unknown' ? prev?.type || 'unknown' : provider
+  const brand = resolveAccountBrand({
+    email,
+    imapHost: prev?.imapHost,
+    smtpHost: prev?.smtpHost,
+    type,
+    brand: prev?.brand || resolveDomainProfile(email).brand,
+  })
   let status: MailAccount['status'] = 'unknown'
   if (row.status === 'ok') status = 'ok'
   else if (row.status === 'error' || row.status === 'need_reauth') status = 'error'
@@ -38,7 +53,7 @@ export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): Mai
   return {
     id: prev?.id && prev.storage === 'server' ? prev.id : `srv_${row.id}`,
     email,
-    type: provider === 'unknown' ? prev?.type || 'unknown' : provider,
+    type,
     brand,
     storage: 'server',
     status,
