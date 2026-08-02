@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a functional or security-adjacent bug (not a public exploit dump)
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For **exploitable security issues**, do not file a public issue — see [SECURITY.md](../../SECURITY.md).
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: main @ abc1234 or Docker tag
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: How do you run OpenMail?
+      options:
+        - Docker Compose
+        - Backend + frontend dev
+        - Other
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Redact secrets, tokens, and vault recovery keys.

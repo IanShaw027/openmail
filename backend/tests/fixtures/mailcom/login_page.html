@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head><title>Login - mail.com</title></head>
+<body>
+  <h1>Sign in</h1>
+  <form id="login-form" name="login" method="post" action="/login/submit">
+    <input type="hidden" name="token" value="csrf-abc-123" />
+    <input type="email" name="username" id="username" value="" />
+    <input type="password" name="password" id="password" value="" />
+    <button type="submit" name="loginSubmit" value="1">Log in</button>
+  </form>
+</body>
+</html>

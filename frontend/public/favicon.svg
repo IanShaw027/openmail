@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-label="OpenMail">
+  <rect width="32" height="32" rx="8" fill="#0A0A0A"/>
+  <path
+    fill="#FAFAFA"
+    d="M7 11.5c0-1 .8-1.8 1.8-1.8h14.4c1 0 1.8.8 1.8 1.8v9.2c0 1-.8 1.8-1.8 1.8H8.8c-1 0-1.8-.8-1.8-1.8z"
+  />
+  <path
+    fill="#0A0A0A"
+    d="M7 11.4 16 18.2 25 11.4V10c0-.6-.4-1-1-1H8c-.6 0-1 .4-1 1z"
+  />
+</svg>

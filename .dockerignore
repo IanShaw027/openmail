@@ -1,0 +1,47 @@
+# Git / IDE
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Secrets & local env (never bake into image)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+
+# Python
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.venv
+**/venv
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.db
+backend/openmail.db
+
+# Node
+frontend/node_modules
+frontend/dist
+**/npm-debug.log*
+
+# Docs & tests (not needed at runtime)
+docs
+backend/tests
+**/*.md
+!backend/README.md
+
+# Local data volume content
+data
+
+# Misc
+scripts
+docker-compose*.yml
+Dockerfile

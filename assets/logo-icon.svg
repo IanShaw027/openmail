@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="OpenMail">
+  <!--
+    OpenMail mark — monochrome
+    Black app tile + white envelope body; open flap as a hard geometric V
+    (counterform). Reads as mail + "open" without extra glyphs.
+  -->
+  <rect width="64" height="64" rx="16" fill="#0A0A0A"/>
+
+  <!-- Envelope shell (filled, optically centered) -->
+  <path
+    fill="#FAFAFA"
+    d="
+      M14 23.5
+      c0-1.9 1.5-3.5 3.5-3.5
+      h29
+      c1.9 0 3.5 1.6 3.5 3.5
+      v19
+      c0 1.9-1.6 3.5-3.5 3.5
+      h-29
+      c-1.9 0-3.5-1.6-3.5-3.5
+      z
+    "
+  />
+
+  <!-- Open flap: black V cutting into white body (open mail) -->
+  <path
+    fill="#0A0A0A"
+    d="
+      M14 23.2
+      L32 36.8
+      L50 23.2
+      L50 20
+      c0-1.1-.9-2-2-2
+      H16
+      c-1.1 0-2 .9-2 2
+      z
+    "
+  />
+
+  <!-- Inner fold line: thin white edge on the V for depth -->
+  <path
+    d="M16.5 24.2 32 35.6 47.5 24.2"
+    stroke="#FAFAFA"
+    stroke-width="1.25"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    opacity=".35"
+  />
+</svg>

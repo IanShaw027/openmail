@@ -1,0 +1,46 @@
+# Secrets & runtime
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+data/
+cache/
+storage/
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+.npm
+.pnpm-store/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs
+*.log
+logs/
+backend/.env
+
+# WARP node state (device registration)
+data/warp/
+.debug-mobile/

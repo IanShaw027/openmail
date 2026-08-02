@@ -1,0 +1,137 @@
+# OpenMail core + optional 10x Cloudflare WARP SOCKS nodes
+#
+# Core only:
+#   docker compose up -d --build
+#
+# Core + WARP pool (needs /dev/net/tun):
+#   ./scripts/up-with-warp.sh
+#   # or: docker compose --profile warp up -d --build
+#
+# Docs: docs/16-warp-proxy-pool.md
+
+x-warp-common: &warp-common
+  image: caomingjun/warp:latest
+  restart: unless-stopped
+  profiles: ["warp"]
+  cap_add:
+    - NET_ADMIN
+    - MKNOD
+    - AUDIT_WRITE
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  device_cgroup_rules:
+    - "c 10:200 rwm"
+  sysctls:
+    - net.ipv6.conf.all.disable_ipv6=0
+    - net.ipv4.conf.all.src_valid_mark=1
+  environment:
+    WARP_SLEEP: ${WARP_SLEEP:-5}
+    GOST_ARGS: ${WARP_GOST_ARGS:--L :1080}
+  healthcheck:
+    test:
+      [
+        "CMD-SHELL",
+        "curl -fsS -x socks5h://127.0.0.1:1080 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q warp= || exit 1",
+      ]
+    interval: 60s
+    timeout: 25s
+    retries: 5
+    start_period: 120s
+  networks:
+    - openmail
+
+services:
+  openmail:
+    build: .
+    image: openmail:latest
+    container_name: openmail
+    ports:
+      - "${OPENMAIL_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      OPENMAIL_DATABASE_URL: ${OPENMAIL_DATABASE_URL:-sqlite:////data/openmail.db}
+      # 10 in-stack WARP SOCKS endpoints (Docker DNS names). Override via .env PROXY_POOL.
+      PROXY_POOL: ${PROXY_POOL:-}
+      PROXY_SID_STRATEGY: ${PROXY_SID_STRATEGY:-sticky_per_account}
+      FETCH_CONCURRENCY: ${FETCH_CONCURRENCY:-10}
+      SYNC_CONCURRENCY: ${SYNC_CONCURRENCY:-10}
+      SYNC_ENABLED_GLOBAL: ${SYNC_ENABLED_GLOBAL:-true}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
+      SYNC_FOLDERS: ${SYNC_FOLDERS:-inbox,junk}
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - openmail
+
+  warp-1:
+    <<: *warp-common
+    container_name: openmail-warp-1
+    volumes:
+      - ./data/warp/1:/var/lib/cloudflare-warp
+
+  warp-2:
+    <<: *warp-common
+    container_name: openmail-warp-2
+    volumes:
+      - ./data/warp/2:/var/lib/cloudflare-warp
+
+  warp-3:
+    <<: *warp-common
+    container_name: openmail-warp-3
+    volumes:
+      - ./data/warp/3:/var/lib/cloudflare-warp
+
+  warp-4:
+    <<: *warp-common
+    container_name: openmail-warp-4
+    volumes:
+      - ./data/warp/4:/var/lib/cloudflare-warp
+
+  warp-5:
+    <<: *warp-common
+    container_name: openmail-warp-5
+    volumes:
+      - ./data/warp/5:/var/lib/cloudflare-warp
+
+  warp-6:
+    <<: *warp-common
+    container_name: openmail-warp-6
+    volumes:
+      - ./data/warp/6:/var/lib/cloudflare-warp
+
+  warp-7:
+    <<: *warp-common
+    container_name: openmail-warp-7
+    volumes:
+      - ./data/warp/7:/var/lib/cloudflare-warp
+
+  warp-8:
+    <<: *warp-common
+    container_name: openmail-warp-8
+    volumes:
+      - ./data/warp/8:/var/lib/cloudflare-warp
+
+  warp-9:
+    <<: *warp-common
+    container_name: openmail-warp-9
+    volumes:
+      - ./data/warp/9:/var/lib/cloudflare-warp
+
+  warp-10:
+    <<: *warp-common
+    container_name: openmail-warp-10
+    volumes:
+      - ./data/warp/10:/var/lib/cloudflare-warp
+
+networks:
+  openmail:
+    name: openmail-net
+    driver: bridge

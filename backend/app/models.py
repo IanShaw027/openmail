@@ -1,0 +1,181 @@
+"""SQLAlchemy ORM models for OpenMail (local-first; no user/admin tables)."""
+
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db import Base
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _new_id(prefix: str = "") -> str:
+    uid = uuid.uuid4().hex
+    return f"{prefix}{uid}" if prefix else uid
+
+
+class AccountPool(str, enum.Enum):
+    """Legacy pool labels kept for DB compatibility; app is browser-local."""
+
+    public = "public"
+    user_private = "user_private"
+
+
+class ProviderType(str, enum.Enum):
+    oauth = "oauth"
+    cookie = "cookie"
+    imap = "imap"
+    http_api = "http_api"
+    unknown = "unknown"
+
+
+class AccountStatus(str, enum.Enum):
+    ok = "ok"
+    error = "error"
+    need_reauth = "need_reauth"
+    disabled = "disabled"
+
+
+class Account(Base):
+    """Optional server-side credential row (legacy code-api tokens).
+
+    Primary product path stores credentials only in the browser.
+    """
+
+    __tablename__ = "accounts"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("acc_"))
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    provider: Mapped[ProviderType] = mapped_column(
+        Enum(ProviderType), default=ProviderType.unknown, nullable=False
+    )
+    pool: Mapped[AccountPool] = mapped_column(
+        Enum(AccountPool), default=AccountPool.public, nullable=False, index=True
+    )
+    # No FK to users — column kept nullable for old rows until migrate drops it
+    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tag: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[AccountStatus] = mapped_column(
+        Enum(AccountStatus), default=AccountStatus.ok, nullable=False
+    )
+    last_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    latest_verification_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latest_code_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    proxy: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    session: Mapped[AccountSession | None] = relationship(
+        back_populates="account", uselist=False, cascade="all, delete-orphan"
+    )
+    code_api_token: Mapped[CodeApiToken | None] = relationship(
+        back_populates="account", uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class AccountSession(Base):
+    __tablename__ = "account_sessions"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("acs_"))
+    account_id: Mapped[str] = mapped_column(
+        String(40), ForeignKey("accounts.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    cookies_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    absolute_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    valid: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    account: Mapped[Account] = relationship(back_populates="session")
+
+
+class CodeApiToken(Base):
+    __tablename__ = "code_api_tokens"
+    __table_args__ = (UniqueConstraint("account_id", name="uq_code_api_account"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("cat_"))
+    token: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(
+        String(40), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    default_format: Mapped[str] = mapped_column(String(32), default="json", nullable=False)
+    default_keyword: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    default_regex: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    account: Mapped[Account] = relationship(back_populates="code_api_token")
+
+
+class FetchLockState(Base):
+    __tablename__ = "fetch_lock_state"
+
+    account_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    last_real_fetch_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    in_flight: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class SyncRun(Base):
+    __tablename__ = "sync_runs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("syn_"))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ok_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger: Mapped[str] = mapped_column(String(32), default="scheduled", nullable=False)
