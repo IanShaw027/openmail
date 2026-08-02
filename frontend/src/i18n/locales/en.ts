@@ -148,6 +148,12 @@ export default {
     importPh: 'otpauth://totp/…\nJBSWY3DPEHPK3PXP',
     importResult: 'Imported {ok} · failed {fail}',
     exported: 'Exported',
+    filterAll: 'All',
+    filterEmpty: 'No matching entries',
+    filterEmptyDesc: 'Try another service filter or clear the search.',
+    dragHint: 'Drag cards to reorder — order is saved with the vault',
+    dragHandle: 'Drag to reorder',
+    secondsLeft: '{n}s left',
   },
   transfer: {
     title: 'Device QR sync',

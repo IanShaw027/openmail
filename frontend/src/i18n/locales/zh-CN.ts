@@ -145,6 +145,12 @@ export default {
     importPh: 'otpauth://totp/…\nJBSWY3DPEHPK3PXP',
     importResult: '导入成功 {ok} · 失败 {fail}',
     exported: '已导出',
+    filterAll: '全部',
+    filterEmpty: '没有匹配的条目',
+    filterEmptyDesc: '换个服务类型或清空搜索试试。',
+    dragHint: '拖动卡片可调整顺序，顺序会随保险库自动保存',
+    dragHandle: '拖动排序',
+    secondsLeft: '剩余 {n} 秒',
   },
   transfer: {
     title: '设备扫码同步',

@@ -26,6 +26,8 @@ const twofa = useTwoFaStore()
 const { flashMsg } = useToast()
 
 const q = ref('')
+/** Service logo id filter; `all` = no filter */
+const serviceFilter = ref<string>('all')
 const showForm = ref(false)
 const editingId = ref<string | null>(null)
 const importText = ref('')
@@ -36,6 +38,9 @@ const canvasEl = ref<HTMLCanvasElement | null>(null)
 const fileInputEl = ref<HTMLInputElement | null>(null)
 /** 手机 / 平板：优先相机直扫；桌面：优先上传图片 */
 const isMobile = ref(false)
+/** Drag-reorder state */
+const dragId = ref<string | null>(null)
+const dropTargetId = ref<string | null>(null)
 let stream: MediaStream | null = null
 let raf = 0
 let mediaQuery: MediaQueryList | null = null
@@ -71,17 +76,49 @@ const form = ref({
   counter: 0,
 })
 
+function serviceKey(e: TwoFaEntry): string {
+  return normalizeServiceLogoId(e.logo || e.issuer)
+}
+
+/** Chips: only services that appear in the vault (plus All). */
+const serviceFilterChips = computed(() => {
+  const counts = new Map<string, number>()
+  for (const e of twofa.entries) {
+    const k = serviceKey(e)
+    counts.set(k, (counts.get(k) || 0) + 1)
+  }
+  const chips: Array<{ id: string; name: string; count: number }> = [
+    { id: 'all', name: t('twofa.filterAll'), count: twofa.entries.length },
+  ]
+  const presetName = (id: string) =>
+    SERVICE_PRESETS.find((p) => p.id === id)?.name || id
+  const ids = [...counts.keys()].sort((a, b) => {
+    if (a === 'other') return 1
+    if (b === 'other') return -1
+    return presetName(a).localeCompare(presetName(b))
+  })
+  for (const id of ids) {
+    chips.push({ id, name: presetName(id), count: counts.get(id) || 0 })
+  }
+  return chips
+})
+
 const filtered = computed(() => {
   const s = q.value.trim().toLowerCase()
-  if (!s) return twofa.sorted
-  return twofa.sorted.filter((e) =>
-    [e.issuer, e.label, e.accountEmail, e.secret]
+  const brand = serviceFilter.value
+  return twofa.sorted.filter((e) => {
+    if (brand !== 'all' && serviceKey(e) !== brand) return false
+    if (!s) return true
+    return [e.issuer, e.label, e.accountEmail, e.secret]
       .filter(Boolean)
       .join(' ')
       .toLowerCase()
-      .includes(s),
-  )
+      .includes(s)
+  })
 })
+
+/** Drag when not text-searching (service filter still allows reorder within view). */
+const canReorder = computed(() => !q.value.trim() && filtered.value.length > 1)
 
 const serviceOptions = computed<UiSelectOption[]>(() =>
   SERVICE_PRESETS.map((p) => ({ value: p.id, label: p.name })),
@@ -581,7 +618,65 @@ function displayName(e: TwoFaEntry) {
 }
 
 function serviceLogoKey(e: TwoFaEntry): string {
-  return normalizeServiceLogoId(e.logo || e.issuer)
+  return serviceKey(e)
+}
+
+function remainPct(e: TwoFaEntry): number {
+  if (e.type === 'hotp' || !e.period) return 0
+  const r = twofa.remainingFor(e)
+  return Math.max(0, Math.min(100, (r / e.period) * 100))
+}
+
+function remainUrgent(e: TwoFaEntry): boolean {
+  return e.type !== 'hotp' && twofa.remainingFor(e) <= 5
+}
+
+function remainWarn(e: TwoFaEntry): boolean {
+  return e.type !== 'hotp' && twofa.remainingFor(e) <= 10 && !remainUrgent(e)
+}
+
+/* ── Drag & drop reorder (handle-only, HTML5, no deps) ────────── */
+
+function onHandleDragStart(e: DragEvent, entry: TwoFaEntry) {
+  if (!canReorder.value) {
+    e.preventDefault()
+    return
+  }
+  dragId.value = entry.id
+  dropTargetId.value = null
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', entry.id)
+    // Use card as drag image when possible
+    const card = (e.currentTarget as HTMLElement).closest('.entry') as HTMLElement | null
+    if (card) e.dataTransfer.setDragImage(card, 24, 24)
+  }
+}
+
+function onDragOver(e: DragEvent, entry: TwoFaEntry) {
+  if (!canReorder.value || !dragId.value || dragId.value === entry.id) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  dropTargetId.value = entry.id
+}
+
+function onDragLeave(entry: TwoFaEntry) {
+  if (dropTargetId.value === entry.id) dropTargetId.value = null
+}
+
+function onDrop(e: DragEvent, entry: TwoFaEntry) {
+  e.preventDefault()
+  const from = dragId.value || e.dataTransfer?.getData('text/plain')
+  dragId.value = null
+  dropTargetId.value = null
+  if (!from || from === entry.id || !canReorder.value) return
+  const viewIds = filtered.value.map((x) => x.id)
+  twofa.reorder(from, entry.id, viewIds)
+}
+
+function onDragEnd() {
+  dragId.value = null
+  dropTargetId.value = null
 }
 
 onMounted(() => {
@@ -636,6 +731,25 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- Service type filter chips -->
+    <div v-if="serviceFilterChips.length > 1" class="svc-filter card-solid">
+      <button
+        v-for="c in serviceFilterChips"
+        :key="c.id"
+        type="button"
+        class="svc-chip"
+        :class="{ active: serviceFilter === c.id }"
+        @click="serviceFilter = c.id"
+      >
+        <TwoFaServiceMark v-if="c.id !== 'all'" :logo="c.id" :size="18" />
+        <span class="svc-chip-label">{{ c.name }}</span>
+        <span class="svc-chip-count">{{ c.count }}</span>
+      </button>
+    </div>
+    <p v-if="canReorder && filtered.length > 1" class="reorder-hint muted">
+      {{ t('twofa.dragHint') }}
+    </p>
+
     <!-- Camera panel sits above modal so form-triggered scan still works -->
     <div
       v-if="cameraOn"
@@ -656,13 +770,43 @@ onUnmounted(() => {
     </div>
 
     <div v-if="!filtered.length" class="empty card-solid">
-      <div class="empty-title">{{ t('twofa.emptyTitle') }}</div>
-      <div class="empty-desc">{{ t('twofa.emptyDesc') }}</div>
+      <div class="empty-title">
+        {{ twofa.entries.length ? t('twofa.filterEmpty') : t('twofa.emptyTitle') }}
+      </div>
+      <div class="empty-desc">
+        {{ twofa.entries.length ? t('twofa.filterEmptyDesc') : t('twofa.emptyDesc') }}
+      </div>
     </div>
 
     <div v-else class="grid">
-      <article v-for="e in filtered" :key="e.id" class="card-solid entry">
+      <article
+        v-for="e in filtered"
+        :key="e.id"
+        class="card-solid entry"
+        :class="{
+          'is-dragging': dragId === e.id,
+          'is-drop-target': dropTargetId === e.id && dragId !== e.id,
+          'can-drag': canReorder,
+        }"
+        @dragover="onDragOver($event, e)"
+        @dragleave="onDragLeave(e)"
+        @drop="onDrop($event, e)"
+        @dragend="onDragEnd"
+      >
         <div class="entry-top">
+          <span
+            v-if="canReorder"
+            class="drag-handle"
+            draggable="true"
+            :title="t('twofa.dragHandle')"
+            role="button"
+            tabindex="0"
+            aria-label="Reorder"
+            @dragstart="onHandleDragStart($event, e)"
+            @dragend="onDragEnd"
+          >
+            ⋮⋮
+          </span>
           <TwoFaServiceMark :logo="serviceLogoKey(e)" :issuer="e.issuer" :size="40" />
           <div class="meta">
             <div class="name">{{ displayName(e) }}</div>
@@ -681,10 +825,31 @@ onUnmounted(() => {
           </div>
         </div>
         <button type="button" class="code-row" @click="copyCode(e)">
-          <span class="code">{{ twofa.codeFor(e) }}</span>
-          <span v-if="e.type !== 'hotp'" class="remain">
-            <span class="bar" :style="{ width: `${(twofa.remainingFor(e) / e.period) * 100}%` }" />
-            <span class="sec">{{ twofa.remainingFor(e) }}s</span>
+          <span
+            class="code"
+            :class="{ urgent: remainUrgent(e), warn: remainWarn(e) }"
+          >{{ twofa.codeFor(e) }}</span>
+          <!-- Circular countdown ring (clearer than thin bar) -->
+          <span
+            v-if="e.type !== 'hotp'"
+            class="timer-ring"
+            :class="{ urgent: remainUrgent(e), warn: remainWarn(e) }"
+            :title="t('twofa.secondsLeft', { n: twofa.remainingFor(e) })"
+            aria-hidden="true"
+          >
+            <svg class="timer-svg" viewBox="0 0 36 36">
+              <circle class="timer-track" cx="18" cy="18" r="15.5" />
+              <circle
+                class="timer-progress"
+                cx="18"
+                cy="18"
+                r="15.5"
+                :style="{
+                  strokeDasharray: `${(remainPct(e) / 100) * 97.4} 97.4`,
+                }"
+              />
+            </svg>
+            <span class="timer-sec">{{ twofa.remainingFor(e) }}</span>
           </span>
         </button>
       </article>
@@ -905,16 +1070,105 @@ onUnmounted(() => {
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 12px;
 }
+.svc-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+  align-items: center;
+}
+.svc-chip {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--panel, #fff);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 10px 4px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+  line-height: 1.2;
+}
+.svc-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+}
+.svc-chip.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.svc-chip-label {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.svc-chip-count {
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+  min-width: 1.2em;
+  text-align: center;
+}
+.reorder-hint {
+  margin: -4px 4px 0;
+  font-size: 11px;
+}
 .entry {
   padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  transition:
+    box-shadow 0.15s ease,
+    opacity 0.15s ease,
+    transform 0.12s ease;
+  touch-action: pan-y;
+}
+.entry.is-dragging {
+  opacity: 0.45;
+  transform: scale(0.98);
+}
+.entry.is-drop-target {
+  box-shadow: 0 0 0 2px var(--accent);
 }
 .entry-top {
   display: flex;
   gap: 10px;
   align-items: flex-start;
+}
+.drag-handle {
+  flex-shrink: 0;
+  width: 18px;
+  margin-top: 8px;
+  padding: 4px 0;
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: -2px;
+  line-height: 1;
+  user-select: none;
+  opacity: 0.5;
+  cursor: grab;
+  touch-action: none;
+  text-align: center;
+  border-radius: 4px;
+}
+.drag-handle:hover {
+  opacity: 1;
+  background: var(--panel-soft);
+}
+.drag-handle:active {
+  cursor: grabbing;
 }
 .meta {
   flex: 1;
@@ -944,7 +1198,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   cursor: pointer;
   width: 100%;
   text-align: left;
@@ -959,27 +1213,57 @@ onUnmounted(() => {
   letter-spacing: 0.12em;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+  transition: color 0.15s ease;
 }
-.remain {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-  min-width: 48px;
+.code.warn {
+  color: #d97706;
 }
-.bar {
-  height: 4px;
-  border-radius: 4px;
-  background: var(--accent);
-  transition: width 0.2s linear;
-  min-width: 4px;
-  max-width: 48px;
-  align-self: stretch;
+.code.urgent {
+  color: var(--danger, #e11d48);
 }
-.sec {
-  font-size: 11px;
-  color: var(--muted);
+/* Circular remaining-time ring */
+.timer-ring {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  --ring: var(--accent);
+}
+.timer-ring.warn {
+  --ring: #d97706;
+}
+.timer-ring.urgent {
+  --ring: var(--danger, #e11d48);
+}
+.timer-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.timer-track {
+  fill: none;
+  stroke: color-mix(in srgb, var(--ring) 18%, transparent);
+  stroke-width: 3.2;
+}
+.timer-progress {
+  fill: none;
+  stroke: var(--ring);
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.9s linear;
+}
+.timer-sec {
+  position: relative;
+  z-index: 1;
+  font-size: 12px;
+  font-weight: 750;
   font-variant-numeric: tabular-nums;
+  color: var(--ring);
+  line-height: 1;
 }
 .field-row {
   display: grid;

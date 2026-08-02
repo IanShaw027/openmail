@@ -36,6 +36,8 @@ export interface TwoFaEntry {
   accountId?: string
   /** Bound mailbox email (for display / search) */
   accountEmail?: string
+  /** Manual sort position (lower = earlier). Persisted with vault. */
+  sortOrder: number
   createdAt: number
   updatedAt: number
 }
@@ -70,9 +72,24 @@ function draftToEntry(d: TotpEntryDraft, partial?: Partial<TwoFaEntry>): TwoFaEn
     logo: partial?.logo,
     accountId: partial?.accountId,
     accountEmail: partial?.accountEmail,
+    sortOrder: typeof partial?.sortOrder === 'number' ? partial.sortOrder : now,
     createdAt: partial?.createdAt || now,
     updatedAt: now,
   }
+}
+
+/** Ensure every entry has a stable sortOrder (legacy vault rows may omit it). */
+function normalizeEntries(list: TwoFaEntry[]): TwoFaEntry[] {
+  const withOrder = list.map((e, i) => {
+    const so = (e as TwoFaEntry & { sortOrder?: number }).sortOrder
+    if (typeof so === 'number' && Number.isFinite(so)) return e as TwoFaEntry
+    // Prefer createdAt then index so old issuer-sorted feel is not random
+    return {
+      ...e,
+      sortOrder: typeof e.createdAt === 'number' ? e.createdAt + i : i,
+    }
+  })
+  return withOrder
 }
 
 export const useTwoFaStore = defineStore('twofa', () => {
@@ -123,9 +140,9 @@ export const useTwoFaStore = defineStore('twofa', () => {
       }
       const raw = await vault.loadTwoFa()
       if (Array.isArray(raw) && raw.length) {
-        entries.value = raw as TwoFaEntry[]
+        entries.value = normalizeEntries(raw as TwoFaEntry[])
       } else {
-        const legacy = load()
+        const legacy = normalizeEntries(load())
         entries.value = legacy
         if (legacy.length) await vault.saveTwoFa(legacy)
         try {
@@ -165,16 +182,82 @@ export const useTwoFaStore = defineStore('twofa', () => {
 
   const sorted = computed(() =>
     [...entries.value].sort((a, b) => {
+      const oa = a.sortOrder ?? a.createdAt ?? 0
+      const ob = b.sortOrder ?? b.createdAt ?? 0
+      if (oa !== ob) return oa - ob
       const ia = (a.issuer || a.label).toLowerCase()
       const ib = (b.issuer || b.label).toLowerCase()
       return ia.localeCompare(ib)
     }),
   )
 
+  function nextSortOrder(): number {
+    let max = 0
+    for (const e of entries.value) {
+      const o = e.sortOrder ?? e.createdAt ?? 0
+      if (o > max) max = o
+    }
+    return max + 1
+  }
+
   function addFromDraft(d: TotpEntryDraft, extra?: Partial<TwoFaEntry>): TwoFaEntry {
-    const entry = draftToEntry(d, extra)
+    const entry = draftToEntry(d, {
+      ...extra,
+      sortOrder: extra?.sortOrder ?? nextSortOrder(),
+    })
     entries.value = [...entries.value, entry]
     return entry
+  }
+
+  /**
+   * Reorder within the current view: move `fromId` to `toId`'s slot among `viewIds`.
+   * Non-view entries keep their relative positions. Persists via entries watch → vault.
+   */
+  function reorder(fromId: string, toId: string, viewIds?: string[]) {
+    if (fromId === toId) return
+    const full = sorted.value.map((e) => e.id)
+    const view =
+      viewIds && viewIds.length
+        ? viewIds.filter((id) => full.includes(id))
+        : full
+    const from = view.indexOf(fromId)
+    const to = view.indexOf(toId)
+    if (from < 0 || to < 0) return
+    const nextView = [...view]
+    const [item] = nextView.splice(from, 1)
+    if (!item) return
+    nextView.splice(to, 0, item)
+
+    // Merge: walk full order; when hitting a view id, take next from nextView
+    let vi = 0
+    const merged: string[] = []
+    const viewSet = new Set(view)
+    for (const id of full) {
+      if (viewSet.has(id)) {
+        const nid = nextView[vi++]
+        if (nid) merged.push(nid)
+      } else {
+        merged.push(id)
+      }
+    }
+    while (vi < nextView.length) {
+      const nid = nextView[vi++]
+      if (nid) merged.push(nid)
+    }
+
+    const map = new Map(entries.value.map((e) => [e.id, e]))
+    const now = Date.now()
+    entries.value = merged
+      .map((id, i) => {
+        const e = map.get(id)
+        if (!e) return null
+        return {
+          ...e,
+          sortOrder: i,
+          updatedAt: e.id === fromId ? now : e.updatedAt,
+        }
+      })
+      .filter(Boolean) as TwoFaEntry[]
   }
 
   function addFromUri(uri: string, extra?: Partial<TwoFaEntry>): TwoFaEntry | null {
@@ -251,7 +334,7 @@ export const useTwoFaStore = defineStore('twofa', () => {
   }
 
   function exportText(): string {
-    return entries.value.map((e) => buildOtpauthUri(e)).join('\n')
+    return sorted.value.map((e) => buildOtpauthUri(e)).join('\n')
   }
 
   function exportJson(): string {
@@ -259,7 +342,7 @@ export const useTwoFaStore = defineStore('twofa', () => {
       {
         v: 1,
         exportedAt: Date.now(),
-        entries: entries.value.map((e) => ({
+        entries: sorted.value.map((e) => ({
           issuer: e.issuer,
           label: e.label,
           secret: e.secret,
@@ -270,6 +353,7 @@ export const useTwoFaStore = defineStore('twofa', () => {
           counter: e.counter,
           logo: e.logo,
           accountEmail: e.accountEmail,
+          sortOrder: e.sortOrder,
           uri: buildOtpauthUri(e),
         })),
       },
@@ -279,7 +363,7 @@ export const useTwoFaStore = defineStore('twofa', () => {
   }
 
   function replaceAll(list: TwoFaEntry[]) {
-    entries.value = list
+    entries.value = normalizeEntries(list)
   }
 
   return {
@@ -294,6 +378,7 @@ export const useTwoFaStore = defineStore('twofa', () => {
     importText,
     update,
     remove,
+    reorder,
     bindAccount,
     unbindAccount,
     findByAccountId,
