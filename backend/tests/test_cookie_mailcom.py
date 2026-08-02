@@ -14,7 +14,9 @@ from app.providers.cookie_mailcom import (
     MailcomCookieProvider,
     extract_ott,
     html_indicates_bad_credentials,
+    is_mailcom_login_failed_url,
     is_transient_login_error,
+    normalize_mailcom_success_url,
     parse_forms,
     parse_message_detail_html,
     parse_message_list_html,
@@ -47,9 +49,25 @@ def test_bad_credentials_not_false_positive_on_marketing() -> None:
 def test_transient_login_error() -> None:
     assert is_transient_login_error("mail.com login parse failed") is True
     assert is_transient_login_error("登录页请求失败: timeout") is True
-    # May be false positive under flaky SSO — outer loop retries
-    assert is_transient_login_error("账号或密码错误") is True
+    # Wrong password must not be rewritten as "login unstable"
+    assert is_transient_login_error("账号或密码错误") is False
     assert is_transient_login_error("mail.com 访问过于频繁或需要验证码，请稍后重试") is True
+
+
+def test_logout_ls_wd_is_bad_password() -> None:
+    assert is_mailcom_login_failed_url("https://www.mail.com/logout/?ls=wd") is True
+    assert is_mailcom_login_failed_url("https://www.mail.com/logout/?ls=te") is True
+    assert is_mailcom_login_failed_url("https://navigator-lxa.mail.com/login?ott=abc") is False
+    assert html_indicates_bad_credentials("ok", "https://www.mail.com/logout/?ls=wd") is True
+
+
+def test_normalize_success_url() -> None:
+    assert "navigator-lxa" in normalize_mailcom_success_url(
+        "https://$(clientName)-$(dataCenter).mail.com/login"
+    )
+    assert normalize_mailcom_success_url("https://navigator-bs.mail.com/login").endswith(
+        "navigator-bs.mail.com/login"
+    )
 
 
 def test_extract_ott_strips_url_fragment() -> None:
@@ -201,6 +219,39 @@ def test_full_login_posts_form() -> None:
     assert posted.get("username") == "user@mail.com"
     assert posted.get("password") == "secret"
     assert posted.get("token") == "csrf-abc-123"
+
+
+def test_full_login_path_a_logout_wd_is_bad_password() -> None:
+    """Live SSO: wrong password → 303 https://www.mail.com/logout/?ls=wd"""
+    provider = MailcomCookieProvider()
+    home = (
+        '<html><body><form method="post" action="https://login.mail.com/login">'
+        '<input type="hidden" name="successURL" value="https://$(clientName)-$(dataCenter).mail.com/login"/>'
+        '<input type="text" name="username"/>'
+        '<input type="password" name="password"/>'
+        "</form></body></html>"
+    )
+
+    class _SsoClient(_FakeClient):
+        def get(self, url: str, **kwargs: Any) -> _FakeResp:
+            if "www.mail.com" in url or url.rstrip("/").endswith("mail.com"):
+                return _FakeResp(home, url="https://www.mail.com/")
+            return super().get(url, **kwargs)
+
+        def post(self, url: str, **kwargs: Any) -> _FakeResp:
+            self.posts.append({"url": url, "data": kwargs.get("data") or {}})
+            return _FakeResp(
+                "<html>logout</html>",
+                url="https://www.mail.com/logout/?ls=wd",
+            )
+
+    client = _SsoClient({})
+    ok, err, _ = provider.full_login(client, "vita@mail.com", "wrong", site="mail.com")
+    assert ok is False
+    assert err == "账号或密码错误"
+    assert client.posts
+    # successURL placeholders expanded
+    assert "navigator-lxa" in str(client.posts[0]["data"].get("successURL", ""))
 
 
 def test_full_login_parse_failed() -> None:

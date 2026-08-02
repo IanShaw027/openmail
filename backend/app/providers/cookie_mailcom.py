@@ -337,6 +337,46 @@ def extract_ott(url: str, page_html: str) -> str:
     return match.group(1).split("#", 1)[0]
 
 
+def is_mailcom_login_failed_url(url: str | None) -> bool:
+    """United Internet SSO redirects bad password to www.mail.com/logout/?ls=wd|te.
+
+    Observed live (2026-08): wrong password → 303 Location:
+    ``https://www.mail.com/logout/?ls=wd`` (wrong data) / ``ls=te`` (technical error).
+    Without this check, Path A falls through to parse-failed / "unstable login".
+    """
+    if not url:
+        return False
+    u = url.lower()
+    if "logout" not in u:
+        return False
+    # ls=wd wrong credentials; ls=te technical/login error treated as credential fail
+    if re.search(r"[?&]ls=(wd|te)\b", u):
+        return True
+    if "/logout" in u and "mail.com" in u:
+        # bare logout after login POST is almost always failed auth
+        return True
+    return False
+
+
+def normalize_mailcom_success_url(raw: str | None) -> str:
+    """Replace JS-only placeholders in homepage successURL.
+
+    Live homepage form ships:
+      successURL=https://$(clientName)-$(dataCenter).mail.com/login
+    Browser JS substitutes clientName/dataCenter; server-side fetch must expand them.
+    Defaults match US mail.com lightmailer / navigator cluster (lxa).
+    """
+    s = (raw or "").strip()
+    if not s:
+        return "https://navigator-lxa.mail.com/login"
+    s = s.replace("$(clientName)", "navigator").replace("$(dataCenter)", "lxa")
+    s = s.replace("${clientName}", "navigator").replace("${dataCenter}", "lxa")
+    # If still broken template, force known good host
+    if "$(" in s or "${" in s:
+        return "https://navigator-lxa.mail.com/login"
+    return s
+
+
 def extract_wicket_redirect(xml_text: str) -> str:
     match = re.search(r"<redirect><!\[CDATA\[(.*?)\]\]></redirect>", xml_text or "")
     if not match:
@@ -365,8 +405,10 @@ _RATE_LIMIT_RE = re.compile(
 )
 
 
-def html_indicates_bad_credentials(html: str | None) -> bool:
+def html_indicates_bad_credentials(html: str | None, url: str | None = None) -> bool:
     """True only when the page clearly reports bad password/login — not marketing copy."""
+    if is_mailcom_login_failed_url(url):
+        return True
     if not html:
         return False
     if html_indicates_rate_limit(html):
@@ -381,11 +423,14 @@ def html_indicates_rate_limit(html: str | None) -> bool:
 
 
 def is_transient_login_error(err: str | None) -> bool:
-    """Errors that often succeed on retry (parse/network/ott/rate-limit)."""
+    """Errors that often succeed on retry (parse/network/ott/rate-limit).
+
+    Clear wrong-password is NOT transient — do not rewrite to "login unstable".
+    """
     if not err:
         return True
-    # "账号或密码错误" may still be a false positive under flaky SSO — treat as retryable
-    # when we have multi-attempt outer loop; final message is decided by caller.
+    if err == "账号或密码错误" or "密码错误" in err:
+        return False
     low = err.lower()
     markers = (
         "parse failed",
@@ -403,7 +448,6 @@ def is_transient_login_error(err: str | None) -> bool:
         "稍后",
         "captcha",
         "rate",
-        "账号或密码错误",
     )
     return any(m in low or m in err for m in markers)
 
@@ -812,8 +856,20 @@ class MailcomCookieProvider:
                         last_errors.append(login_error)
                 if not ok:
                     final_err = login_error or "mail.com 登录失败"
-                    if final_err == "账号或密码错误" and any(
-                        is_transient_login_error(e) for e in last_errors
+                    # Only soften when we saw real transient failures *and* never a
+                    # clear wrong-password. Previously "账号或密码错误" was treated as
+                    # transient and rewritten to "登录不稳定", hiding the real issue.
+                    if final_err == "账号或密码错误":
+                        pass  # keep clear credential error
+                    elif final_err in (
+                        "mail.com login parse failed",
+                        "mail.com 登录失败",
+                    ) or (
+                        final_err
+                        and any(
+                            x in final_err
+                            for x in ("ott", "parse", "未返回", "页面")
+                        )
                     ):
                         final_err = (
                             "mail.com 登录不稳定（会话/页面解析失败），请稍后重试；"
@@ -979,6 +1035,11 @@ class MailcomCookieProvider:
                 raise RuntimeError("home form missing password")
             fields["username"] = email_addr
             fields["password"] = password
+            # Homepage ships successURL with $(clientName)-$(dataCenter) — expand for non-JS
+            if "successURL" in fields or "successurl" in {k.lower() for k in fields}:
+                for sk in list(fields.keys()):
+                    if sk.lower() == "successurl":
+                        fields[sk] = normalize_mailcom_success_url(fields.get(sk))
             # also fill common aliases present in form
             for k in list(fields.keys()):
                 lk = k.lower()
@@ -996,19 +1057,46 @@ class MailcomCookieProvider:
                     "Referer": str(getattr(home, "url", MAIL_HOME_URL)),
                     "Origin": "https://www.mail.com",
                     "Content-Type": "application/x-www-form-urlencoded",
+                    "Upgrade-Insecure-Requests": "1",
                 },
             )
             login_url = str(getattr(login, "url", post_url)).split("#", 1)[0]
             login_html = _resp_text(login)
+
+            # Wrong password: SSO always lands on logout/?ls=wd (do not call this "parse failed")
+            if is_mailcom_login_failed_url(login_url) or html_indicates_bad_credentials(
+                login_html, login_url
+            ):
+                return False, "账号或密码错误", None
 
             if "FolderListPage" in login_html or session_looks_valid(login_html):
                 return True, None, {"folder_url": login_url, "last_probe": "login_ok"}
 
             try:
                 ott = extract_ott(login_url, login_html)
-                light = client.get(LIGHT_START_URL.format(ott=ott))
-                light_url = str(getattr(light, "url", LIGHT_START_URL))
+                # Prefer ott start URL from redirect host when available
+                light_start = LIGHT_START_URL.format(ott=ott)
+                if "mail.com" in login_url and "logout" not in login_url.lower():
+                    # navigator-lxa.mail.com/login?ott=… already session-bearing
+                    try:
+                        nav = client.get(login_url)
+                        nav_html = _resp_text(nav)
+                        nav_url = str(getattr(nav, "url", login_url))
+                        if "FolderListPage" in nav_html or session_looks_valid(nav_html):
+                            return True, None, {
+                                "folder_url": nav_url,
+                                "last_probe": "login_nav_ok",
+                            }
+                        if "ott=" in nav_url.lower():
+                            ott = extract_ott(nav_url, nav_html)
+                            light_start = LIGHT_START_URL.format(ott=ott)
+                    except Exception:
+                        pass
+                light = client.get(light_start)
+                light_url = str(getattr(light, "url", light_start))
                 light_html = _resp_text(light)
+                if is_mailcom_login_failed_url(light_url):
+                    return False, "账号或密码错误", None
                 ajax_headers = {
                     "Wicket-Ajax": "true",
                     "Wicket-Ajax-BaseURL": "start?0&device=desktop",
@@ -1039,16 +1127,19 @@ class MailcomCookieProvider:
                             "last_probe": "login_light_ok",
                         }
             except Exception:
-                # no ott — fall through to path B using cookies from login response
+                # no ott — try restore from cookies set by login POST, else Path B
                 ok, meta = self.try_restore(
                     client, dump_client_cookies(client), site=site, meta=None
                 )
                 if ok:
                     return True, None, meta
+                if is_mailcom_login_failed_url(login_url) or html_indicates_bad_credentials(
+                    login_html, login_url
+                ):
+                    return False, "账号或密码错误", None
                 if html_indicates_rate_limit(login_html):
-                    # Do not hard-fail — Path B / outer retry may still succeed
-                    pass
-                # Never hard-return "bad password" from Path A alone: fall through to Path B
+                    return False, "mail.com 访问过于频繁或需要验证码，请稍后重试", None
+                # Fall through to Path B (fixtures / alternate portals)
         except Exception:
             pass
 
@@ -1123,7 +1214,8 @@ class MailcomCookieProvider:
                 saw_rate_limit = True
                 last_err = "mail.com 访问过于频繁或需要验证码，请稍后重试"
                 continue
-            if html_indicates_bad_credentials(post_html):
+            post_url_final = str(getattr(post_resp, "url", post_url))
+            if html_indicates_bad_credentials(post_html, post_url_final):
                 # Keep trying other login URLs; only hard-fail after all exhausted
                 saw_clear_bad_password = True
                 last_err = "账号或密码错误"
