@@ -1,13 +1,22 @@
 # OpenMail core + optional 10x Cloudflare WARP SOCKS nodes
 #
-# Core only:
+# Pull published image (recommended):
+#   docker compose pull && docker compose up -d
+#
+# Build locally instead:
 #   docker compose up -d --build
+#   # or: OPENMAIL_IMAGE=openmail:local docker compose up -d --build
 #
 # Core + WARP pool (needs /dev/net/tun):
 #   ./scripts/up-with-warp.sh
-#   # or: docker compose --profile warp up -d --build
+#   # or: docker compose --profile warp up -d
 #
-# Docs: docs/16-warp-proxy-pool.md
+# Images:
+#   Docker Hub:  ianshaw027/openmail:v0.1.0 | :latest
+#   GHCR:        ghcr.io/ianshaw027/openmail:v0.1.0 (when published by CI)
+#   Override:    OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0
+#
+# Docs: docs/14-ops-and-smoke.md · docs/16-warp-proxy-pool.md
 
 x-warp-common: &warp-common
   image: caomingjun/warp:latest
@@ -42,8 +51,10 @@ x-warp-common: &warp-common
 
 services:
   openmail:
+    # Default: pull from Docker Hub. `docker compose build` still works (build: .).
+    image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.1.0}
     build: .
-    image: openmail:latest
+    pull_policy: ${OPENMAIL_PULL_POLICY:-missing}
     container_name: openmail
     ports:
       - "${OPENMAIL_PORT:-8000}:8000"

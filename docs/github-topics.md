@@ -48,3 +48,24 @@ Upload a 1280×640 PNG of the console (dark UI) under **Settings → General →
 ## README badges
 
 CI badge needs Actions enabled on the default branch after first push of `.github/workflows/ci.yml`.
+
+## Packages / Docker
+
+| Registry | Image |
+|----------|--------|
+| Docker Hub | https://hub.docker.com/r/ianshaw027/openmail |
+| GHCR | `ghcr.io/ianshaw027/openmail` (CI push) |
+
+### Docker Hub CI secret
+
+Repo → **Settings → Secrets and variables → Actions**:
+
+| Secret | Purpose |
+|--------|---------|
+| `DOCKERHUB_TOKEN` | Access token with write (or `DOCKERHUB_USERNAME` + token) |
+
+Without `DOCKERHUB_TOKEN`, the docker workflow still builds and can push to **GHCR** via `GITHUB_TOKEN`.
+
+### Make GHCR package public
+
+GitHub → profile/org → **Packages** → `openmail` → **Package settings** → Change visibility → Public.

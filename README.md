@@ -8,9 +8,10 @@
 
 [![CI](https://github.com/IanShaw027/openmail/actions/workflows/ci.yml/badge.svg)](https://github.com/IanShaw027/openmail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docker Pulls](https://img.shields.io/docker/pulls/ianshaw027/openmail)](https://hub.docker.com/r/ianshaw027/openmail)
+[![Docker Image](https://img.shields.io/docker/v/ianshaw027/openmail?sort=semver&label=docker%20hub)](https://hub.docker.com/r/ianshaw027/openmail)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB.svg)](backend/pyproject.toml)
 [![Vue 3](https://img.shields.io/badge/vue-3-42b883.svg)](frontend/package.json)
-[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](Dockerfile)
 [![Release](https://img.shields.io/github/v/release/IanShaw027/openmail?include_prereleases)](https://github.com/IanShaw027/openmail/releases)
 
 English · [中文](README_CN.md)
@@ -72,18 +73,43 @@ See [SECURITY.md](SECURITY.md) and [docs/legal/](docs/legal/).
 
 ## Quick start (Docker)
 
+**Pull published image** (recommended — [Docker Hub](https://hub.docker.com/r/ianshaw027/openmail)):
+
 ```bash
 git clone https://github.com/IanShaw027/openmail.git
 cd openmail
 cp .env.example .env
 ./scripts/gen-master-key.sh    # paste into OPENMAIL_MASTER_KEY
 
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 # UI + API: http://127.0.0.1:8000
 curl -s http://127.0.0.1:8000/api/health
 ```
 
-Or: `./scripts/install.sh` (copies `.env`, generates master key if missing, builds & starts compose).
+One-liner without cloning compose files:
+
+```bash
+docker run -d --name openmail -p 8000:8000 \
+  -e OPENMAIL_MASTER_KEY="$(openssl rand -base64 32)" \
+  -v openmail-data:/data \
+  ianshaw027/openmail:v0.1.0
+```
+
+| Image | Tags |
+|-------|------|
+| [ianshaw027/openmail](https://hub.docker.com/r/ianshaw027/openmail) | `v0.1.0`, `latest` |
+| `ghcr.io/ianshaw027/openmail` | same tags when CI packages are published |
+
+Override image: `OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0` in `.env` or the environment.
+
+**Build from source** instead of pulling:
+
+```bash
+docker compose up -d --build
+```
+
+Or: `./scripts/install.sh` (`.env` + master key + `compose up`).
 
 First visit: **create vault password** → save **recovery key** → import accounts.
 

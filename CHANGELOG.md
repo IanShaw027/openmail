@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Document Docker Hub / GHCR image pull path in README and ops docs
+
+## 0.1.0
+
 ### Security
 
 - Strict vault device HMAC for cloud accounts, proxy fetch, and send
@@ -12,24 +18,21 @@ All notable changes to this project are documented in this file.
 - Client vault (PBKDF2 + AES-GCM), recovery key, auto-lock clears Pinia secrets
 - DOMParser-based HTML sanitization for mail bodies
 - CSP headers compatible with vue-i18n and Cloudflare Insights
+- IMAP TLS SNI when connecting via DNS-pinned IP; modified UTF-7 mailbox names
+
+### Added
+
+- Published image: `ianshaw027/openmail:v0.1.0` (Docker Hub), GHCR via CI
+- Factory reset of local vault environment; body expand modal; sent folder
+- Open-source meta: LICENSE, SECURITY, CONTRIBUTING, CODE_OF_CONDUCT, CI
 
 ### Changed
 
 - Product model is **local-first** (no user/admin login UI)
 - Cloud credentials prefer client-sealed blobs (server cannot decrypt)
-- Repository layout docs and open-source meta files (LICENSE, SECURITY, CONTRIBUTING, CODE_OF_CONDUCT)
-- Legal docs rewritten for local-first; CI + issue/PR templates under `.github/`
-- Console modularization: shared labels/`mapPool`, send & group modals; accounts mappers module
+- `docker-compose.yml` defaults to pull `ianshaw027/openmail:v0.1.0`
 
 ### Removed / deferred
 
 - User registration, admin console, server mail search UI
 - Code-API **create** (legacy token URLs may still resolve if present in DB)
-- Dead client `api/mails.ts` and unused `app/security.py`
-- Obsolete multi-user docs moved to `docs/archive/`
-
-## 0.1.0
-
-- Initial multi-provider fetch console (OAuth Graph, IMAP, mail.com cookie, HttpApi)
-- Docker single-image SPA + API
-- Optional in-stack WARP SOCKS pool

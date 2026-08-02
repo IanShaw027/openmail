@@ -47,13 +47,22 @@ else
   echo "==> OPENMAIL_MASTER_KEY already set"
 fi
 
-echo "==> docker compose up -d --build"
-docker compose up -d --build
+IMAGE="${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.1.0}"
+echo "==> image: $IMAGE"
+# Prefer pull of published image; fall back to local build if pull fails (offline / private).
+if docker compose pull openmail 2>/dev/null; then
+  echo "==> docker compose up -d (pulled)"
+  OPENMAIL_IMAGE="$IMAGE" docker compose up -d
+else
+  echo "==> pull failed or skipped — building locally"
+  docker compose up -d --build
+fi
 
 echo
 echo "Done."
 echo "  UI/API:  http://127.0.0.1:8000"
 echo "  Health:  curl -s http://127.0.0.1:8000/api/health"
+echo "  Image:   $IMAGE  (Docker Hub / override OPENMAIL_IMAGE)"
 echo "  Demo:    https://mail.clomio.ai"
 echo
 echo "First visit: create vault password → save recovery key → import accounts."

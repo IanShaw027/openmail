@@ -52,12 +52,35 @@ See root [`.env.example`](../.env.example).
 
 ## 2. Docker
 
+### 2.1 Published images
+
+| Registry | Image | Notes |
+|----------|-------|--------|
+| Docker Hub | `ianshaw027/openmail:v0.1.0` / `:latest` | Primary public image (`linux/amd64`) |
+| GHCR | `ghcr.io/ianshaw027/openmail:…` | Published by CI when packages workflow succeeds |
+
 ```bash
 cp .env.example .env
 ./scripts/gen-master-key.sh   # paste into OPENMAIL_MASTER_KEY
-make docker-up                # docker compose up -d --build
-make docker-down
+
+# Prefer pull (no local Node/Python build)
+docker compose pull
+docker compose up -d
+
+# Or build from this tree
+docker compose up -d --build
 ```
+
+Override image:
+
+```bash
+# .env
+OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0
+# OPENMAIL_IMAGE=ghcr.io/ianshaw027/openmail:v0.1.0
+OPENMAIL_PULL_POLICY=always
+```
+
+`make docker-up` runs `docker compose up -d --build` (local build). For pull-only use the commands above.
 
 UI + API: http://127.0.0.1:8000 (SPA served from the same process).
 
@@ -68,6 +91,12 @@ With WARP pool (needs `/dev/net/tun`):
 ```
 
 Production: terminate TLS at reverse proxy / Cloudflare; keep master key and DB volume private.
+
+### 2.2 CI / publishing packages
+
+- Workflow [`.github/workflows/docker.yml`](../.github/workflows/docker.yml) builds on `main` and tags `v*`.
+- **Docker Hub push** needs repo secrets: `DOCKERHUB_TOKEN` (and optional `DOCKERHUB_USERNAME`, default `ianshaw027`).
+- **GHCR** uses `GITHUB_TOKEN` with `packages: write` (enable GitHub Packages for the repo if needed).
 
 ---
 

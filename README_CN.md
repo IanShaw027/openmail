@@ -8,6 +8,8 @@
 
 [![CI](https://github.com/IanShaw027/openmail/actions/workflows/ci.yml/badge.svg)](https://github.com/IanShaw027/openmail/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docker Pulls](https://img.shields.io/docker/pulls/ianshaw027/openmail)](https://hub.docker.com/r/ianshaw027/openmail)
+[![Docker Image](https://img.shields.io/docker/v/ianshaw027/openmail?sort=semver&label=docker%20hub)](https://hub.docker.com/r/ianshaw027/openmail)
 [![Release](https://img.shields.io/github/v/release/IanShaw027/openmail?include_prereleases)](https://github.com/IanShaw027/openmail/releases)
 
 [English](README.md) · 中文
@@ -65,17 +67,26 @@
 
 ## 快速开始（Docker）
 
+**拉取官方镜像**（推荐 — [Docker Hub](https://hub.docker.com/r/ianshaw027/openmail)）：
+
 ```bash
 git clone https://github.com/IanShaw027/openmail.git
 cd openmail
 cp .env.example .env
 ./scripts/gen-master-key.sh    # 写入 OPENMAIL_MASTER_KEY
 
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 # 本机: http://127.0.0.1:8000
 curl -s http://127.0.0.1:8000/api/health
 ```
 
+| 镜像 | 标签 |
+|------|------|
+| `ianshaw027/openmail` | `v0.1.0`、`latest` |
+| `ghcr.io/ianshaw027/openmail` | CI 发布后可用 |
+
+本地构建：`docker compose up -d --build`  
 也可：`./scripts/install.sh`
 
 先体验演示站：**[mail.clomio.ai](https://mail.clomio.ai)**

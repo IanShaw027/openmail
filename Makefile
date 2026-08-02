@@ -6,7 +6,7 @@ BACKEND := $(ROOT)/backend
 FRONTEND := $(ROOT)/frontend
 BASE_URL ?= http://127.0.0.1:8000
 
-.PHONY: help dev-backend dev-frontend test docker-up docker-down smoke
+.PHONY: help dev-backend dev-frontend test docker-up docker-pull docker-down smoke
 
 help:
 	@echo "OpenMail targets:"
@@ -14,7 +14,8 @@ help:
 	@echo "  make dev-frontend  - run Vite dev server"
 	@echo "  make test          - backend pytest"
 	@echo "  make smoke         - API smoke (BASE_URL=$(BASE_URL))"
-	@echo "  make docker-up     - docker compose up -d --build"
+	@echo "  make docker-pull   - pull published image + up -d"
+	@echo "  make docker-up     - docker compose up -d --build (local build)"
 	@echo "  make docker-down   - docker compose down"
 
 dev-backend:
@@ -34,6 +35,14 @@ smoke:
 	@BASE_URL="$(BASE_URL)" bash "$(ROOT)/scripts/smoke_api.sh"
 
 # Prefer compose.yaml / docker-compose.yml at repo root when present
+docker-pull:
+	@cd "$(ROOT)" && \
+	  if [ -f compose.yaml ] || [ -f compose.yml ] || [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then \
+	    docker compose pull && docker compose up -d; \
+	  else \
+	    echo "No compose file at $(ROOT)."; exit 1; \
+	  fi
+
 docker-up:
 	@cd "$(ROOT)" && \
 	  if [ -f compose.yaml ] || [ -f compose.yml ] || [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then \
