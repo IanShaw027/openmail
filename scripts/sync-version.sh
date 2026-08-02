@@ -20,8 +20,8 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.+-]+)?$ ]]; then
 fi
 
 TAG="v${VERSION}"
-# Default published image is GHCR (CI always pushes). Hub is optional dual-publish.
-IMAGE_DEFAULT="ghcr.io/ianshaw027/openmail:${TAG}"
+# Canonical published image (Docker Hub — CI on every v* tag).
+IMAGE_DEFAULT="ianshaw027/openmail:${TAG}"
 
 echo "→ sync version ${VERSION} (tag ${TAG})"
 
@@ -65,6 +65,13 @@ new = re.sub(
     r"(\$\{OPENMAIL_IMAGE:-)(?:ghcr\.io/)?ianshaw027/openmail:[^}]+(\})",
     rf"\1{image}\2",
     text,
+    count=1,
+)
+# also rewrite any leftover ghcr default pin
+new = re.sub(
+    r"(\$\{OPENMAIL_IMAGE:-)ghcr\.io/ianshaw027/openmail:[^}]+(\})",
+    rf"\1{image}\2",
+    new,
     count=1,
 )
 # Only rewrite the compose default pin line already handled above.

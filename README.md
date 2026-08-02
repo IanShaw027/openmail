@@ -73,55 +73,86 @@ See [SECURITY.md](SECURITY.md) and [docs/legal/](docs/legal/).
 
 ## Quick start (Docker)
 
-**Pull published image** (recommended — [GHCR](https://github.com/IanShaw027/openmail/pkgs/container/openmail), built on every `v*` tag):
+Published image (**Docker Hub only**):
+
+```text
+ianshaw027/openmail:v0.1.0
+ianshaw027/openmail:latest
+```
+
+Platform: `linux/amd64`. Every git tag `vX.Y.Z` rebuilds and pushes those tags via GitHub Actions.
+
+### A) Compose from this repo (recommended)
 
 ```bash
 git clone https://github.com/IanShaw027/openmail.git
 cd openmail
 cp .env.example .env
-./scripts/gen-master-key.sh    # paste into OPENMAIL_MASTER_KEY
+./scripts/gen-master-key.sh    # paste the value into OPENMAIL_MASTER_KEY in .env
 
 docker compose pull
 docker compose up -d
 # UI + API: http://127.0.0.1:8000
 curl -s http://127.0.0.1:8000/api/health
+# → {"ok":true,"version":"0.1.0",...}
 ```
 
-One-liner without cloning compose files:
+`docker-compose.yml` already pins:
+
+```yaml
+image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.1.0}
+```
+
+Optional overrides in `.env`:
+
+```bash
+OPENMAIL_IMAGE=ianshaw027/openmail:latest   # or another tag
+OPENMAIL_PORT=8000
+OPENMAIL_PULL_POLICY=always                 # force re-pull
+```
+
+### B) One container (no clone)
 
 ```bash
 docker run -d --name openmail -p 8000:8000 \
   -e OPENMAIL_MASTER_KEY="$(openssl rand -base64 32)" \
   -v openmail-data:/data \
-  ghcr.io/ianshaw027/openmail:v0.1.0
+  ianshaw027/openmail:v0.1.0
 ```
 
-| Image | Tags |
-|-------|------|
-| `ghcr.io/ianshaw027/openmail` | **`v*` / `latest` — default** (GitHub Actions) |
-| [ianshaw027/openmail](https://hub.docker.com/r/ianshaw027/openmail) | optional dual-publish (`DOCKERHUB_TOKEN`) or manual push |
-
-Override: `OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0` (Hub) or any tag in `.env`.
-
-**Release:** each git tag `vX.Y.Z` builds the package and GitHub Release (auto version bake). See [docs/17-release.md](docs/17-release.md) — `make release V=0.2.0`.
-
-**Build from source** instead of pulling:
+### C) Build from source (no registry pull)
 
 ```bash
 docker compose up -d --build
+# or: ./scripts/install.sh
 ```
-
-Or: `./scripts/install.sh` (`.env` + master key + `compose up`).
 
 First visit: **create vault password** → save **recovery key** → import accounts.
 
-Try the hosted demo first: **[mail.clomio.ai](https://mail.clomio.ai)**
-
-With WARP pool (needs `/dev/net/tun`):
+With WARP pool (needs `/dev/net/tun` on the host):
 
 ```bash
 ./scripts/up-with-warp.sh
 ```
+
+---
+
+## Release (maintainers)
+
+```bash
+# from a clean main: sync VERSION → commit → tag → push → CI builds Hub image
+make release V=0.2.0
+```
+
+What happens on tag `v0.2.0`:
+
+1. Bake `0.2.0` into the image (`/api/health` → `"version":"0.2.0"`)
+2. Push Docker Hub: `ianshaw027/openmail:v0.2.0`, `:0.2.0`, `:latest`
+3. Create/update the GitHub Release notes
+
+Requires repo secrets `DOCKERHUB_TOKEN` and optional `DOCKERHUB_USERNAME` (default `ianshaw027`).
+
+---
 
 ## Development
 
@@ -149,7 +180,9 @@ See [`.env.example`](.env.example). Important:
 
 | Variable | Purpose |
 |----------|---------|
-| `OPENMAIL_MASTER_KEY` | Server AES key (device registry, optional server-side wraps) |
+| `OPENMAIL_MASTER_KEY` | Server AES key (device registry, optional server-side wraps) — **required** |
+| `OPENMAIL_IMAGE` | Override compose image (default `ianshaw027/openmail:v0.1.0`) |
+| `OPENMAIL_PORT` | Host port (default `8000`) |
 | `LICENSE_TOKENS` | Optional comma-separated license codes (quota unlock) |
 | `PROXY_POOL` | Multi SOCKS/HTTP channels (`\|` or newlines) |
 | `PUBLIC_BASE_URL` | Public origin if you still use legacy code tokens |
@@ -161,11 +194,11 @@ assets/      Brand logo (SVG)
 backend/     FastAPI + providers + tests
 frontend/    Vue 3 + Vite + Pinia
 docs/        architecture, ops, legal
-scripts/     install, keygen, smoke, warp
+scripts/     install, keygen, smoke, release, warp
 .github/     CI, issue/PR templates
 ```
 
-Docs: [architecture](docs/architecture.md) · [ops](docs/14-ops-and-smoke.md) · [WARP](docs/16-warp-proxy-pool.md) · [maintainability](docs/maintainability.md)
+More detail (optional): [architecture](docs/architecture.md) · [ops](docs/14-ops-and-smoke.md) · [WARP](docs/16-warp-proxy-pool.md) · [release internals](docs/17-release.md)
 
 ## Brand assets
 

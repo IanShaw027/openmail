@@ -98,6 +98,5 @@ git push origin "$TAG"
 
 echo "✓ pushed ${TAG}"
 echo "  Actions: https://github.com/IanShaw027/openmail/actions"
-echo "  Package: ghcr.io/ianshaw027/openmail:${TAG}"
-echo "  Hub:     ianshaw027/openmail:${TAG}  (if DOCKERHUB_TOKEN secret set)"
+echo "  Image:   ianshaw027/openmail:${TAG}"
 echo "  Release: https://github.com/IanShaw027/openmail/releases/tag/${TAG}"

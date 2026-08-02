@@ -67,35 +67,80 @@
 
 ## 快速开始（Docker）
 
-**拉取官方镜像**（推荐 — [GHCR](https://github.com/IanShaw027/openmail/pkgs/container/openmail)，每个 `v*` tag 自动构建）：
+官方镜像（**仅 Docker Hub**）：
+
+```text
+ianshaw027/openmail:v0.1.0
+ianshaw027/openmail:latest
+```
+
+架构：`linux/amd64`。每个 git 标签 `vX.Y.Z` 由 GitHub Actions 自动构建并推送。
+
+### A) 本仓库 Compose（推荐）
 
 ```bash
 git clone https://github.com/IanShaw027/openmail.git
 cd openmail
 cp .env.example .env
-./scripts/gen-master-key.sh    # 写入 OPENMAIL_MASTER_KEY
+./scripts/gen-master-key.sh    # 把输出写入 .env 的 OPENMAIL_MASTER_KEY
 
 docker compose pull
 docker compose up -d
 # 本机: http://127.0.0.1:8000
 curl -s http://127.0.0.1:8000/api/health
+# → {"ok":true,"version":"0.1.0",...}
 ```
 
-| 镜像 | 标签 |
-|------|------|
-| `ghcr.io/ianshaw027/openmail` | **`v*` / `latest`（默认）** |
-| `ianshaw027/openmail`（Docker Hub） | 可选双发或手动推送 |
+`docker-compose.yml` 默认已写死：
 
-本地构建：`docker compose up -d --build`  
-也可：`./scripts/install.sh`
+```yaml
+image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.1.0}
+```
 
-先体验演示站：**[mail.clomio.ai](https://mail.clomio.ai)**
+可选 `.env` 覆盖：
 
-带 WARP 池（需 `/dev/net/tun`）：
+```bash
+OPENMAIL_IMAGE=ianshaw027/openmail:latest
+OPENMAIL_PORT=8000
+OPENMAIL_PULL_POLICY=always
+```
+
+### B) 单容器（不克隆仓库）
+
+```bash
+docker run -d --name openmail -p 8000:8000 \
+  -e OPENMAIL_MASTER_KEY="$(openssl rand -base64 32)" \
+  -v openmail-data:/data \
+  ianshaw027/openmail:v0.1.0
+```
+
+### C) 源码构建（不拉镜像）
+
+```bash
+docker compose up -d --build
+# 或: ./scripts/install.sh
+```
+
+首次打开：创建金库密码 → 保存恢复密钥 → 导入账号。
+
+带 WARP 池（主机需 `/dev/net/tun`）：
 
 ```bash
 ./scripts/up-with-warp.sh
 ```
+
+---
+
+## 发版（维护者）
+
+```bash
+make release V=0.2.0
+```
+
+打 tag `v0.2.0` 后 CI 会：烘焙版本 → 推送 `ianshaw027/openmail:v0.2.0` / `:latest` → 更新 GitHub Release。  
+需要仓库 Secrets：`DOCKERHUB_TOKEN`（及可选 `DOCKERHUB_USERNAME`）。
+
+---
 
 ## 开发
 
@@ -110,9 +155,19 @@ uvicorn app.main:app --reload --port 8000
 cd frontend && npm install && npm run dev
 ```
 
-## 文档
+## 配置要点
 
-- [架构](docs/architecture.md) · [运维](docs/14-ops-and-smoke.md) · [WARP](docs/16-warp-proxy-pool.md)  
+| 变量 | 作用 |
+|------|------|
+| `OPENMAIL_MASTER_KEY` | 服务端密钥（必填） |
+| `OPENMAIL_IMAGE` | 覆盖 compose 镜像，默认 `ianshaw027/openmail:v0.1.0` |
+| `OPENMAIL_PORT` | 宿主机端口，默认 `8000` |
+| `LICENSE_TOKENS` | 可选授权码 |
+| `PROXY_POOL` | SOCKS/HTTP 代理池 |
+
+## 文档（可选深入）
+
+- [架构](docs/architecture.md) · [运维](docs/14-ops-and-smoke.md) · [WARP](docs/16-warp-proxy-pool.md) · [发版细节](docs/17-release.md)  
 - [品牌资源](assets/)：`logo-icon.svg` / `logo.svg` / `logo-dark.svg` / `social-banner.svg`  
 
 ## 许可
