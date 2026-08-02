@@ -6,6 +6,7 @@ import { useTwoFaStore, type TwoFaEntry } from '@/stores/twofa'
 import { copyText } from '@/utils/clipboard'
 import { useToast } from '@/composables/useToast'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
+import TwoFaServiceMark from '@/components/TwoFaServiceMark.vue'
 import {
   SERVICE_PRESETS,
   TOTP_ALGORITHMS,
@@ -18,6 +19,7 @@ import {
   parseOtpauthUri,
   parseSecretOrUri,
 } from '@/utils/totp'
+import { normalizeServiceLogoId } from '@/utils/twofaServiceIcons'
 
 const { t } = useI18n()
 const twofa = useTwoFaStore()
@@ -578,8 +580,8 @@ function displayName(e: TwoFaEntry) {
   return e.issuer || e.label
 }
 
-function logoLetter(e: TwoFaEntry) {
-  return (e.issuer || e.label || '?').slice(0, 1).toUpperCase()
+function serviceLogoKey(e: TwoFaEntry): string {
+  return normalizeServiceLogoId(e.logo || e.issuer)
 }
 
 onMounted(() => {
@@ -661,7 +663,7 @@ onUnmounted(() => {
     <div v-else class="grid">
       <article v-for="e in filtered" :key="e.id" class="card-solid entry">
         <div class="entry-top">
-          <div class="logo" :data-logo="e.logo || 'other'">{{ logoLetter(e) }}</div>
+          <TwoFaServiceMark :logo="serviceLogoKey(e)" :issuer="e.issuer" :size="40" />
           <div class="meta">
             <div class="name">{{ displayName(e) }}</div>
             <div class="sub muted">
@@ -701,11 +703,14 @@ onUnmounted(() => {
           <!-- 服务类型：仅 Other 需填名称 -->
           <div class="field">
             <label class="label">{{ t('twofa.service') }}</label>
-            <UiSelect
-              :model-value="form.serviceId"
-              :options="serviceOptions"
-              @update:model-value="onServicePick"
-            />
+            <div class="service-pick">
+              <TwoFaServiceMark :logo="form.serviceId" :size="36" />
+              <UiSelect
+                :model-value="form.serviceId"
+                :options="serviceOptions"
+                @update:model-value="onServicePick"
+              />
+            </div>
           </div>
           <div v-if="isOtherService" class="field">
             <label class="label">{{ t('twofa.serviceName') }}</label>
@@ -911,18 +916,6 @@ onUnmounted(() => {
   gap: 10px;
   align-items: flex-start;
 }
-.logo {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  display: grid;
-  place-items: center;
-  font-weight: 750;
-  font-size: 16px;
-  flex-shrink: 0;
-}
 .meta {
   flex: 1;
   min-width: 0;
@@ -992,6 +985,15 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+.service-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.service-pick :deep(.ui-select) {
+  flex: 1;
+  min-width: 0;
 }
 .secret-acts {
   display: flex;
