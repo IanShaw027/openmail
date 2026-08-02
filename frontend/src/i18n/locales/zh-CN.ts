@@ -454,7 +454,8 @@ export default {
     importFormatOnly: '仅格式检查（未做在线探测）',
     importSkipPrecheck: '跳过预检查并继续',
     importCheckingHint: '正在探测凭证（{n} 条进行中）…可随时确认导入或跳过预检查',
-    requestTimeout: '请求超时，请稍后重试或检查代理',
+    requestTimeout:
+      '请求超时。mail.com 首次登录较慢（网页 SSO），请再试一次；成功后会缓存会话，之后应更快。若持续超时，检查密码或稍后重试。',
     requestCancelled: '已取消',
     importPrecheckOffHint: '已关闭预检查：仅校验格式与字段合法性',
     importConfirm: '确认导入选中',

@@ -457,7 +457,8 @@ export default {
     importFormatOnly: 'Format check only (no live probe)',
     importSkipPrecheck: 'Skip precheck & continue',
     importCheckingHint: 'Probing credentials ({n} in progress)… You can confirm import or skip precheck anytime.',
-    requestTimeout: 'Request timed out — retry later or check proxy',
+    requestTimeout:
+      'Request timed out. mail.com first login (web SSO) is slow; retry once — session cookies cache for later. If it keeps failing, check the password or try again later.',
     requestCancelled: 'Cancelled',
     importPrecheckOffHint: 'Precheck off: only format and field validation',
     importConfirm: 'Import selected',

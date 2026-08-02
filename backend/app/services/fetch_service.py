@@ -32,11 +32,12 @@ from app.services.credentials import (
 )
 from app.services.parser import annotate_message_code, extract_verification_code
 
-# Interactive browser clients abort ~55s (DEFAULT_API_TIMEOUT_MS). Walking the
-# entire 10-node WARP pool × multi-attempt mail.com login easily exceeds that
-# and surfaces as nginx 499 / browser "Request timed out".
-# Cap: sticky + a few alternates + optional direct.
+# Interactive browser clients abort ~55–90s. Walking the entire 10-node WARP
+# pool × multi-step mail.com login easily exceeds that (nginx 499).
+# Cap: sticky + optional alternate + optional direct.
 MAX_EGRESS_ATTEMPTS = 3
+# Cookie / mail.com SSO is much heavier than IMAP — tighter egress budget.
+MAX_EGRESS_ATTEMPTS_COOKIE = 2
 
 
 @dataclass
@@ -348,7 +349,13 @@ def fetch_account(
                 ordered.append(p)
             if not ordered:
                 ordered = [None]
-            ordered = _cap_egress_candidates(ordered)
+            ptype_name = str(getattr(account.provider, "value", account.provider) or "")
+            egress_cap = (
+                MAX_EGRESS_ATTEMPTS_COOKIE
+                if ptype_name in ("cookie", "unknown")
+                else MAX_EGRESS_ATTEMPTS
+            )
+            ordered = _cap_egress_candidates(ordered, max_attempts=egress_cap)
 
             result = FetchResult(ok=False, folder=folder, error="取件失败 / Fetch failed")
             for idx, egress in enumerate(ordered):
@@ -727,8 +734,11 @@ def fetch_proxy(
         ordered.append(p)
     if not ordered:
         ordered = [None]
-    # Avoid 10× WARP walk blowing past browser 55s timeout (nginx 499)
-    ordered = _cap_egress_candidates(ordered)
+    # Cookie/mail.com SSO is multi-HTTP; cap egress tighter than IMAP
+    egress_cap = (
+        MAX_EGRESS_ATTEMPTS_COOKIE if ptype in ("cookie", "unknown") else MAX_EGRESS_ATTEMPTS
+    )
+    ordered = _cap_egress_candidates(ordered, max_attempts=egress_cap)
 
     result: FetchResult | None = None
     last_err: str | None = None

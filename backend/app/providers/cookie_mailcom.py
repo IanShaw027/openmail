@@ -27,9 +27,15 @@ DEFAULT_SITE = "mail.com"
 MAIL_HOME_URL = "https://www.mail.com/"
 LIGHT_FOLDER_URL = "https://lightmailer.mail.com/folderlist"
 LIGHT_START_URL = "https://lightmailer.mail.com/start?device=desktop&ott={ott}"
-DEFAULT_TIMEOUT = 25.0
+# Keep single HTTP short — multi-step login × retries × WARP must stay under browser timeout
+DEFAULT_TIMEOUT = 12.0
 QUICK_LIMIT = 15
 FULL_LIMIT = 50
+# Cap parallel URL probes so a flaky mail.com path cannot burn 55s+
+MAX_RESTORE_PROBES = 3
+MAX_LOGIN_URL_PROBES = 2
+MAX_FOLDER_PROBES = 3
+MAX_DETAIL_HYDRATE = 2
 
 # Session-valid markers (helper: FolderListPage)
 SESSION_OK_MARKERS = (
@@ -271,36 +277,27 @@ def _site_base(site: str) -> str:
 
 
 def _login_urls(site: str) -> list[str]:
+    """Few high-value login entry points only (Path B fallback)."""
     base = _site_base(site)
     host = urlparse(base).hostname or "www.mail.com"
-    # Prefer www login then login subdomain
-    roots = [base]
-    if host.startswith("www."):
-        roots.append(f"https://login.{host[4:]}")
-    else:
-        roots.append(f"https://login.{host}")
-        roots.append(f"https://www.{host}")
-    urls: list[str] = []
-    for root in roots:
-        urls.extend(
-            [
-                f"{root}/login",
-                f"{root}/login/",
-                f"{root}/",
-            ]
-        )
-    # de-dupe preserve order
+    bare = host[4:] if host.startswith("www.") else host
+    # Prefer real SSO host; www/login roots historically redirected / 403
+    urls = [
+        f"https://login.{bare}/login",
+        f"{base}/",
+        f"https://www.{bare}/login",
+    ]
     seen: set[str] = set()
     out: list[str] = []
     for u in urls:
         if u not in seen:
             seen.add(u)
             out.append(u)
-    return out
+    return out[:MAX_LOGIN_URL_PROBES]
 
 
 def _folder_urls(site: str, meta: dict[str, Any] | None = None) -> list[str]:
-    """Prefer lightmailer folderlist (mail.com.helper), then legacy webmail paths."""
+    """Prefer lightmailer folderlist (mail.com.helper), then a few webmail paths."""
     urls: list[str] = []
     if meta:
         for key in ("folder_url", "mailbox_url", "lightmailer_url", "start_url"):
@@ -315,15 +312,12 @@ def _folder_urls(site: str, meta: dict[str, Any] | None = None) -> list[str]:
     candidates = [
         f"https://lightmailer.{bare}/folderlist",
         f"https://www.{bare}/mail",
-        f"https://3c.mail.com/mail",
-        f"https://mail.{bare}/mail",
         f"{base}/mail",
-        f"https://www.{bare}/",
     ]
     for u in candidates:
         if u not in urls:
             urls.append(u)
-    return urls
+    return urls[: max(MAX_FOLDER_PROBES, 1) + (1 if meta and meta.get("folder_url") else 0)]
 
 
 def extract_ott(url: str, page_html: str) -> str:
@@ -795,11 +789,9 @@ class MailcomCookieProvider:
                         error="会话失效，请补充密码后重试",
                         session_restored=False,
                     )
-                # mail.com SSO is flaky (form/ott/CDN + false "bad password");
-                # retry once with a clean jar. Keep attempts low: outer fetch
-                # already walks a few WARP egresses; 3×login × 10×proxy >> 55s
-                # browser timeout (nginx 499 / client TimeoutError).
-                max_login_attempts = 2
+                # One clean login per egress; outer loop may try another WARP.
+                # Multi-attempt login here × multi-proxy was the main 499 timeout source.
+                max_login_attempts = 1
                 ok = False
                 login_error = None
                 meta_update = None
@@ -810,7 +802,7 @@ class MailcomCookieProvider:
                             client.cookies.clear()
                         except Exception:
                             pass
-                        time.sleep(0.5 * attempt)
+                        time.sleep(0.4 * attempt)
                     ok, login_error, meta_update = self.full_login(
                         client, email_addr, str(password), site=site
                     )
@@ -819,21 +811,14 @@ class MailcomCookieProvider:
                     if login_error:
                         last_errors.append(login_error)
                 if not ok:
-                    # Prefer a non-credential error if any attempt looked transient
                     final_err = login_error or "mail.com 登录失败"
                     if final_err == "账号或密码错误" and any(
-                        is_transient_login_error(e) for e in last_errors[:-1] or []
+                        is_transient_login_error(e) for e in last_errors
                     ):
                         final_err = (
                             "mail.com 登录不稳定（会话/页面解析失败），请稍后重试；"
                             "若持续失败再核对密码"
                         )
-                    elif (
-                        final_err == "账号或密码错误"
-                        and len(last_errors) >= max_login_attempts
-                        and all(e == "账号或密码错误" for e in last_errors)
-                    ):
-                        final_err = "账号或密码错误"
                     return FetchResult(
                         ok=False,
                         folder=folder,
@@ -846,11 +831,12 @@ class MailcomCookieProvider:
             messages = self.fetch_message_list(
                 client, folder=folder, limit=limit, site=site, meta=meta
             )
-            # Optionally hydrate first few details for code extraction
+            # Hydrate only a couple bodies for verification codes (each is extra RTT)
+            hydrate_n = MAX_DETAIL_HYDRATE if quick else min(5, limit)
             for i, msg in enumerate(list(messages)):
-                if i >= min(5, limit):
+                if i >= hydrate_n:
                     break
-                if msg.body_text or msg.body_html:
+                if msg.body_text or msg.body_html or msg.verification_code:
                     continue
                 try:
                     detail = self.fetch_detail(
@@ -938,7 +924,7 @@ class MailcomCookieProvider:
         """Load cookies and probe mailbox (lightmailer preferred, webmail fallback)."""
         apply_cookies(client, cookies)
         meta_update: dict[str, Any] = {}
-        urls = _folder_urls(site, meta)
+        urls = _folder_urls(site, meta)[:MAX_RESTORE_PROBES]
         # Put lightmailer first but do not treat non-FolderList as hard fail for other URLs
         for url in urls:
             try:
@@ -1070,7 +1056,7 @@ class MailcomCookieProvider:
         last_err = "mail.com login parse failed"
         saw_clear_bad_password = False
         saw_rate_limit = False
-        for login_url in _login_urls(site):
+        for login_url in _login_urls(site)[:MAX_LOGIN_URL_PROBES]:
             try:
                 resp = client.get(login_url)
             except Exception as exc:
@@ -1170,7 +1156,10 @@ class MailcomCookieProvider:
         candidates = []
         if folder_url:
             candidates.append(str(folder_url))
-        candidates.extend(_folder_urls(site, meta))
+        for u in _folder_urls(site, meta):
+            if u not in candidates:
+                candidates.append(u)
+        candidates = candidates[:MAX_FOLDER_PROBES]
         for url in candidates:
             try:
                 resp = client.get(url)

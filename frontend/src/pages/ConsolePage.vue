@@ -194,7 +194,8 @@ const importConfirmBusy = ref(false)
 const importSkipOk = ref(true)
 /** Cancel in-flight import precheck (close modal / re-run). */
 let importAbort: AbortController | null = null
-const PRECHECK_TIMEOUT_MS = 45_000
+/** Import precheck: cookie needs longer; still below browser hang feel */
+const PRECHECK_TIMEOUT_MS = 70_000
 /** local = browser; cloud = device-scoped server store */
 const importTarget = ref<'local' | 'cloud'>('local')
 const importCloudPoll = ref(false)

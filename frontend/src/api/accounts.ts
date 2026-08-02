@@ -158,6 +158,15 @@ export type ProxyRequestOpts = {
   timeoutMs?: number
 }
 
+/** Cookie / mail.com first login needs more headroom than IMAP. */
+export const COOKIE_PROXY_TIMEOUT_MS = 90_000
+
+function defaultProxyTimeoutMs(provider?: string | null): number {
+  const p = String(provider || '').toLowerCase()
+  if (p === 'cookie' || p === 'unknown') return COOKIE_PROXY_TIMEOUT_MS
+  return 55_000
+}
+
 /** Proxy fetch with credentials in body (local-first; not stored server-side). */
 export async function proxyFetchMail(
   body: ProxyFetchBody,
@@ -165,7 +174,7 @@ export async function proxyFetchMail(
 ): Promise<FetchResult> {
   return apiRequest<FetchResult>('/api/fetch/proxy', {
     method: 'POST',
-    timeoutMs: opts.timeoutMs ?? 55_000,
+    timeoutMs: opts.timeoutMs ?? defaultProxyTimeoutMs(body.provider),
     signal: opts.signal,
     body: {
       folder: body.folder ?? 'inbox',
