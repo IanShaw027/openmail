@@ -32,8 +32,25 @@ Import credentials in the browser, proxy fetch/send through a self-hosted FastAP
 
 ---
 
+## Screenshots
+
+| Vault setup | Recovery key (save once) |
+|:-----------:|:------------------------:|
+| ![Vault setup](assets/screenshots/vault-setup.png) | ![Recovery key](assets/screenshots/vault-recovery.png) |
+
+| Console + import | 2FA manager |
+|:----------------:|:-----------:|
+| ![Console](assets/screenshots/console.png) | ![2FA](assets/screenshots/twofa.png) |
+
+| Settings | Local mail cache |
+|:--------:|:----------------:|
+| ![Settings](assets/screenshots/settings.png) | ![Mails](assets/screenshots/mails.png) |
+
+---
+
 ## Table of contents
 
+- [Screenshots](#screenshots)
 - [Before you use](#before-you-use)
 - [How it works](#how-it-works)
 - [Features](#features)
@@ -345,7 +362,7 @@ Roadmap ideas (not promised): arm64 images, richer send UX, more import presets.
 
 ## Security
 
-Report vulnerabilities **privately** — see [SECURITY.md](SECURITY.md). Do not open public issues for exploitable bugs.
+Report vulnerabilities **privately** via [GitHub Security Advisories](https://github.com/IanShaw027/openmail/security/advisories/new) — see [SECURITY.md](SECURITY.md). Do not open public issues for exploitable bugs.
 
 ## Contributing
 

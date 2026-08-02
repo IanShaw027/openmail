@@ -30,8 +30,25 @@
 
 ---
 
+## 界面截图
+
+| 创建金库 | 保存恢复密钥 |
+|:--------:|:------------:|
+| ![创建金库](assets/screenshots/vault-setup.png) | ![恢复密钥](assets/screenshots/vault-recovery.png) |
+
+| 操作台 / 导入 | 2FA 管理 |
+|:-------------:|:--------:|
+| ![操作台](assets/screenshots/console.png) | ![2FA](assets/screenshots/twofa.png) |
+
+| 设置 | 我的邮件 |
+|:----:|:--------:|
+| ![设置](assets/screenshots/settings.png) | ![邮件](assets/screenshots/mails.png) |
+
+---
+
 ## 目录
 
+- [界面截图](#界面截图)
 - [使用前须知](#使用前须知)
 - [工作原理](#工作原理)
 - [功能](#功能)
@@ -287,7 +304,7 @@ CI 推送 Docker Hub 并生成 GitHub Release。需要 `DOCKERHUB_TOKEN`。
 
 ## 安全
 
-漏洞请私下报告，见 [SECURITY.md](SECURITY.md)。
+漏洞请通过 [GitHub 私密安全通告](https://github.com/IanShaw027/openmail/security/advisories/new) 报告，见 [SECURITY.md](SECURITY.md)。
 
 ## 贡献 · 许可
 

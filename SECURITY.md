@@ -4,9 +4,10 @@
 
 | Version | Supported |
 |---------|-----------|
-| `main` (self-hosted) | Yes |
+| Latest release tag (`v*`) | Yes |
+| `main` | Yes (rolling) |
 
-There is no commercial SaaS support channel; security fixes land on `main`.
+There is no commercial SLA; security fixes land on `main` and are tagged when appropriate.
 
 ## Threat model (summary)
 
@@ -23,12 +24,15 @@ Proxy fetch still requires the server process to **temporarily** hold credential
 
 Please **do not** open a public GitHub issue for exploitable bugs.
 
-1. Email the maintainer listed in the repository profile, **or**
-2. Open a private security advisory on GitHub if the repo has that feature enabled.
+**Preferred:** use GitHub’s private vulnerability reporting on this repository:
+
+→ [Report a vulnerability](https://github.com/IanShaw027/openmail/security/advisories/new)
+
+Private reporting is enabled on this repo. If that link is unavailable, contact the maintainer via the GitHub profile listed on the repository.
 
 Include:
 
-- Affected commit / image tag
+- Affected commit / image tag (`ianshaw027/openmail:vX.Y.Z`)
 - Reproduction steps
 - Impact (credential theft, SSRF, XSS, open relay, etc.)
 
