@@ -69,11 +69,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Image list (GHCR always; Hub when secret set)
+        id: images
+        run: |
+          {
+            echo "list<<EOF"
+            echo "${GHCR_IMAGE}"
+            if [ "${{ steps.hub.outputs.enabled }}" = "true" ]; then
+              echo "${HUB_IMAGE}"
+            fi
+            echo "EOF"
+          } >>"$GITHUB_OUTPUT"
+
       - name: Docker meta (GHCR always; Hub optional)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.hub.outputs.enabled == 'true' && format('{0}\n{1}', env.GHCR_IMAGE, env.HUB_IMAGE) || env.GHCR_IMAGE }}
+          images: ${{ steps.images.outputs.list }}
           tags: |
             type=raw,value=v${{ steps.ref.outputs.version }}
             type=raw,value=${{ steps.ref.outputs.version }}
