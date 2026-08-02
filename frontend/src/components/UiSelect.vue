@@ -57,7 +57,7 @@ function placeMenu() {
     left: `${Math.max(4, Math.min(r.left, window.innerWidth - width - 4))}px`,
     width: `${width}px`,
     minWidth: `${width}px`,
-    zIndex: 'var(--z-dropdown, 80)',
+    zIndex: 'var(--z-dropdown, 140)',
     ...(openUp
       ? { bottom: `${window.innerHeight - r.top + 4}px`, top: 'auto' }
       : { top: `${r.bottom + 4}px`, bottom: 'auto' }),
@@ -94,7 +94,10 @@ function pick(opt: UiSelectOption) {
 
 function onDocPointer(e: Event) {
   if (!open.value || !root.value) return
-  if (!root.value.contains(e.target as Node)) close()
+  const t = e.target as Node
+  // Menu is Teleported to <body>, so it is outside root — still treat it as inside.
+  if (root.value.contains(t) || listEl.value?.contains(t)) return
+  close()
 }
 
 function scrollHighlight() {

@@ -55,7 +55,8 @@
   --control-line: 1.3;
   --control-shadow: var(--shadow-sm);
   --control-border: var(--border-strong);
-  --z-dropdown: 80;
+  /* Dropdowns teleport to body and must sit above modals */
+  --z-dropdown: 140;
   --z-modal: 100;
   --z-toast: 200;
 

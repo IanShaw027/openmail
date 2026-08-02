@@ -3,16 +3,17 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import jsQR from 'jsqr'
 import { useTwoFaStore, type TwoFaEntry } from '@/stores/twofa'
-import { useAccountsStore } from '@/stores/accounts'
 import { copyText } from '@/utils/clipboard'
 import { useToast } from '@/composables/useToast'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
 import {
   SERVICE_PRESETS,
+  TOTP_ALGORITHMS,
   type TotpAlgorithm,
   type TotpEntryDraft,
   type TotpType,
   isValidBase32Secret,
+  normalizeAlgorithm,
   normalizeSecret,
   parseOtpauthUri,
   parseSecretOrUri,
@@ -20,7 +21,6 @@ import {
 
 const { t } = useI18n()
 const twofa = useTwoFaStore()
-const accounts = useAccountsStore()
 const { flashMsg } = useToast()
 
 const q = ref('')
@@ -55,7 +55,11 @@ function syncMobileFlag() {
 }
 
 const form = ref({
-  issuer: '',
+  /** Preset service id; "other" → show custom name field */
+  serviceId: 'google',
+  /** Custom service name when serviceId === 'other' */
+  customName: '',
+  /** Account name (email / username) */
   label: '',
   secret: '',
   type: 'totp' as TotpType,
@@ -63,8 +67,6 @@ const form = ref({
   digits: 6,
   period: 30,
   counter: 0,
-  serviceId: 'other',
-  accountId: '',
 })
 
 const filtered = computed(() => {
@@ -79,40 +81,28 @@ const filtered = computed(() => {
   )
 })
 
-const accountOptions = computed<UiSelectOption[]>(() => [
-  { value: '', label: t('twofa.noBind') },
-  ...accounts.accounts
-    .filter((a) => !a.isApiSource)
-    .map((a) => ({
-      value: a.id,
-      label: a.email,
-      title: a.email,
-    })),
-])
-
 const serviceOptions = computed<UiSelectOption[]>(() =>
   SERVICE_PRESETS.map((p) => ({ value: p.id, label: p.name })),
 )
 
 const typeOptions = computed<UiSelectOption[]>(() => [
   { value: 'totp', label: 'TOTP' },
+  { value: 'steam', label: 'Steam' },
   { value: 'hotp', label: 'HOTP' },
 ])
 
-const algoOptions = computed<UiSelectOption[]>(() => [
-  { value: 'SHA1', label: 'SHA1' },
-  { value: 'SHA256', label: 'SHA256' },
-  { value: 'SHA512', label: 'SHA512' },
-])
+const algoOptions = computed<UiSelectOption[]>(() =>
+  TOTP_ALGORITHMS.map((a) => ({ value: a, label: a })),
+)
 
-const digitsOptions = computed<UiSelectOption[]>(() => [
-  { value: 6, label: '6' },
-  { value: 8, label: '8' },
-])
+const isOtherService = computed(() => form.value.serviceId === 'other')
+const isSteam = computed(() => form.value.type === 'steam')
+const isHotp = computed(() => form.value.type === 'hotp')
 
 function resetForm() {
   form.value = {
-    issuer: '',
+    serviceId: 'google',
+    customName: '',
     label: '',
     secret: '',
     type: 'totp',
@@ -120,8 +110,6 @@ function resetForm() {
     digits: 6,
     period: 30,
     counter: 0,
-    serviceId: 'other',
-    accountId: '',
   }
   editingId.value = null
 }
@@ -133,17 +121,19 @@ function openAdd() {
 
 function openEdit(e: TwoFaEntry) {
   editingId.value = e.id
+  const preset =
+    SERVICE_PRESETS.find((p) => p.issuer && p.issuer.toLowerCase() === (e.issuer || '').toLowerCase()) ||
+    SERVICE_PRESETS.find((p) => p.id === e.logo)
   form.value = {
-    issuer: e.issuer,
+    serviceId: preset?.id || 'other',
+    customName: preset && preset.id !== 'other' ? '' : e.issuer || '',
     label: e.label,
     secret: e.secret,
-    type: e.type,
-    algorithm: e.algorithm,
+    type: e.type === 'steam' || e.type === 'hotp' || e.type === 'totp' ? e.type : 'totp',
+    algorithm: normalizeAlgorithm(e.algorithm),
     digits: e.digits,
     period: e.period,
     counter: e.counter,
-    serviceId: SERVICE_PRESETS.find((p) => p.issuer === e.issuer)?.id || 'other',
-    accountId: e.accountId || '',
   }
   showForm.value = true
 }
@@ -152,32 +142,82 @@ function onServicePick(v: string | number) {
   const id = String(v)
   form.value.serviceId = id
   const p = SERVICE_PRESETS.find((x) => x.id === id)
-  if (p && p.issuer) form.value.issuer = p.issuer
+  if (id === 'steam') {
+    form.value.type = 'steam'
+    form.value.algorithm = 'SHA1'
+    form.value.digits = 5
+  } else if (p?.issuer && form.value.type === 'steam') {
+    form.value.type = 'totp'
+    form.value.digits = 6
+  }
+}
+
+function onTypePick(v: string | number) {
+  const ty = String(v) as TotpType
+  form.value.type = ty
+  if (ty === 'steam') {
+    form.value.algorithm = 'SHA1'
+    form.value.digits = 5
+    form.value.period = 30
+    if (form.value.serviceId !== 'steam' && form.value.serviceId !== 'other') {
+      form.value.serviceId = 'steam'
+    }
+  } else if (ty === 'totp' && form.value.digits === 5) {
+    form.value.digits = 6
+  }
+}
+
+function resolveIssuer(): string {
+  if (form.value.type === 'steam') return 'Steam'
+  if (form.value.serviceId === 'other') return form.value.customName.trim()
+  return (
+    SERVICE_PRESETS.find((p) => p.id === form.value.serviceId)?.issuer ||
+    form.value.customName.trim()
+  )
 }
 
 function saveForm() {
-  const secret = normalizeSecret(form.value.secret)
-  if (!isValidBase32Secret(secret) && !form.value.secret.toLowerCase().startsWith('otpauth://')) {
-    // try parse as uri
-    const fromUri = parseOtpauthUri(form.value.secret)
-    if (!fromUri) {
-      flashMsg(t('twofa.invalidSecret'), 'danger')
-      return
+  // Allow raw otpauth in secret field
+  let secret = form.value.secret.trim()
+  let draftFromUri: TotpEntryDraft | null = null
+  if (secret.toLowerCase().includes('otpauth://')) {
+    draftFromUri = parseOtpauthUri(secret)
+    if (draftFromUri) {
+      secret = draftFromUri.secret
+      if (!form.value.label) form.value.label = draftFromUri.label
+      if (form.value.serviceId === 'other' && !form.value.customName && draftFromUri.issuer) {
+        form.value.customName = draftFromUri.issuer
+      }
+      form.value.type = draftFromUri.type
+      form.value.algorithm = draftFromUri.algorithm
+      form.value.digits = draftFromUri.digits
+      form.value.period = draftFromUri.period
+      form.value.counter = draftFromUri.counter
     }
-    applyDraft(fromUri)
+  }
+  secret = normalizeSecret(secret)
+  if (!isValidBase32Secret(secret)) {
+    flashMsg(t('twofa.invalidSecret'), 'danger')
     return
   }
-  if (!form.value.label.trim() && !form.value.issuer.trim()) {
+  const issuer = resolveIssuer()
+  const label = form.value.label.trim()
+  if (!label && !issuer) {
     flashMsg(t('twofa.needLabel'), 'danger')
     return
   }
+  if (form.value.serviceId === 'other' && !issuer) {
+    flashMsg(t('twofa.needServiceName'), 'danger')
+    return
+  }
+  const type = form.value.type
   const draft: TotpEntryDraft = {
-    issuer: form.value.issuer.trim(),
-    label: form.value.label.trim() || form.value.issuer.trim() || 'Account',
+    issuer: issuer || label || 'Account',
+    label: label || issuer || 'Account',
     secret,
-    type: form.value.type,
-    algorithm: form.value.algorithm,
-    digits: form.value.digits === 8 ? 8 : 6,
+    type,
+    algorithm: type === 'steam' ? 'SHA1' : normalizeAlgorithm(form.value.algorithm),
+    digits: type === 'steam' ? 5 : form.value.digits === 8 ? 8 : form.value.digits === 7 ? 7 : 6,
     period: Math.max(15, Number(form.value.period) || 30),
     counter: Math.max(0, Number(form.value.counter) || 0),
   }
@@ -185,23 +225,19 @@ function saveForm() {
 }
 
 function applyDraft(draft: TotpEntryDraft) {
-  const acc = form.value.accountId
-    ? accounts.findById(form.value.accountId)
-    : undefined
+  const logo =
+    form.value.serviceId !== 'other'
+      ? form.value.serviceId
+      : SERVICE_PRESETS.find((p) => p.issuer.toLowerCase() === draft.issuer.toLowerCase())?.id ||
+        'other'
   if (editingId.value) {
     twofa.update(editingId.value, {
       ...draft,
-      accountId: acc?.id,
-      accountEmail: acc?.email,
-      logo: form.value.serviceId,
+      logo,
     })
     flashMsg(t('twofa.saved'))
   } else {
-    twofa.addFromDraft(draft, {
-      accountId: acc?.id,
-      accountEmail: acc?.email,
-      logo: form.value.serviceId,
-    })
+    twofa.addFromDraft(draft, { logo })
     flashMsg(t('twofa.added'))
   }
   showForm.value = false
@@ -210,21 +246,32 @@ function applyDraft(draft: TotpEntryDraft) {
 
 function onPasteSecret() {
   const d = parseSecretOrUri(form.value.secret, {
-    issuer: form.value.issuer,
+    issuer: resolveIssuer(),
     label: form.value.label,
+    type: form.value.type,
   })
   if (!d) {
     flashMsg(t('twofa.invalidSecret'), 'danger')
     return
   }
   form.value.secret = d.secret
-  if (d.issuer) form.value.issuer = d.issuer
   if (d.label) form.value.label = d.label
   form.value.type = d.type
   form.value.algorithm = d.algorithm
   form.value.digits = d.digits
   form.value.period = d.period
   form.value.counter = d.counter
+  if (d.issuer) {
+    const preset = SERVICE_PRESETS.find(
+      (p) => p.issuer && p.issuer.toLowerCase() === d.issuer.toLowerCase(),
+    )
+    if (preset) form.value.serviceId = preset.id
+    else {
+      form.value.serviceId = 'other'
+      form.value.customName = d.issuer
+    }
+  }
+  if (d.type === 'steam') form.value.serviceId = 'steam'
   flashMsg(t('twofa.secretParsed'))
 }
 
@@ -276,19 +323,25 @@ function applyParsedDraft(raw: string): boolean {
   const d = parseOtpauthUri(cleaned) || parseSecretOrUri(cleaned)
   if (!d) return false
   form.value.secret = d.secret
-  form.value.issuer = d.issuer || form.value.issuer
   form.value.label = d.label || form.value.label
   form.value.type = d.type
   form.value.algorithm = d.algorithm
   form.value.digits = d.digits
   form.value.period = d.period
   form.value.counter = d.counter
-  // Map known issuer → service preset
   const iss = (d.issuer || '').toLowerCase()
   const preset =
     SERVICE_PRESETS.find((p) => p.issuer && p.issuer.toLowerCase() === iss) ||
     SERVICE_PRESETS.find((p) => p.name.toLowerCase() === iss)
-  if (preset) form.value.serviceId = preset.id
+  if (d.type === 'steam') {
+    form.value.serviceId = 'steam'
+  } else if (preset) {
+    form.value.serviceId = preset.id
+    form.value.customName = ''
+  } else if (d.issuer) {
+    form.value.serviceId = 'other'
+    form.value.customName = d.issuer
+  }
   showForm.value = true
   flashMsg(t('twofa.scanOk'))
   return true
@@ -559,51 +612,34 @@ onUnmounted(() => {
         <button type="button" class="btn btn-ghost btn-sm" @click="exportJson">
           {{ t('twofa.exportJson') }}
         </button>
-        <!-- 移动端：相机直扫为主；桌面：上传图片为主 -->
+        <!-- Web + H5: live camera + file/album both always available -->
         <button
-          v-if="isMobile"
           type="button"
           class="btn btn-outline btn-sm"
-          @click="cameraOn ? stopCamera() : startCamera()"
-        >
-          {{ cameraOn ? t('twofa.stopScan') : t('twofa.scan') }}
-        </button>
-        <button
-          v-else
-          type="button"
-          class="btn btn-outline btn-sm"
-          @click="openImagePicker"
-        >
-          {{ t('twofa.scanFile') }}
-        </button>
-        <!-- 次要入口：移动端也可从相册选图；桌面仍可开摄像头（极少用） -->
-        <button
-          v-if="isMobile"
-          type="button"
-          class="btn btn-ghost btn-sm"
-          @click="openImagePicker"
-        >
-          {{ t('twofa.scanAlbum') }}
-        </button>
-        <button
-          v-else
-          type="button"
-          class="btn btn-ghost btn-sm"
           @click="cameraOn ? stopCamera() : startCamera()"
         >
           {{ cameraOn ? t('twofa.stopScan') : t('twofa.scanWebcam') }}
         </button>
+        <button type="button" class="btn btn-outline btn-sm" @click="openImagePicker">
+          {{ isMobile ? t('twofa.scanAlbum') : t('twofa.scanFile') }}
+        </button>
+        <!-- No capture attr: album / file picker on H5 & desktop -->
         <input
           ref="fileInputEl"
           type="file"
-          accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.bmp"
+          accept="image/*"
           class="sr-only"
           @change="onFileQr"
         />
       </div>
     </div>
 
-    <div v-if="cameraOn" class="camera card-solid" :class="{ 'camera-mobile': isMobile }">
+    <!-- Camera panel sits above modal so form-triggered scan still works -->
+    <div
+      v-if="cameraOn"
+      class="camera card-solid"
+      :class="{ 'camera-mobile': isMobile, 'camera-overlay': showForm }"
+    >
       <div class="video-wrap">
         <video ref="videoEl" class="video" playsinline muted autoplay />
         <div class="scan-frame" aria-hidden="true" />
@@ -644,7 +680,7 @@ onUnmounted(() => {
         </div>
         <button type="button" class="code-row" @click="copyCode(e)">
           <span class="code">{{ twofa.codeFor(e) }}</span>
-          <span v-if="e.type === 'totp'" class="remain">
+          <span v-if="e.type !== 'hotp'" class="remain">
             <span class="bar" :style="{ width: `${(twofa.remainingFor(e) / e.period) * 100}%` }" />
             <span class="sec">{{ twofa.remainingFor(e) }}s</span>
           </span>
@@ -652,9 +688,9 @@ onUnmounted(() => {
       </article>
     </div>
 
-    <!-- Add / edit modal -->
+    <!-- Add / edit modal — simplified fields -->
     <div v-if="showForm" class="modal-backdrop" @click.self="showForm = false">
-      <div class="modal card-solid">
+      <div class="modal card-solid twofa-modal">
         <header class="modal-head">
           <h2>{{ editingId ? t('twofa.editTitle') : t('twofa.addTitle') }}</h2>
           <button type="button" class="btn btn-ghost btn-sm" @click="showForm = false">
@@ -662,6 +698,7 @@ onUnmounted(() => {
           </button>
         </header>
         <div class="modal-body">
+          <!-- 服务类型：仅 Other 需填名称 -->
           <div class="field">
             <label class="label">{{ t('twofa.service') }}</label>
             <UiSelect
@@ -670,14 +707,27 @@ onUnmounted(() => {
               @update:model-value="onServicePick"
             />
           </div>
-          <div class="field">
-            <label class="label">{{ t('twofa.issuer') }}</label>
-            <input v-model="form.issuer" class="input" type="text" />
+          <div v-if="isOtherService" class="field">
+            <label class="label">{{ t('twofa.serviceName') }}</label>
+            <input
+              v-model="form.customName"
+              class="input"
+              type="text"
+              :placeholder="t('twofa.serviceNamePh')"
+            />
           </div>
+          <!-- 账户名称 -->
           <div class="field">
             <label class="label">{{ t('twofa.label') }}</label>
-            <input v-model="form.label" class="input" type="text" :placeholder="t('twofa.labelPh')" />
+            <input
+              v-model="form.label"
+              class="input"
+              type="text"
+              :placeholder="t('twofa.labelPh')"
+              autocomplete="username"
+            />
           </div>
+          <!-- 密钥 + 扫码（Web / H5 均支持摄像头与选图） -->
           <div class="field">
             <label class="label">{{ t('twofa.secret') }}</label>
             <textarea
@@ -685,44 +735,52 @@ onUnmounted(() => {
               class="textarea"
               rows="2"
               :placeholder="t('twofa.secretPh')"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
             />
-            <button type="button" class="btn btn-ghost btn-xs" style="margin-top: 6px" @click="onPasteSecret">
-              {{ t('twofa.parseSecret') }}
-            </button>
+            <div class="secret-acts">
+              <button type="button" class="btn btn-ghost btn-xs" @click="onPasteSecret">
+                {{ t('twofa.parseSecret') }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs"
+                @click="cameraOn ? stopCamera() : startCamera()"
+              >
+                {{ cameraOn ? t('twofa.stopScan') : t('twofa.scanWebcam') }}
+              </button>
+              <button type="button" class="btn btn-ghost btn-xs" @click="openImagePicker">
+                {{ isMobile ? t('twofa.scanAlbum') : t('twofa.scanFile') }}
+              </button>
+            </div>
           </div>
+          <!-- 令牌类型 + 算法 -->
           <div class="field-row">
             <div class="field">
               <label class="label">{{ t('twofa.type') }}</label>
-              <UiSelect v-model="form.type" :options="typeOptions" />
+              <UiSelect
+                :model-value="form.type"
+                :options="typeOptions"
+                @update:model-value="onTypePick"
+              />
             </div>
             <div class="field">
               <label class="label">{{ t('twofa.algorithm') }}</label>
-              <UiSelect v-model="form.algorithm" :options="algoOptions" />
-            </div>
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label class="label">{{ t('twofa.digits') }}</label>
               <UiSelect
-                :model-value="form.digits"
-                :options="digitsOptions"
-                @update:model-value="(v) => (form.digits = Number(v))"
+                :model-value="form.algorithm"
+                :options="algoOptions"
+                :disabled="isSteam"
+                mono
+                @update:model-value="(v) => (form.algorithm = normalizeAlgorithm(String(v)))"
               />
             </div>
-            <div v-if="form.type === 'totp'" class="field">
-              <label class="label">{{ t('twofa.period') }}</label>
-              <input v-model.number="form.period" class="input" type="number" min="15" max="120" />
-            </div>
-            <div v-else class="field">
-              <label class="label">{{ t('twofa.counter') }}</label>
-              <input v-model.number="form.counter" class="input" type="number" min="0" />
-            </div>
           </div>
-          <div class="field">
-            <label class="label">{{ t('twofa.bindAccount') }}</label>
-            <UiSelect v-model="form.accountId" :options="accountOptions" mono />
-            <p class="hint">{{ t('twofa.bindHint') }}</p>
+          <div v-if="isHotp" class="field">
+            <label class="label">{{ t('twofa.counter') }}</label>
+            <input v-model.number="form.counter" class="input" type="number" min="0" />
           </div>
+          <p v-if="isSteam" class="hint">{{ t('twofa.steamHint') }}</p>
           <div class="btn-row">
             <button type="button" class="btn btn-primary" @click="saveForm">
               {{ t('common.save') }}
@@ -793,6 +851,17 @@ onUnmounted(() => {
   position: sticky;
   top: 8px;
   z-index: 5;
+}
+/* When add/edit modal is open, float camera above modal (z-modal=100) */
+.camera-overlay {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: calc(var(--z-modal, 100) + 20);
+  width: min(480px, calc(100vw - 24px));
+  max-height: min(80vh, 640px);
+  box-shadow: var(--shadow-lg);
 }
 .video-wrap {
   position: relative;
@@ -924,6 +993,22 @@ onUnmounted(() => {
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+.secret-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.twofa-modal {
+  width: min(440px, 100%);
+  /* Keep dropdowns above modal chrome */
+  position: relative;
+  z-index: 1;
+  overflow: visible;
+}
+.twofa-modal .modal-body {
+  overflow: visible;
+}
 .act-del {
   color: var(--danger) !important;
 }
@@ -936,6 +1021,10 @@ onUnmounted(() => {
   }
   .twofa-page {
     padding: 10px;
+  }
+  .twofa-modal {
+    width: 100%;
+    max-height: min(92vh, 900px);
   }
 }
 </style>
