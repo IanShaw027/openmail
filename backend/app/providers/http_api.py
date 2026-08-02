@@ -20,6 +20,57 @@ _TIMEOUT = 20.0
 _MAX_REDIRECTS = 5
 _MAX_BODY_BYTES = 2_000_000
 
+# When user imports only the Worker origin (https://xxx.workers.dev), try these
+# JSON endpoints with the same auth headers (cf_temp_email / MoeMail / generic).
+_WORKER_API_PATH_CANDIDATES = (
+    "/api/mails",
+    "/api/mail",
+    "/api/emails",
+    "/api/messages",
+    "/api/address",
+    "/api/mails?limit=50",
+    "/api/emails?limit=50",
+    "/admin_api/mails",
+    "/open_api/mails",
+    "/api/v1/mails",
+    "/api/public/mails",
+    "/api/mailboxes",
+    "/api/settings",
+)
+
+
+def expand_api_url_candidates(api_url: str) -> list[str]:
+    """If api_url is a bare origin (no useful path), return origin + common API paths.
+
+    Users often import only ``https://xxx.workers.dev`` — the admin UI HTML lives
+    at ``/`` while JSON is under ``/api/*``. Always try the original URL first.
+    """
+    raw = (api_url or "").strip()
+    if not raw:
+        return []
+    from urllib.parse import urlparse, urlunparse
+
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return [raw]
+    path = (parsed.path or "").rstrip("/") or ""
+    # Has a real path (not empty / bare /) — use as-is only
+    if path and path not in ("", "/"):
+        return [raw]
+    # Bare host / trailing slash only
+    base = urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+    if not base:
+        return [raw]
+    out: list[str] = [raw if raw.endswith("/") else raw]  # keep user URL first
+    if base + "/" not in out and base not in out:
+        out.insert(0, base)
+    for p in _WORKER_API_PATH_CANDIDATES:
+        u = f"{base}{p}"
+        if u not in out:
+            out.append(u)
+    return out
+
 
 def build_api_auth_headers(creds: dict[str, Any]) -> dict[str, str]:
     """Build outbound headers for HttpApi (CF Worker / self-hosted).
@@ -450,52 +501,73 @@ class HttpApiProvider:
         proxy = creds.get("proxy") or getattr(account, "proxy", None)
         proxy_str = str(proxy).strip() if proxy else None
 
-        try:
-            resp = self.fetch_url(
-                api_url, headers=extra_headers or None, proxy=proxy_str or None
-            )
-        except SsrfError as exc:
-            return FetchResult(
-                ok=False,
-                folder=folder,
-                error=f"SSRF 拦截: {exc.message}",
-            )
-        except httpx.TimeoutException:
-            return FetchResult(
-                ok=False,
-                folder=folder,
-                error="取件超时，请重试 / Fetch timed out, please retry",
-            )
-        except httpx.HTTPError as exc:
-            return FetchResult(
-                ok=False,
-                folder=folder,
-                error=f"网络错误 / Network error: {exc.__class__.__name__}",
-            )
+        candidates = expand_api_url_candidates(api_url)
+        last_err: str | None = None
+        payload: Any = None
+        used_url = api_url
 
-        if resp.status_code >= 400:
-            return FetchResult(
-                ok=False,
-                folder=folder,
-                error=f"上游 HTTP {resp.status_code} / Upstream HTTP {resp.status_code}",
-            )
-
-        content = resp.content[:_MAX_BODY_BYTES]
-        try:
-            payload = resp.json()
-        except Exception:
-            # try decode limited content
+        for try_url in candidates:
             try:
-                import json
-
-                payload = json.loads(content.decode("utf-8", errors="replace"))
-            except Exception:
-                return FetchResult(
-                    ok=False,
-                    folder=folder,
-                    error="上游返回非 JSON / Upstream returned non-JSON",
+                resp = self.fetch_url(
+                    try_url, headers=extra_headers or None, proxy=proxy_str or None
                 )
+            except SsrfError as exc:
+                last_err = f"SSRF 拦截: {exc.message}"
+                # SSRF on one candidate is fatal for that host
+                if try_url == candidates[0]:
+                    return FetchResult(ok=False, folder=folder, error=last_err)
+                continue
+            except httpx.TimeoutException:
+                last_err = "取件超时，请重试 / Fetch timed out, please retry"
+                continue
+            except httpx.HTTPError as exc:
+                last_err = f"网络错误 / Network error: {exc.__class__.__name__}"
+                continue
 
+            if resp.status_code >= 400:
+                # 401/403 on a path often means "right host, need auth or wrong path"
+                last_err = (
+                    f"上游 HTTP {resp.status_code} / Upstream HTTP {resp.status_code}"
+                )
+                # Keep trying other paths (root HTML 200 vs /api/mails 401 with key)
+                if resp.status_code in (401, 403, 404):
+                    continue
+                # 5xx: try next path once
+                if resp.status_code >= 500:
+                    continue
+                continue
+
+            content = resp.content[:_MAX_BODY_BYTES]
+            try:
+                payload = resp.json()
+            except Exception:
+                try:
+                    import json
+
+                    payload = json.loads(content.decode("utf-8", errors="replace"))
+                except Exception:
+                    # HTML admin UI at / — try next API path
+                    last_err = "上游返回非 JSON / Upstream returned non-JSON"
+                    continue
+
+            # Valid JSON — prefer paths that yield messages or mailboxes
+            mboxes = extract_mailbox_list(payload)
+            msgs = extract_message_list(payload)
+            if mboxes or msgs or isinstance(payload, (list, dict)):
+                # Empty list JSON is still success (no mail yet)
+                used_url = try_url
+                break
+            last_err = "上游 JSON 无可解析邮件 / Upstream JSON has no messages"
+            payload = None
+        else:
+            return FetchResult(
+                ok=False,
+                folder=folder,
+                error=last_err
+                or "无法从 Worker 根地址解析邮件 API，请检查密钥或 API 路径",
+            )
+
+        assert payload is not None
         mailbox_list = extract_mailbox_list(payload)
         items = extract_message_list(payload)
         top = int((limits or {}).get("top", 50) or (limits or {}).get("max_messages", 50) or 50)
@@ -523,6 +595,8 @@ class HttpApiProvider:
             meta["mailbox_count"] = len(mailbox_list)
         if filter_email:
             meta["filter_email"] = filter_email
+        if used_url and used_url.rstrip("/") != api_url.rstrip("/"):
+            meta["resolved_api_url"] = used_url
 
         updates = CredentialUpdates(
             session_meta=meta or None,

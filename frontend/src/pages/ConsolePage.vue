@@ -1263,6 +1263,12 @@ async function fetchOne(
       // Apply status/code/cache without toast spam or panel overwrite
       const code = extractCode(result)
       const msgs = result.messages ?? []
+      const mboxes =
+        result.mailboxes ||
+        (result.session_meta &&
+        Array.isArray((result.session_meta as { mailboxes?: string[] }).mailboxes)
+          ? (result.session_meta as { mailboxes: string[] }).mailboxes
+          : null)
       void accounts.patchAccount(acc.id, {
         latestCode: code ?? acc.latestCode,
         status: result.ok === false ? 'error' : 'ok',
@@ -1273,7 +1279,17 @@ async function fetchOne(
               sessionMeta: result.session_meta as Record<string, unknown> | undefined,
             }
           : {}),
+        ...(result.ok !== false && mboxes?.length && (acc.isApiSource || acc.type === 'http_api')
+          ? { isApiSource: acc.isApiSource ?? !acc.parentApiId, apiMailboxes: mboxes }
+          : {}),
       })
+      if (
+        result.ok !== false &&
+        mboxes?.length &&
+        (acc.isApiSource || (!acc.parentApiId && acc.type === 'http_api'))
+      ) {
+        accounts.syncApiMailboxes(acc.id, mboxes)
+      }
       if (result.ok !== false && msgs.length) {
         try {
           const folderTag = mailCache.normalizeFolder(result.folder || mailFolder.value)
@@ -1281,7 +1297,9 @@ async function fetchOne(
             ...m,
             folder: mailCache.normalizeFolder(m.folder || folderTag),
           }))
-          mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+          if (!acc.isApiSource || tagged.length) {
+            mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+          }
           userSettings.markFetched(acc.email, true)
         } catch {
           /* ignore */
@@ -1345,6 +1363,66 @@ async function onBatchFetch() {
   } finally {
     batchBusy.value = false
   }
+}
+
+/** Auto-detect accounts still in 未检测 (unknown): poll every 5s, few concurrent. */
+const AUTO_DETECT_INTERVAL_MS = 5_000
+const AUTO_DETECT_BATCH = 3
+const autoDetectBusy = ref(false)
+const autoDetectInflight = new Set<string>()
+let autoDetectTimer: ReturnType<typeof setInterval> | null = null
+
+function unknownAccountsToDetect(): MailAccount[] {
+  return accounts.accounts.filter((a) => {
+    if (a.parentApiId) return false // children wait for parent expansion / own click
+    if (a.status && a.status !== 'unknown') return false
+    if (!accountCanFetch(a) && !(a.type === 'http_api' && a.apiUrl)) return false
+    if (autoDetectInflight.has(a.id)) return false
+    if (fetchingId.value === a.id) return false
+    return true
+  })
+}
+
+async function tickAutoDetect() {
+  if (autoDetectBusy.value || batchBusy.value) return
+  if (document.visibilityState === 'hidden') return
+  const pending = unknownAccountsToDetect()
+  if (!pending.length) return
+  autoDetectBusy.value = true
+  try {
+    const batch = pending.slice(0, AUTO_DETECT_BATCH)
+    await mapPool(batch, Math.min(AUTO_DETECT_BATCH, batchConcurrency.value || 3), async (acc) => {
+      autoDetectInflight.add(acc.id)
+      try {
+        await fetchOne(acc, true, { silent: true })
+      } finally {
+        autoDetectInflight.delete(acc.id)
+      }
+    })
+    const cur = selected.value
+    if (cur && batch.some((a) => a.id === cur.id)) {
+      loadMessagesFromCache(cur)
+    }
+  } finally {
+    autoDetectBusy.value = false
+  }
+}
+
+function startAutoDetect() {
+  if (autoDetectTimer) return
+  autoDetectTimer = setInterval(() => {
+    void tickAutoDetect()
+  }, AUTO_DETECT_INTERVAL_MS)
+  // first tick soon after mount (vault may still hydrate)
+  window.setTimeout(() => void tickAutoDetect(), 800)
+}
+
+function stopAutoDetect() {
+  if (autoDetectTimer) {
+    clearInterval(autoDetectTimer)
+    autoDetectTimer = null
+  }
+  autoDetectInflight.clear()
 }
 
 
@@ -1742,6 +1820,8 @@ onMounted(() => {
   // Restore mail panel from durable local cache after refresh
   const sel = accounts.selected
   if (sel) loadMessagesFromCache(sel)
+  // 未检测账号自动轮询检测（5s）
+  startAutoDetect()
 })
 
 watch(
@@ -1753,10 +1833,21 @@ watch(
   },
 )
 
+// New imports often land as unknown — kick a detect pass soon
+watch(
+  () => accounts.accounts.filter((a) => !a.status || a.status === 'unknown').length,
+  (n, prev) => {
+    if (n > (prev ?? 0)) {
+      window.setTimeout(() => void tickAutoDetect(), 400)
+    }
+  },
+)
+
 onUnmounted(() => {
   document.removeEventListener('keydown', onKeydown)
   mqNarrow?.removeEventListener('change', onNarrowChange)
   twofa.stopTicker()
+  stopAutoDetect()
 })
 </script>
 

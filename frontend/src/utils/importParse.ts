@@ -32,13 +32,20 @@ function hostFromUrl(url: string): string {
   }
 }
 
+/** Normalize CF Worker URL: bare origin is enough (backend probes /api/*). */
+function normalizeWorkerApiUrl(url: string): string {
+  const u = url.trim().replace(/\/+$/, '')
+  return u
+}
+
 /** Bare Worker URL, optional secret: `https://…` or `https://…----secret`. */
 function parseBareApiUrl(raw: string): ParsedLine | null {
   const text = raw.trim()
   if (!text.includes('http')) return null
-  // Single URL
+  // Single URL (root workers.dev is OK — backend expands /api/mails etc.)
   if (looksLikeUrl(text) && !text.includes('----') && !/\s/.test(text)) {
-    const host = hostFromUrl(text)
+    const apiUrl = normalizeWorkerApiUrl(text)
+    const host = hostFromUrl(apiUrl)
     return {
       ok: true,
       kind: 'http_api',
@@ -47,7 +54,7 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
       account: {
         email: `api@${host}`,
         type: 'http_api',
-        apiUrl: text,
+        apiUrl,
         isApiSource: true,
         brand: 'http_api',
         rawLine: raw,
@@ -65,7 +72,8 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
     const hasEmail = parts.some((p) => looksLikeEmail(p))
     if (hasEmail) return null
     const secret = nonUrl[0]
-    const host = hostFromUrl(urlPart)
+    const apiUrl = normalizeWorkerApiUrl(urlPart)
+    const host = hostFromUrl(apiUrl)
     return {
       ok: true,
       kind: 'http_api',
@@ -76,7 +84,7 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
       account: {
         email: `api@${host}`,
         type: 'http_api',
-        apiUrl: urlPart,
+        apiUrl,
         apiKey: secret,
         password: secret,
         isApiSource: true,
@@ -254,7 +262,8 @@ export function parseAccountLine(line: string): ParsedLine {
   // URL anywhere → http_api (CF Worker / multi-inbox source)
   const urlPart = rest.find((p) => looksLikeUrl(p))
   if (urlPart) {
-    const host = hostFromUrl(urlPart)
+    const apiUrl = normalizeWorkerApiUrl(urlPart)
+    const host = hostFromUrl(apiUrl)
     const isPlaceholder =
       email.startsWith('api@') ||
       email === host ||
@@ -280,7 +289,7 @@ export function parseAccountLine(line: string): ParsedLine {
       account: {
         email: sourceEmail,
         type: 'http_api',
-        apiUrl: urlPart,
+        apiUrl,
         apiKey: secret,
         password: secret,
         isApiSource: isPlaceholder || true,

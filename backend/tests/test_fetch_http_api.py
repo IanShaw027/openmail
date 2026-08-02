@@ -20,6 +20,17 @@ def _mock_transport(handler):
     return httpx.MockTransport(handler)
 
 
+def test_expand_api_url_candidates_bare_worker() -> None:
+    from app.providers.http_api import expand_api_url_candidates
+
+    c = expand_api_url_candidates("https://ian10-mail-admin.ianshaw027.workers.dev")
+    assert c[0].startswith("https://ian10-mail-admin.ianshaw027.workers.dev")
+    assert any(x.endswith("/api/mails") for x in c)
+    # Full path should not expand
+    single = expand_api_url_candidates("https://x.workers.dev/api/mails")
+    assert single == ["https://x.workers.dev/api/mails"]
+
+
 def test_normalize_generic_message() -> None:
     msg = normalize_message_item(
         {
