@@ -288,14 +288,38 @@ export const useAccountsStore = defineStore('accounts', () => {
           .filter((a) => a.serverId)
           .map((a) => [a.serverId!, a] as const),
       )
+      // Prefer local vault secrets when the same email exists both places
+      const secretByEmail = new Map(
+        localAccounts.value.map((a) => [a.email.toLowerCase(), a] as const),
+      )
       const prevByEmail = new Map(
-        [...localAccounts.value, ...serverAccounts.value].map(
-          (a) => [a.email.toLowerCase(), a] as const,
-        ),
+        serverAccounts.value.map((a) => [a.email.toLowerCase(), a] as const),
       )
-      serverAccounts.value = rows.map((r) =>
-        mapServerToLocal(r, prevByServerId.get(r.id) || prevByEmail.get(r.email.toLowerCase())),
-      )
+      serverAccounts.value = rows.map((r) => {
+        const emailKey = r.email.toLowerCase()
+        const prev =
+          prevByServerId.get(r.id) ||
+          secretByEmail.get(emailKey) ||
+          prevByEmail.get(emailKey)
+        return mapServerToLocal(r, prev)
+      })
+      // Link local rows to cloud ids when email matches (keeps secrets in vault)
+      for (const srv of serverAccounts.value) {
+        if (!srv.serverId) continue
+        const li = localAccounts.value.findIndex(
+          (a) => a.email.toLowerCase() === srv.email.toLowerCase(),
+        )
+        if (li < 0) continue
+        const loc = localAccounts.value[li]!
+        if (loc.serverId !== srv.serverId || loc.clientSealed !== srv.clientSealed) {
+          localAccounts.value[li] = {
+            ...loc,
+            serverId: srv.serverId,
+            clientSealed: srv.clientSealed,
+            updatedAt: Date.now(),
+          }
+        }
+      }
     } catch (e) {
       // Missing device header or API down — keep previous
       if (!(e instanceof ApiError && e.status === 400)) {
@@ -598,6 +622,35 @@ export const useAccountsStore = defineStore('accounts', () => {
             /* ignore status patch */
           }
         }
+        // Dual-write local vault: client-sealed cloud rows cannot be fetched
+        // without browser secrets after reload.
+        const localIdx = localAccounts.value.findIndex(
+          (a) => a.email.toLowerCase() === emailKey,
+        )
+        if (localIdx >= 0) {
+          const prev = localAccounts.value[localIdx]!
+          localAccounts.value[localIdx] = {
+            ...prev,
+            ...partial,
+            id: prev.id,
+            storage: 'local',
+            serverId: row.id,
+            clientSealed: Boolean(clientSealed),
+            status: checked?.status ?? prev.status,
+            lastError: checked?.lastError,
+            groupId: partial.groupId || prev.groupId || gid,
+            updatedAt: Date.now(),
+          }
+        } else {
+          const loc = createAccountFromParsed(partial, { groupId: gid })
+          loc.serverId = row.id
+          loc.clientSealed = Boolean(clientSealed)
+          if (checked) {
+            loc.status = checked.status
+            loc.lastError = checked.lastError
+          }
+          localAccounts.value.push(loc)
+        }
         const mapped = mapServerToLocal(row, {
           ...partial,
           id: existing?.id || `srv_${row.id}`,
@@ -610,6 +663,7 @@ export const useAccountsStore = defineStore('accounts', () => {
           rawLine: partial.rawLine || partial.email,
           groupId: partial.groupId || gid,
           lastError: checked?.lastError,
+          clientSealed: Boolean(clientSealed),
         } as MailAccount)
         mapped.groupId = partial.groupId || gid
         if (checked) {

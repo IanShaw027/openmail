@@ -6,7 +6,11 @@ import { useToast } from '@/composables/useToast'
 import { useApiStatus } from '@/composables/useApiStatus'
 import { copyText } from '@/utils/clipboard'
 import type { MailAccount } from '@/types/account'
-import { accountCanFetch, accountCanSend } from '@/types/account'
+import {
+  accountCanFetch,
+  accountCanSend,
+  accountHasLocalFetchSecrets,
+} from '@/types/account'
 import { IMPORT_PLACEHOLDER, parseImportText } from '@/utils/importParse'
 import {
   type MailMessage,
@@ -1137,6 +1141,35 @@ function applyFetchResult(acc: MailAccount, result: FetchResult) {
  * When silent=true (batch): do not clobber global selection / message panel.
  * Returns true if fetch succeeded (ok !== false).
  */
+/**
+ * Resolve secrets for fetch: cloud list rows often lack password after reload;
+ * merge matching local-vault row (same email) so proxy fetch still works.
+ */
+function resolveFetchAccount(acc: MailAccount): MailAccount {
+  if (accountHasLocalFetchSecrets(acc)) return acc
+  const local = accounts.localAccounts.find(
+    (a) => a.email.toLowerCase() === acc.email.toLowerCase() && a.id !== acc.id,
+  )
+  if (!local || !accountHasLocalFetchSecrets(local)) return acc
+  return {
+    ...acc,
+    password: acc.password || local.password,
+    authCode: acc.authCode || local.authCode,
+    refreshToken: acc.refreshToken || local.refreshToken,
+    clientId: acc.clientId || local.clientId,
+    apiUrl: acc.apiUrl || local.apiUrl,
+    apiKey: acc.apiKey || local.apiKey,
+    apiAuthStyle: acc.apiAuthStyle || local.apiAuthStyle,
+    imapHost: acc.imapHost || local.imapHost,
+    imapPort: acc.imapPort || local.imapPort,
+    smtpHost: acc.smtpHost || local.smtpHost,
+    smtpPort: acc.smtpPort || local.smtpPort,
+    sessionCookies: acc.sessionCookies?.length ? acc.sessionCookies : local.sessionCookies,
+    sessionMeta: acc.sessionMeta || local.sessionMeta,
+    proxy: acc.proxy || local.proxy,
+  }
+}
+
 async function fetchOne(
   acc: MailAccount,
   quick = true,
@@ -1157,26 +1190,50 @@ async function fetchOne(
     // Incremental since: newest cached mail time (UTC) or lastFetchAt
     const since = userSettings.sinceFor(acc.email)
     const full = userSettings.needsFullFetch(acc.email)
+    // Prefer local-vault secrets (cloud mirror of client-sealed rows has none)
+    const src = resolveFetchAccount(acc)
     // Child mailbox under HttpApi: fetch with parent api_url + this address as filter
     const parent =
-      acc.parentApiId ? accounts.findById(acc.parentApiId) : undefined
-    const apiUrl = acc.apiUrl || parent?.apiUrl
-    const apiSecret = acc.apiKey || acc.password || parent?.apiKey || parent?.password
-    const apiAuthStyle = acc.apiAuthStyle || parent?.apiAuthStyle || 'auto'
+      src.parentApiId ? accounts.findById(src.parentApiId) : undefined
+    const apiUrl = src.apiUrl || parent?.apiUrl
+    const apiSecret = src.apiKey || src.password || parent?.apiKey || parent?.password
+    const apiAuthStyle = src.apiAuthStyle || parent?.apiAuthStyle || 'auto'
     const fetchEmail =
-      acc.isApiSource && acc.email.startsWith('api@')
-        ? acc.email
-        : acc.email
+      src.isApiSource && src.email.startsWith('api@')
+        ? src.email
+        : src.email
+    const hasLocalSecrets = accountHasLocalFetchSecrets(src) || Boolean(apiUrl && (apiSecret || parent))
     let result: FetchResult
-    if (acc.storage === 'server' && acc.serverId && !acc.password && !acc.refreshToken && !apiUrl) {
-      result = await fetchServerAccount(acc.serverId, { folder, quick })
+    // Server decrypt only when NOT client-sealed and browser has no secrets.
+    // Client-sealed blobs are intentional: admin cannot read plaintext.
+    if (
+      !hasLocalSecrets &&
+      src.storage === 'server' &&
+      src.serverId &&
+      !src.clientSealed
+    ) {
+      result = await fetchServerAccount(src.serverId, { folder, quick })
+    } else if (!hasLocalSecrets && src.clientSealed) {
+      result = {
+        ok: false,
+        error: t('console.clientSealedNeedLocal'),
+        messages: [],
+        folder,
+      }
+    } else if (!hasLocalSecrets) {
+      result = {
+        ok: false,
+        error: t('console.needLocalSecrets'),
+        messages: [],
+        folder,
+      }
     } else {
       const provider =
-        acc.type === 'http_api' || parent?.type === 'http_api'
+        src.type === 'http_api' || parent?.type === 'http_api'
           ? 'http_api'
-          : acc.type === 'unknown'
+          : src.type === 'unknown'
             ? 'cookie'
-            : acc.type
+            : src.type
       const credential =
         provider === 'http_api'
           ? {
@@ -1186,16 +1243,16 @@ async function fetchOne(
                 ? { api_key: apiSecret, password: apiSecret, api_auth_style: apiAuthStyle }
                 : { api_auth_style: 'none' }),
             }
-          : credentialFromLocal(acc)
+          : credentialFromLocal(src)
       result = await proxyFetchMail({
         email: fetchEmail,
         provider,
         folder,
         quick,
-        password: apiSecret || acc.password || parent?.password,
+        password: apiSecret || src.password || parent?.password,
         credential,
-        cookies: acc.sessionCookies?.length ? acc.sessionCookies : undefined,
-        proxy: acc.proxy || parent?.proxy || undefined,
+        cookies: src.sessionCookies?.length ? src.sessionCookies : undefined,
+        proxy: src.proxy || parent?.proxy || undefined,
         since: full ? undefined : since,
         full,
       })

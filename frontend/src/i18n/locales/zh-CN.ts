@@ -555,6 +555,9 @@ export default {
     fetchFailed: '取信失败',
     fetchDone: '已拉取 {n} 封邮件',
     fetchGotCode: '验证码：{code}',
+    clientSealedNeedLocal:
+      '该账号凭证仅保存在本机保险库（服务端无法解密）。请先解锁保险库；若换了浏览器/清了数据，请重新导入账号密码后再取信。',
+    needLocalSecrets: '本机没有该账号的密码/授权码/会话，无法取信。请重新编辑账号并填入凭证。',
     batchFetchResult: '批量拉取：成功 {ok} · 失败 {fail}',
     quotaLocalExceeded:
       '本机账号配额已满：当前 {current} 个，本次拟新增 {adding} 个（上限 {max}）。请在设置中填写授权令牌，或提高 QUOTA_MAX_LOCAL_ACCOUNTS。',

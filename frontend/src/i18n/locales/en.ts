@@ -558,6 +558,10 @@ export default {
     fetchFailed: 'Fetch failed',
     fetchDone: 'Fetched {n} message(s)',
     fetchGotCode: 'Code: {code}',
+    clientSealedNeedLocal:
+      'Credentials for this account are sealed in your browser vault (server cannot decrypt). Unlock the vault; if this is a new browser or data was cleared, re-import the account with password, then fetch.',
+    needLocalSecrets:
+      'No local password / auth code / session for this mailbox. Edit the account and enter credentials again.',
     batchFetchResult: 'Batch fetch: {ok} ok · {fail} failed',
     quotaLocalExceeded:
       'Local account quota exceeded: {current} stored, trying to add {adding} new (max {max}). Set a license token in Settings or raise QUOTA_MAX_LOCAL_ACCOUNTS.',

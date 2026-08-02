@@ -15,6 +15,11 @@ export interface MailAccount {
   status: AccountStatus
   /** Present when storage === 'server' */
   serverId?: string
+  /**
+   * Server only holds a vault-sealed blob — admin/API cannot decrypt.
+   * Fetch must use browser proxy with local secrets after unlock.
+   */
+  clientSealed?: boolean
   pool?: AccountPool
   password?: string
   refreshToken?: string
@@ -74,6 +79,27 @@ export interface MailAccount {
   updatedAt: number
 }
 
+/** Local secrets usable for browser → /api/fetch/proxy (server never needs them). */
+export function accountHasLocalFetchSecrets(acc: Pick<
+  MailAccount,
+  | 'password'
+  | 'authCode'
+  | 'refreshToken'
+  | 'clientId'
+  | 'apiUrl'
+  | 'apiKey'
+  | 'sessionCookies'
+>): boolean {
+  return Boolean(
+    acc.password ||
+      acc.authCode ||
+      acc.apiKey ||
+      acc.apiUrl ||
+      (acc.refreshToken && acc.clientId) ||
+      (acc.sessionCookies && acc.sessionCookies.length > 0),
+  )
+}
+
 /** Whether this account can receive (fetch) mail with current credentials. */
 export function accountCanFetch(acc: Pick<
   MailAccount,
@@ -84,29 +110,27 @@ export function accountCanFetch(acc: Pick<
   | 'refreshToken'
   | 'clientId'
   | 'apiUrl'
+  | 'apiKey'
   | 'sessionCookies'
   | 'storage'
   | 'serverId'
+  | 'clientSealed'
   | 'isApiSource'
 >): boolean {
-  if (acc.type === 'oauth') return Boolean(acc.refreshToken && acc.clientId)
-  if (acc.type === 'http_api') return Boolean(acc.apiUrl)
-  if (acc.type === 'imap') return Boolean(acc.password || acc.authCode)
-  if (acc.type === 'cookie') {
-    return Boolean(
-      acc.password ||
-        (acc.sessionCookies && acc.sessionCookies.length) ||
-        (acc.storage === 'server' && acc.serverId),
-    )
+  if (accountHasLocalFetchSecrets(acc)) {
+    if (acc.type === 'oauth') return Boolean(acc.refreshToken && acc.clientId)
+    if (acc.type === 'http_api') return Boolean(acc.apiUrl)
+    if (acc.type === 'imap') return Boolean(acc.password || acc.authCode)
+    if (acc.type === 'cookie' || acc.type === 'unknown') {
+      return Boolean(acc.password || (acc.sessionCookies && acc.sessionCookies.length))
+    }
+    return true
   }
-  // unknown: allow try if any secret present
-  return Boolean(
-    acc.password ||
-      acc.authCode ||
-      acc.apiUrl ||
-      (acc.refreshToken && acc.clientId) ||
-      (acc.storage === 'server' && acc.serverId),
-  )
+  // Server-side decrypt path only when not client-sealed
+  if (acc.storage === 'server' && acc.serverId && !acc.clientSealed) {
+    return true
+  }
+  return false
 }
 
 /** Whether this account can send mail (local secrets required). */
