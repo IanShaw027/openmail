@@ -20,7 +20,8 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.+-]+)?$ ]]; then
 fi
 
 TAG="v${VERSION}"
-IMAGE_HUB="ianshaw027/openmail:${TAG}"
+# Default published image is GHCR (CI always pushes). Hub is optional dual-publish.
+IMAGE_DEFAULT="ghcr.io/ianshaw027/openmail:${TAG}"
 
 echo "→ sync version ${VERSION} (tag ${TAG})"
 
@@ -55,25 +56,20 @@ print(f"  {path.relative_to(root)}")
 PY
 
 # compose default image pin
-python3 - "$ROOT" "$IMAGE_HUB" <<'PY'
+python3 - "$ROOT" "$IMAGE_DEFAULT" <<'PY'
 import pathlib, re, sys
 root, image = pathlib.Path(sys.argv[1]), sys.argv[2]
 path = root / "docker-compose.yml"
 text = path.read_text(encoding="utf-8")
 new = re.sub(
-    r"(\$\{OPENMAIL_IMAGE:-)ianshaw027/openmail:[^}]+(\})",
+    r"(\$\{OPENMAIL_IMAGE:-)(?:ghcr\.io/)?ianshaw027/openmail:[^}]+(\})",
     rf"\1{image}\2",
     text,
     count=1,
 )
-# comment examples with version tags (best-effort)
-new = re.sub(
-    r"ianshaw027/openmail:v[0-9]+\.[0-9]+\.[0-9]+",
-    image,
-    new,
-)
-if "${OPENMAIL_IMAGE:-" + image + "}" not in new and f"OPENMAIL_IMAGE:-{image}" not in new:
-    # still write if at least one substitution happened
+# Only rewrite the compose default pin line already handled above.
+# Do not mass-replace Hub comment examples (optional dual-publish).
+if f"OPENMAIL_IMAGE:-{image}" not in new and "${OPENMAIL_IMAGE:-" + image + "}" not in new:
     if new == text:
         raise SystemExit(f"could not update compose image in {path}")
 path.write_text(new, encoding="utf-8")
@@ -81,7 +77,7 @@ print(f"  {path.relative_to(root)}")
 PY
 
 # install.sh default
-python3 - "$ROOT" "$IMAGE_HUB" <<'PY'
+python3 - "$ROOT" "$IMAGE_DEFAULT" <<'PY'
 import pathlib, re, sys
 root, image = pathlib.Path(sys.argv[1]), sys.argv[2]
 path = root / "scripts" / "install.sh"

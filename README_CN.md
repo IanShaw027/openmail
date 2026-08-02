@@ -67,7 +67,7 @@
 
 ## 快速开始（Docker）
 
-**拉取官方镜像**（推荐 — [Docker Hub](https://hub.docker.com/r/ianshaw027/openmail)）：
+**拉取官方镜像**（推荐 — [GHCR](https://github.com/IanShaw027/openmail/pkgs/container/openmail)，每个 `v*` tag 自动构建）：
 
 ```bash
 git clone https://github.com/IanShaw027/openmail.git
@@ -83,8 +83,8 @@ curl -s http://127.0.0.1:8000/api/health
 
 | 镜像 | 标签 |
 |------|------|
-| `ianshaw027/openmail` | `v0.1.0`、`latest` |
-| `ghcr.io/ianshaw027/openmail` | CI 发布后可用 |
+| `ghcr.io/ianshaw027/openmail` | **`v*` / `latest`（默认）** |
+| `ianshaw027/openmail`（Docker Hub） | 可选双发或手动推送 |
 
 本地构建：`docker compose up -d --build`  
 也可：`./scripts/install.sh`

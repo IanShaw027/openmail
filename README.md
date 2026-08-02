@@ -73,7 +73,7 @@ See [SECURITY.md](SECURITY.md) and [docs/legal/](docs/legal/).
 
 ## Quick start (Docker)
 
-**Pull published image** (recommended — [Docker Hub](https://hub.docker.com/r/ianshaw027/openmail)):
+**Pull published image** (recommended — [GHCR](https://github.com/IanShaw027/openmail/pkgs/container/openmail), built on every `v*` tag):
 
 ```bash
 git clone https://github.com/IanShaw027/openmail.git
@@ -93,15 +93,15 @@ One-liner without cloning compose files:
 docker run -d --name openmail -p 8000:8000 \
   -e OPENMAIL_MASTER_KEY="$(openssl rand -base64 32)" \
   -v openmail-data:/data \
-  ianshaw027/openmail:v0.1.0
+  ghcr.io/ianshaw027/openmail:v0.1.0
 ```
 
 | Image | Tags |
 |-------|------|
-| [ianshaw027/openmail](https://hub.docker.com/r/ianshaw027/openmail) | `v0.1.0`, `latest` (Hub secret or manual push) |
-| `ghcr.io/ianshaw027/openmail` | **every `v*` tag** via GitHub Actions |
+| `ghcr.io/ianshaw027/openmail` | **`v*` / `latest` — default** (GitHub Actions) |
+| [ianshaw027/openmail](https://hub.docker.com/r/ianshaw027/openmail) | optional dual-publish (`DOCKERHUB_TOKEN`) or manual push |
 
-Override image: `OPENMAIL_IMAGE=ghcr.io/ianshaw027/openmail:v0.1.0` in `.env` or the environment.
+Override: `OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0` (Hub) or any tag in `.env`.
 
 **Release:** each git tag `vX.Y.Z` builds the package and GitHub Release (auto version bake). See [docs/17-release.md](docs/17-release.md) — `make release V=0.2.0`.
 
