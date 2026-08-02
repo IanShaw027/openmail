@@ -56,14 +56,14 @@ See root [`.env.example`](../.env.example).
 
 | Registry | Image | Notes |
 |----------|-------|--------|
-| Docker Hub | `ianshaw027/openmail:v0.1.0` / `:latest` | Primary public image (`linux/amd64`) |
-| GHCR | `ghcr.io/ianshaw027/openmail:…` | Published by CI when packages workflow succeeds |
+| **GHCR (default)** | `ghcr.io/ianshaw027/openmail:v0.1.0` / `:latest` | Every `v*` tag via Actions (`linux/amd64`) |
+| Docker Hub | `ianshaw027/openmail:…` | Optional dual-publish (`DOCKERHUB_TOKEN`) or manual |
 
 ```bash
 cp .env.example .env
 ./scripts/gen-master-key.sh   # paste into OPENMAIL_MASTER_KEY
 
-# Prefer pull (no local Node/Python build)
+# Prefer pull (no local Node/Python build) — compose defaults to GHCR
 docker compose pull
 docker compose up -d
 
@@ -75,8 +75,8 @@ Override image:
 
 ```bash
 # .env
-OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0
-# OPENMAIL_IMAGE=ghcr.io/ianshaw027/openmail:v0.1.0
+OPENMAIL_IMAGE=ghcr.io/ianshaw027/openmail:v0.1.0
+# OPENMAIL_IMAGE=ianshaw027/openmail:v0.1.0   # Hub mirror
 OPENMAIL_PULL_POLICY=always
 ```
 

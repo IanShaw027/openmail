@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - Tag-driven release: each `v*` tag builds GHCR (and optional Hub) package, bakes version, creates GitHub Release (`docs/17-release.md`, `make release V=…`)
+- Compose / install default image is **GHCR** (`ghcr.io/ianshaw027/openmail:v*`); Hub remains optional mirror
 
 ### Changed
 

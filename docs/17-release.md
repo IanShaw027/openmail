@@ -87,7 +87,7 @@ make sync-version V=0.2.0
 | `VERSION` | plain `X.Y.Z` |
 | `backend/app/__init__.py` | `__version__` (+ optional env `OPENMAIL_VERSION`) |
 | `frontend/package.json` | `"version"` |
-| `docker-compose.yml` | default `OPENMAIL_IMAGE=ianshaw027/openmail:vX.Y.Z` |
+| `docker-compose.yml` | default `OPENMAIL_IMAGE=ghcr.io/ianshaw027/openmail:vX.Y.Z` |
 | `scripts/install.sh` | same default |
 | Image health | `/api/health` → `"version": "X.Y.Z"` |
 
