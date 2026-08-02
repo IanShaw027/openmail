@@ -56,9 +56,9 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
         type: 'http_api',
         apiUrl,
         isApiSource: true,
-        brand: 'http_api',
+        brand: host.endsWith('workers.dev') ? 'cf_temp' : 'http_api',
         rawLine: raw,
-        note: `CF/API · ${host}`,
+        note: host.endsWith('workers.dev') ? `CF 临时邮箱 · ${host}` : `CF/API · ${host}`,
       },
     }
   }
@@ -74,13 +74,14 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
     const secret = nonUrl[0]
     const apiUrl = normalizeWorkerApiUrl(urlPart)
     const host = hostFromUrl(apiUrl)
+    const isCf = host.endsWith('workers.dev')
     return {
       ok: true,
       kind: 'http_api',
       raw,
       message: secret
-        ? `HttpApi 源 · ${host} · 已带密钥`
-        : `HttpApi 源 · ${host} · 无密钥`,
+        ? `${isCf ? 'CF 临时邮箱' : 'HttpApi 源'} · ${host} · 已带密钥`
+        : `${isCf ? 'CF 临时邮箱' : 'HttpApi 源'} · ${host} · 无密钥`,
       account: {
         email: `api@${host}`,
         type: 'http_api',
@@ -88,9 +89,11 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
         apiKey: secret,
         password: secret,
         isApiSource: true,
-        brand: 'http_api',
+        brand: isCf ? 'cf_temp' : 'http_api',
         rawLine: raw,
-        note: secret ? `CF/API · ${host} · 密钥` : `CF/API · ${host}`,
+        note: secret
+          ? `${isCf ? 'CF 临时邮箱' : 'CF/API'} · ${host} · 密钥`
+          : `${isCf ? 'CF 临时邮箱' : 'CF/API'} · ${host}`,
       },
     }
   }
@@ -293,12 +296,12 @@ export function parseAccountLine(line: string): ParsedLine {
         apiKey: secret,
         password: secret,
         isApiSource: isPlaceholder || true,
-        brand: 'http_api',
+        brand: host.endsWith('workers.dev') ? 'cf_temp' : 'http_api',
         rawLine: raw,
         note: isPlaceholder
           ? secret
-            ? `CF/API · ${host} · 密钥`
-            : `CF/API · ${host}`
+            ? `${host.endsWith('workers.dev') ? 'CF 临时邮箱' : 'CF/API'} · ${host} · 密钥`
+            : `${host.endsWith('workers.dev') ? 'CF 临时邮箱' : 'CF/API'} · ${host}`
           : secret
             ? 'API 密钥已保存'
             : undefined,

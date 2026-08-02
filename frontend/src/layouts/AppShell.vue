@@ -88,6 +88,14 @@ onMounted(async () => {
             >
               {{ t('nav.settings') }}
             </RouterLink>
+            <RouterLink
+              to="/transfer"
+              class="nav-link"
+              active-class="is-active"
+              @click="menuOpen = false"
+            >
+              {{ t('nav.transfer') }}
+            </RouterLink>
           </nav>
         </div>
 

@@ -12,12 +12,14 @@
     "jsqr": "^1.4.0",
     "otpauth": "^9.5.1",
     "pinia": "^3.0.3",
+    "qrcode": "^1.5.4",
     "vue": "^3.5.40",
     "vue-i18n": "^9.14.5",
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/tsconfig": "^0.9.1",
     "typescript": "~5.9.3",

@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.config import get_settings
 from app.db import init_db
-from app.routers import accounts, code_api, device, fetch, health, mails, public_config, sync
+from app.routers import accounts, code_api, device, fetch, health, mails, public_config, sync, transfer
 from app.services.sync_worker import start_sync_worker, stop_sync_worker
 
 
@@ -159,6 +159,7 @@ def create_app() -> FastAPI:
     application.include_router(fetch.router)
     application.include_router(mails.router)
     application.include_router(sync.router)
+    application.include_router(transfer.router)
 
     _mount_spa(application)
 

@@ -28,6 +28,17 @@ export function brandSvgPath(brand?: string | null): string {
       return 'M4 16.5 8.2 7h3.1l-4.2 9.5H4zm5.4 0L13.6 7h3.1l-4.2 9.5H9.4zm6.2 0L19.8 7H22l-4.2 9.5h-2.4z'
     case 'mailcom':
       return 'M3 6.5A2.5 2.5 0 0 1 5.5 4h13A2.5 2.5 0 0 1 21 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-11zm2 .6 6.5 4.4c.3.2.7.2 1 0L19 7.1V7H5v.1zm14 1.7-5.9 4a2.7 2.7 0 0 1-3.2 0L4 8.8v8.7c0 .4.3.7.7.7h14.6c.4 0 .7-.3.7-.7V8.8z'
+    case 'gmx':
+      return 'M4 5h16v3.2H8.5L19 19h-4.2L4 8.4V5zm0 5.5h6.5V19H4v-8.5z'
+    case 'proton':
+      return 'M12 3 4 7.5v9L12 21l8-4.5v-9L12 3zm0 2.3 5.5 3.1v6.2L12 17.7l-5.5-3.1V8.4L12 5.3z'
+    case 'zoho':
+      return 'M4 6h16v3H9.5L18 18h-4.5L4 9.2V6zm0 5h7v7H4v-7z'
+    case 'cf_temp':
+      // cloud / temp mark
+      return 'M7.5 17h9.2A3.8 3.8 0 0 0 20 13.4a3.6 3.6 0 0 0-2.4-3.4A4.5 4.5 0 0 0 9 9.2 3.7 3.7 0 0 0 4 13a3.7 3.7 0 0 0 3.5 4zM10 8.5l2-3 2 3h-4z'
+    case 'duckmail':
+      return 'M12 4c-3 0-5.5 2.2-5.5 5.2 0 1.6.7 3 1.8 4L6 18h3.2l1.2-2.2c.5.1 1 .2 1.6.2s1.1-.1 1.6-.2L14.8 18H18l-2.3-4.8c1.1-1 1.8-2.4 1.8-4C17.5 6.2 15 4 12 4z'
     case 'http_api':
       return 'M8 4h8v2H8V4zm-3 4h14v2H5V8zm2 4h10v2H7v-2zm-2 4h14v2H5v-2zm3 4h8v2H8v-2z'
     default:
@@ -53,6 +64,16 @@ export function brandAccent(brand?: string | null): string {
     case 'aliyun':
     case 'mailcom':
       return '#c2410c'
+    case 'gmx':
+      return '#1d4ed8'
+    case 'proton':
+      return '#6d28d9'
+    case 'zoho':
+      return '#c2410c'
+    case 'cf_temp':
+      return '#f97316'
+    case 'duckmail':
+      return '#0d9488'
     case 'http_api':
       return '#047857'
     default:
@@ -70,6 +91,11 @@ export function isKnownBrand(brand?: string | null): brand is MailBrand {
     'icloud',
     'aliyun',
     'mailcom',
+    'gmx',
+    'proton',
+    'zoho',
+    'cf_temp',
+    'duckmail',
     'http_api',
     'other',
   ].includes(String(brand || ''))

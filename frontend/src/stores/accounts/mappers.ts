@@ -13,6 +13,7 @@ export function normalizeLocalAccounts(parsed: MailAccount[]): MailAccount[] {
       email: next.email,
       imapHost: next.imapHost,
       smtpHost: next.smtpHost,
+      apiUrl: next.apiUrl,
       type: next.type,
       brand: next.brand,
     })
@@ -42,6 +43,7 @@ export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): Mai
     email,
     imapHost: prev?.imapHost,
     smtpHost: prev?.smtpHost,
+    apiUrl: prev?.apiUrl,
     type,
     brand: prev?.brand || resolveDomainProfile(email).brand,
   })

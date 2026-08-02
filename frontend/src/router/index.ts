@@ -26,6 +26,12 @@ const routes: RouteRecordRaw[] = [
     meta: { titleKey: 'nav.settings' },
   },
   {
+    path: '/transfer',
+    name: 'transfer',
+    component: () => import('@/pages/TransferPage.vue'),
+    meta: { titleKey: 'nav.transfer' },
+  },
+  {
     path: '/privacy',
     name: 'privacy',
     component: () => import('@/pages/PrivacyPage.vue'),

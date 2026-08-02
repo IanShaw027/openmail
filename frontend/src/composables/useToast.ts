@@ -10,7 +10,7 @@ export type ToastItem = {
 
 const toasts = ref<ToastItem[]>([])
 let seq = 0
-const timers = new Map<number, ReturnType<typeof setTimeout>>()
+const timers = new Map<number, number>()
 
 const DEFAULT_MS = 3200
 const MAX_VISIBLE = 4

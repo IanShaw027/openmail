@@ -18,6 +18,11 @@ export type MailBrand =
   | 'icloud'
   | 'aliyun'
   | 'mailcom'
+  | 'proton'
+  | 'zoho'
+  | 'gmx'
+  | 'cf_temp'
+  | 'duckmail'
   | 'http_api'
   | 'other'
 
@@ -164,7 +169,7 @@ const EXACT: Record<string, DomainProfile> = {
     imapHost: 'imap.aliyun.com',
     imapPort: 993,
   },
-  // mail.com
+  // mail.com / United Internet free webmail (cookie)
   'mail.com': {
     brand: 'mailcom',
     labelKey: 'brand.mailcom',
@@ -180,12 +185,92 @@ const EXACT: Record<string, DomainProfile> = {
     labelKey: 'brand.mailcom',
     protocol: 'cookie',
   },
+  'consultant.com': {
+    brand: 'mailcom',
+    labelKey: 'brand.mailcom',
+    protocol: 'cookie',
+  },
+  'europe.com': {
+    brand: 'mailcom',
+    labelKey: 'brand.mailcom',
+    protocol: 'cookie',
+  },
+  'asia.com': {
+    brand: 'mailcom',
+    labelKey: 'brand.mailcom',
+    protocol: 'cookie',
+  },
+  // GMX
+  'gmx.com': {
+    brand: 'gmx',
+    labelKey: 'brand.gmx',
+    protocol: 'imap',
+    imapHost: 'imap.gmx.com',
+    imapPort: 993,
+  },
+  'gmx.net': {
+    brand: 'gmx',
+    labelKey: 'brand.gmx',
+    protocol: 'imap',
+    imapHost: 'imap.gmx.net',
+    imapPort: 993,
+  },
+  'gmx.de': {
+    brand: 'gmx',
+    labelKey: 'brand.gmx',
+    protocol: 'imap',
+    imapHost: 'imap.gmx.net',
+    imapPort: 993,
+  },
+  // Proton (bridge / IMAP when available)
+  'proton.me': {
+    brand: 'proton',
+    labelKey: 'brand.proton',
+    protocol: 'imap',
+    imapHost: '127.0.0.1',
+    imapPort: 1143,
+    note: 'Proton Bridge',
+  },
+  'protonmail.com': {
+    brand: 'proton',
+    labelKey: 'brand.proton',
+    protocol: 'imap',
+    imapHost: '127.0.0.1',
+    imapPort: 1143,
+    note: 'Proton Bridge',
+  },
+  // Zoho
+  'zoho.com': {
+    brand: 'zoho',
+    labelKey: 'brand.zoho',
+    protocol: 'imap',
+    imapHost: 'imap.zoho.com',
+    imapPort: 993,
+  },
+  'zohomail.com': {
+    brand: 'zoho',
+    labelKey: 'brand.zoho',
+    protocol: 'imap',
+    imapHost: 'imap.zoho.com',
+    imapPort: 993,
+  },
+  // DuckMail / public temp
+  'duck.com': {
+    brand: 'duckmail',
+    labelKey: 'brand.duckmail',
+    protocol: 'http_api',
+  },
 }
 
 const SUFFIX: Array<[string, DomainProfile]> = [
   ['.qiye.aliyun.com', EXACT['aliyun.com']!],
   ['.mxhichina.com', { brand: 'aliyun', labelKey: 'brand.aliyun', protocol: 'imap', imapHost: 'imap.mxhichina.com', imapPort: 993 }],
   ['.mail.com', EXACT['mail.com']!],
+  ['.gmx.com', EXACT['gmx.com']!],
+  ['.gmx.net', EXACT['gmx.net']!],
+  ['.zoho.com', EXACT['zoho.com']!],
+  ['.proton.me', EXACT['proton.me']!],
+  ['.protonmail.com', EXACT['protonmail.com']!],
 ]
 
 export function emailDomain(email: string): string {
@@ -236,6 +321,9 @@ const IMAP_HOST_BRAND: Array<{ test: RegExp; brand: MailBrand; profile?: Partial
   { test: /mxhichina\.com$/i, brand: 'aliyun' },
   { test: /qiye\.aliyun/i, brand: 'aliyun' },
   { test: /(^|\.)mail\.com$/i, brand: 'mailcom' },
+  { test: /(^|\.)gmx\./i, brand: 'gmx' },
+  { test: /zoho\./i, brand: 'zoho' },
+  { test: /workers\.dev$/i, brand: 'cf_temp' },
 ]
 
 export function normalizeMailHost(host?: string | null): string {
@@ -264,13 +352,22 @@ export function resolveAccountBrand(opts: {
   email?: string
   imapHost?: string | null
   smtpHost?: string | null
+  apiUrl?: string | null
   type?: string
   brand?: MailBrand | string | null
 }): MailBrand {
   const fromHost =
     resolveBrandFromHost(opts.imapHost) || resolveBrandFromHost(opts.smtpHost)
   if (fromHost) return fromHost
-  if (opts.type === 'http_api') return 'http_api'
+  // CF temp-mail Worker / self-hosted API
+  if (opts.type === 'http_api') {
+    const api = String(opts.apiUrl || opts.email || '').toLowerCase()
+    if (api.includes('workers.dev') || api.includes('cf_temp') || api.startsWith('api@')) {
+      return 'cf_temp'
+    }
+    if (api.includes('duck')) return 'duckmail'
+    return 'http_api'
+  }
   if (opts.type === 'cookie') {
     const d = resolveDomainProfile(opts.email || '')
     if (d.brand === 'mailcom') return 'mailcom'
@@ -288,6 +385,11 @@ export const BRAND_OPTIONS: MailBrand[] = [
   'icloud',
   'aliyun',
   'mailcom',
+  'gmx',
+  'proton',
+  'zoho',
+  'cf_temp',
+  'duckmail',
   'http_api',
   'other',
 ]
