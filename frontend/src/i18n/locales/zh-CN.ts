@@ -679,7 +679,8 @@ export default {
       '未知域名：若为 QQ/163 请用授权码；若为 Gmail 请用应用专用密码。',
     unrecognized: '无法识别格式，请查看导入说明中的示例',
     placeholder:
-      '粘贴账号，一行一个…\n\nuser@outlook.com----密码----client_id----M.refresh_token\nuser@gmail.com----应用专用密码\nname@mail.com----password\n# CF Worker 无密钥\nhttps://mail-api.example.workers.dev\n# CF Worker 有密钥\nhttps://mail-api.example.workers.dev----你的admin密钥\n',
+      // Escape @ so vue-i18n does not treat emails as linked messages (@key).
+      "粘贴账号，一行一个…\n\nuser{'@'}outlook.com----密码----client_id----M.refresh_token\nuser{'@'}gmail.com----应用专用密码\nname{'@'}mail.com----password\n# CF Worker 无密钥\nhttps://mail-api.example.workers.dev\n# CF Worker 有密钥\nhttps://mail-api.example.workers.dev----你的admin密钥\n",
   },
   settings: {
     title: '设置',

@@ -683,7 +683,8 @@ export default {
       'Unknown domain: use authorization code for QQ/163; app password for Gmail.',
     unrecognized: 'Unrecognized format — see import help examples',
     placeholder:
-      'Paste one account per line…\n\nuser@outlook.com----password----client_id----M.refresh_token\nuser@gmail.com----app-password\nname@mail.com----password\n# CF Worker no secret\nhttps://mail-api.example.workers.dev\n# CF Worker with secret\nhttps://mail-api.example.workers.dev----your-admin-secret\n',
+      // Escape @ so vue-i18n does not treat emails as linked messages (@key).
+      "Paste one account per line…\n\nuser{'@'}outlook.com----password----client_id----M.refresh_token\nuser{'@'}gmail.com----app-password\nname{'@'}mail.com----password\n# CF Worker no secret\nhttps://mail-api.example.workers.dev\n# CF Worker with secret\nhttps://mail-api.example.workers.dev----your-admin-secret\n",
   },
   settings: {
     title: 'Settings',
