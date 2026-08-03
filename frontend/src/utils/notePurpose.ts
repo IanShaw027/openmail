@@ -255,8 +255,9 @@ const GENERIC_PURPOSE: Record<string, PurposeSvgPart[]> = {
 export function purposeSvgParts(key: string): PurposeSvgPart[] {
   const k = String(key || '').toLowerCase()
   if (GENERIC_PURPOSE[k]) return GENERIC_PURPOSE[k]!
-  // brand products (chatgpt/claude/google/…) from brandLogos
-  const brandId = normalizeBrandId(k)
+  // brand products (chatgpt/claude/openai/google/…) from brandLogos
+  // Prefer exact registry ids over fuzzy alias matches for purpose keys.
+  const brandId = k === 'chatgpt' || k === 'openai' ? 'openai' : normalizeBrandId(k)
   if (brandId !== 'other') return logoParts(brandId)
   return logoParts('other')
 }
@@ -267,6 +268,7 @@ export function purposeAccent(key: string): string {
     const p = findPurpose(k)
     return p?.color || '#64748b'
   }
+  if (k === 'chatgpt' || k === 'openai') return logoAccent('openai')
   return logoAccent(k)
 }
 

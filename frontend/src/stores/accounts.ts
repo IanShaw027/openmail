@@ -191,11 +191,20 @@ export const useAccountsStore = defineStore('accounts', () => {
         mailboxes.map((e) => e.trim().toLowerCase()).filter((e) => e.includes('@')),
       ),
     ]
+    const childBrand =
+      src.brand === 'cf_temp' ||
+      String(src.apiUrl || '').toLowerCase().includes('workers.dev') ||
+      String(src.email || '').toLowerCase().startsWith('api@')
+        ? 'cf_temp'
+        : src.brand === 'duckmail' || String(src.apiUrl || '').toLowerCase().includes('duck')
+          ? 'duckmail'
+          : 'http_api'
     const li = localAccounts.value.findIndex((a) => a.id === sourceId)
     if (li >= 0) {
       localAccounts.value[li] = {
         ...localAccounts.value[li]!,
         isApiSource: true,
+        brand: childBrand === 'cf_temp' ? 'cf_temp' : localAccounts.value[li]!.brand || childBrand,
         apiMailboxes: unique,
         updatedAt: Date.now(),
       }
@@ -203,17 +212,40 @@ export const useAccountsStore = defineStore('accounts', () => {
     const existingKids = localAccounts.value.filter((a) => a.parentApiId === sourceId)
     const have = new Set(existingKids.map((a) => a.email.toLowerCase()))
     const now = Date.now()
+    // Re-attach orphan top-level rows that match a discovered temp address
     for (const email of unique) {
       if (have.has(email)) continue
-      // skip if same email already a top-level local account
-      if (localAccounts.value.some((a) => a.email.toLowerCase() === email && !a.parentApiId)) {
+      const orphanIdx = localAccounts.value.findIndex(
+        (a) =>
+          a.email.toLowerCase() === email &&
+          !a.parentApiId &&
+          !a.isApiSource &&
+          a.type === 'http_api' &&
+          a.id !== sourceId,
+      )
+      if (orphanIdx >= 0) {
+        const o = localAccounts.value[orphanIdx]!
+        localAccounts.value[orphanIdx] = {
+          ...o,
+          parentApiId: sourceId,
+          isApiSource: false,
+          brand: childBrand,
+          apiUrl: src.apiUrl,
+          apiKey: src.apiKey || src.password || o.apiKey || o.password,
+          password: src.apiKey || src.password || o.password,
+          apiAuthStyle: src.apiAuthStyle || o.apiAuthStyle || 'auto',
+          groupId: src.groupId || o.groupId || 'default',
+          note: o.note || '临时邮箱',
+          updatedAt: now,
+        }
+        have.add(email)
         continue
       }
       localAccounts.value.push({
-        id: `mb_${sourceId}_${email.replace(/[^a-z0-9]/gi, '_').slice(0, 40)}`,
+        id: `mb_${sourceId}_${email.replace(/[^a-z0-9]/gi, '_').slice(0, 48)}`,
         email,
         type: 'http_api',
-        brand: 'http_api',
+        brand: childBrand,
         storage: 'local',
         status: 'unknown',
         apiUrl: src.apiUrl,
@@ -227,10 +259,11 @@ export const useAccountsStore = defineStore('accounts', () => {
         rawLine: src.apiKey
           ? `${email}----${src.apiKey}----${src.apiUrl}`
           : `${email}----${src.apiUrl}`,
-        note: src.note ? `${src.note} · 子邮箱` : 'API 临时邮箱',
+        note: '临时邮箱',
         createdAt: now,
         updatedAt: now,
       })
+      have.add(email)
     }
   }
 

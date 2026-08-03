@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { MailAccount } from '@/types/account'
 import {
@@ -10,6 +10,7 @@ import {
   isPurposeInactive,
   loadPurposeCatalog,
   noteDisplayText,
+  purposeAccent,
   purposeSvgParts,
   togglePurposeInNote,
 } from '@/utils/notePurpose'
@@ -35,6 +36,11 @@ const panelStyle = ref<Record<string, string>>({})
 const display = computed(() => noteDisplayText(props.account.note) || t('console.noteEmpty'))
 const hasNote = computed(() => !!noteDisplayText(props.account.note))
 
+/** Visible tokens for list strip (active + inactive, not plain free text). */
+const stripPurposes = computed(() =>
+  catalog.value.filter((x) => hasPurposeToken(props.account.note, x.key)),
+)
+
 function labelFor(p: PurposeDef) {
   return p.label
 }
@@ -45,16 +51,50 @@ function stateClass(p: PurposeDef) {
   return 'idle'
 }
 
+function chipAccent(p: PurposeDef): string {
+  return purposeAccent(p.key) || p.color
+}
+
+/** Sync free-text field from current note (active + plain only; inactive shown as ~~label~~). */
+function syncFreeTextFromNote(note?: string | null) {
+  freeText.value = formatEditableNote(note)
+}
+
+/**
+ * Editable line: active/plain labels; inactive as ~~label~~ markdown strike.
+ * Lets user see used-but-disabled services and edit freely.
+ */
+function formatEditableNote(note?: string | null): string {
+  if (!note?.trim()) return ''
+  return note
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((raw) => {
+      if (raw.startsWith('!') && raw.length > 1) {
+        const key = raw.slice(1).toLowerCase()
+        const p = catalog.value.find((x) => x.key === key)
+        return `~~${p?.label || key}~~`
+      }
+      const key = raw.toLowerCase()
+      const p = catalog.value.find((x) => x.key === key)
+      return p?.label || raw
+    })
+    .join(' ')
+}
+
 function onToggle(p: PurposeDef) {
   const next = togglePurposeInNote(props.account.note, p.key)
   emit('patch', next)
+  // Keep the open panel text in sync immediately (don't wait for prop round-trip)
+  if (open.value) syncFreeTextFromNote(next)
 }
 
 function placePanel() {
   const el = root.value
   if (!el) return
   const r = el.getBoundingClientRect()
-  const width = Math.min(320, Math.max(260, Math.min(window.innerWidth - 16, 320)))
+  const width = Math.min(340, Math.max(280, Math.min(window.innerWidth - 16, 340)))
   let left = r.left
   if (left + width > window.innerWidth - 8) {
     left = Math.max(8, window.innerWidth - width - 8)
@@ -62,8 +102,8 @@ function placePanel() {
   if (left < 8) left = 8
 
   const spaceBelow = window.innerHeight - r.bottom
-  const openUp = spaceBelow < 280 && r.top > spaceBelow
-  const maxH = Math.min(420, Math.max(200, (openUp ? r.top : spaceBelow) - 16))
+  const openUp = spaceBelow < 320 && r.top > spaceBelow
+  const maxH = Math.min(460, Math.max(220, (openUp ? r.top : spaceBelow) - 16))
 
   panelStyle.value = {
     position: 'fixed',
@@ -79,7 +119,8 @@ function placePanel() {
 
 function openPanel() {
   open.value = true
-  freeText.value = noteDisplayText(props.account.note)
+  catalog.value = loadPurposeCatalog()
+  syncFreeTextFromNote(props.account.note)
   placePanel()
   void nextTick(placePanel)
 }
@@ -89,17 +130,32 @@ function close() {
 }
 
 function saveFreeText() {
-  // Keep inactive purpose tokens; replace active/plain display with free text words
-  const inactive = (props.account.note || '')
-    .split(/\s+/)
-    .filter((t) => t.startsWith('!') && t.length > 1)
-  const words = freeText.value
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w) => w.replace(/^!/, ''))
-  const next = [...inactive, ...words].join(' ').trim()
-  emit('patch', next)
+  /**
+   * Parse free text:
+   * - ~~label~~ or ~~key~~ → inactive purpose token
+   * - known purpose label/key → active
+   * - otherwise plain free word
+   */
+  const parts = freeText.value.trim().split(/\s+/).filter(Boolean)
+  const out: string[] = []
+  for (const part of parts) {
+    const strike = part.match(/^~~(.+?)~~$/)
+    if (strike) {
+      const inner = strike[1]!.trim()
+      const byLabel = catalog.value.find(
+        (p) => p.label === inner || p.key === inner.toLowerCase(),
+      )
+      out.push(`!${(byLabel?.key || inner).toLowerCase().replace(/\s+/g, '-')}`)
+      continue
+    }
+    const cleaned = part.replace(/^!/, '')
+    const byLabel = catalog.value.find(
+      (p) => p.label === cleaned || p.key === cleaned.toLowerCase(),
+    )
+    if (byLabel) out.push(byLabel.key)
+    else out.push(cleaned)
+  }
+  emit('patch', out.join(' ').trim())
   close()
 }
 
@@ -111,7 +167,6 @@ function addCustom() {
 function onDoc(e: Event) {
   if (!open.value || !root.value) return
   const t = e.target as Node
-  // Panel is Teleported to body — treat it as inside
   if (root.value.contains(t) || panelEl.value?.contains(t)) return
   close()
 }
@@ -119,6 +174,14 @@ function onDoc(e: Event) {
 function onWinChange() {
   if (open.value) placePanel()
 }
+
+/** When account note changes from outside while panel open, resync. */
+watch(
+  () => props.account.note,
+  (n) => {
+    if (open.value) syncFreeTextFromNote(n)
+  },
+)
 
 onMounted(() => {
   document.addEventListener('pointerdown', onDoc, true)
@@ -145,14 +208,14 @@ onUnmounted(() => {
     </button>
 
     <!-- Compact strip: only tokens already present on this account -->
-    <div v-if="!open" class="npc-strip">
+    <div v-if="!open && stripPurposes.length" class="npc-strip">
       <button
-        v-for="p in catalog.filter((x) => hasPurposeToken(account.note, x.key))"
+        v-for="p in stripPurposes"
         :key="p.key"
         type="button"
         class="npc-icon"
         :class="[stateClass(p), { brand: p.kind === 'brand' }]"
-        :style="{ '--npc-c': p.color }"
+        :style="{ '--npc-c': chipAccent(p) }"
         :title="labelFor(p)"
         @click="onToggle(p)"
       >
@@ -161,14 +224,13 @@ onUnmounted(() => {
             v-for="(part, i) in purposeSvgParts(p.key)"
             :key="i"
             :d="part.d"
-            :fill="part.fill || 'currentColor'"
+            fill="currentColor"
             :opacity="part.opacity ?? 1"
           />
         </svg>
       </button>
     </div>
 
-    <!-- Teleport: escape table-wrap overflow:auto clipping -->
     <Teleport to="body">
       <div
         v-if="open"
@@ -186,6 +248,7 @@ onUnmounted(() => {
           @keydown.enter="saveFreeText"
           @keydown.escape="close"
         />
+        <p class="npc-hint">{{ t('console.notePurposeHint') }}</p>
         <div class="npc-panel-label">{{ t('console.notePurposeLabel') }}</div>
         <div class="npc-icons">
           <button
@@ -194,7 +257,7 @@ onUnmounted(() => {
             type="button"
             class="npc-icon lg"
             :class="[stateClass(p), { brand: p.kind === 'brand' }]"
-            :style="{ '--npc-c': p.color }"
+            :style="{ '--npc-c': chipAccent(p) }"
             :title="`${labelFor(p)} — ${t('console.notePurposeCycle')}`"
             @click="onToggle(p)"
           >
@@ -203,7 +266,7 @@ onUnmounted(() => {
                 v-for="(part, i) in purposeSvgParts(p.key)"
                 :key="i"
                 :d="part.d"
-                :fill="part.fill || 'currentColor'"
+                fill="currentColor"
                 :opacity="part.opacity ?? 1"
               />
             </svg>
@@ -277,16 +340,16 @@ onUnmounted(() => {
   width: 22px;
   height: 22px;
   border-radius: 7px;
-  border: 1px solid transparent;
-  background: var(--panel-soft);
-  color: var(--muted);
+  border: 1px solid var(--border, #e2e8f0);
+  background: var(--panel-soft, #f1f5f9);
+  color: var(--muted, #64748b);
   cursor: pointer;
   padding: 0;
   transition:
-    background 0.15s ease,
-    color 0.15s ease,
-    border-color 0.15s ease,
-    opacity 0.15s ease;
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease,
+    opacity 0.12s ease;
 }
 .npc-icon.lg {
   width: 36px;
@@ -297,32 +360,38 @@ onUnmounted(() => {
   display: block;
   flex-shrink: 0;
 }
-.npc-icon.on {
-  color: #fff;
-  background: var(--npc-c, var(--accent));
-  border-color: color-mix(in srgb, var(--npc-c, var(--accent)) 60%, #000);
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--npc-c, var(--accent)) 35%, transparent);
-}
-/* Brand chips: soft brand-tint when idle so logos stay recognizable */
-.npc-icon.brand.idle {
-  color: var(--npc-c, var(--muted));
-  background: color-mix(in srgb, var(--npc-c, var(--accent)) 12%, var(--panel-soft));
-  border-color: color-mix(in srgb, var(--npc-c, var(--accent)) 28%, var(--border));
-}
-.npc-icon.off {
-  color: #94a3b8;
-  background: color-mix(in srgb, #94a3b8 16%, transparent);
-  border-color: color-mix(in srgb, #94a3b8 30%, transparent);
-  opacity: 0.85;
-}
+/* Idle: light gray chip, brand-tinted icon */
 .npc-icon.idle {
-  color: color-mix(in srgb, var(--npc-c, var(--muted)) 70%, var(--muted));
-  border-color: var(--border);
+  color: color-mix(in srgb, var(--npc-c, #64748b) 75%, #64748b);
+  background: var(--panel-soft, #f1f5f9);
+  border-color: var(--border, #e2e8f0);
+  opacity: 1;
+}
+.npc-icon.brand.idle {
+  color: var(--npc-c, #64748b);
+  background: color-mix(in srgb, var(--npc-c, #6366f1) 10%, #f8fafc);
+  border-color: color-mix(in srgb, var(--npc-c, #6366f1) 22%, #e2e8f0);
+}
+/* Active: solid brand color + white glyph */
+.npc-icon.on {
+  color: #fff !important;
+  background: var(--npc-c, #4f46e5) !important;
+  border-color: color-mix(in srgb, var(--npc-c, #4f46e5) 55%, #000) !important;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--npc-c, #4f46e5) 30%, transparent);
+  opacity: 1;
+}
+/* Used/disabled: muted gray, still clickable to remove */
+.npc-icon.off {
+  color: #94a3b8 !important;
+  background: color-mix(in srgb, #94a3b8 14%, #fff) !important;
+  border-color: color-mix(in srgb, #94a3b8 35%, #e2e8f0) !important;
+  opacity: 0.9;
+  box-shadow: none;
 }
 .npc-icon.idle:hover {
-  border-color: var(--npc-c, var(--accent));
-  color: var(--npc-c, var(--accent));
-  background: color-mix(in srgb, var(--npc-c, var(--accent)) 12%, transparent);
+  border-color: var(--npc-c, #4f46e5);
+  color: var(--npc-c, #4f46e5);
+  background: color-mix(in srgb, var(--npc-c, #4f46e5) 12%, transparent);
 }
 .npc-tip {
   display: none;
@@ -345,38 +414,8 @@ onUnmounted(() => {
 .npc-icon:hover .npc-tip {
   display: block;
 }
-.npc-panel-label {
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--muted);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.npc-input {
-  width: 100%;
-}
-.npc-icons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.npc-add {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.npc-add .input {
-  flex: 1;
-  min-width: 0;
-}
-.npc-actions {
-  display: flex;
-  gap: 6px;
-  justify-content: flex-end;
-}
 </style>
 
-<!-- Teleported panel is outside scoped root; unscoped block with unique class -->
 <style>
 .npc-panel {
   box-sizing: border-box;
@@ -398,6 +437,15 @@ onUnmounted(() => {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+.npc-panel .npc-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted, #64748b);
+}
+.npc-panel .npc-input {
+  width: 100%;
+}
 .npc-panel .npc-icons {
   display: flex;
   flex-wrap: wrap;
@@ -417,21 +465,26 @@ onUnmounted(() => {
   cursor: pointer;
   padding: 0;
 }
+.npc-panel .npc-icon.idle {
+  color: color-mix(in srgb, var(--npc-c, #64748b) 75%, #64748b);
+  background: var(--panel-soft, #f1f5f9);
+  border-color: var(--border, #e2e8f0);
+}
 .npc-panel .npc-icon.brand.idle {
   color: var(--npc-c, #64748b);
-  background: color-mix(in srgb, var(--npc-c, #6366f1) 12%, #f8fafc);
-  border-color: color-mix(in srgb, var(--npc-c, #6366f1) 30%, #e2e8f0);
+  background: color-mix(in srgb, var(--npc-c, #6366f1) 10%, #f8fafc);
+  border-color: color-mix(in srgb, var(--npc-c, #6366f1) 22%, #e2e8f0);
 }
 .npc-panel .npc-icon.on {
-  color: #fff;
-  background: var(--npc-c, #4f46e5);
-  border-color: color-mix(in srgb, var(--npc-c, #4f46e5) 60%, #000);
+  color: #fff !important;
+  background: var(--npc-c, #4f46e5) !important;
+  border-color: color-mix(in srgb, var(--npc-c, #4f46e5) 55%, #000) !important;
 }
 .npc-panel .npc-icon.off {
-  color: #94a3b8;
-  background: color-mix(in srgb, #94a3b8 16%, transparent);
-  border-color: color-mix(in srgb, #94a3b8 30%, transparent);
-  opacity: 0.85;
+  color: #94a3b8 !important;
+  background: color-mix(in srgb, #94a3b8 14%, #fff) !important;
+  border-color: color-mix(in srgb, #94a3b8 35%, #e2e8f0) !important;
+  opacity: 0.9;
 }
 .npc-panel .npc-icon.idle:hover {
   border-color: var(--npc-c, #4f46e5);

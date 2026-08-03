@@ -85,9 +85,46 @@ const brandOptions = [
   'icloud',
   'aliyun',
   'mailcom',
+  'gmx',
+  'proton',
+  'zoho',
+  'cf_temp',
+  'duckmail',
   'http_api',
   'other',
 ]
+
+/** Collapsed CF / HttpApi source rows — children hidden until expanded */
+const expandedApiSources = ref<Set<string>>(
+  new Set(
+    (() => {
+      try {
+        const raw = localStorage.getItem('openmail.expandedApiSources')
+        const arr = raw ? (JSON.parse(raw) as string[]) : []
+        return Array.isArray(arr) ? arr : []
+      } catch {
+        return []
+      }
+    })(),
+  ),
+)
+
+function isApiExpanded(sourceId: string): boolean {
+  return expandedApiSources.value.has(sourceId)
+}
+
+function toggleApiExpand(sourceId: string, e?: Event) {
+  e?.stopPropagation()
+  const next = new Set(expandedApiSources.value)
+  if (next.has(sourceId)) next.delete(sourceId)
+  else next.add(sourceId)
+  expandedApiSources.value = next
+  try {
+    localStorage.setItem('openmail.expandedApiSources', JSON.stringify([...next]))
+  } catch {
+    /* ignore */
+  }
+}
 
 
 const groups = ref<MailGroup[]>(loadGroups())
@@ -296,7 +333,14 @@ const mailNoMoreRemote = ref(false)
 /** Mobile: expand sticky actions for a single row */
 const expandedActId = ref<string | null>(null)
 
-const listAll = computed(() => accounts.filtered)
+/** Filtered list with collapsed API children removed until parent is expanded. */
+const listAll = computed(() => {
+  const rows = accounts.filtered
+  return rows.filter((a) => {
+    if (!a.parentApiId) return true
+    return expandedApiSources.value.has(a.parentApiId)
+  })
+})
 
 /** Visible slice (newest-first); grows via "load more" without classic page numbers. */
 const visibleMessages = computed(() => messages.value.slice(0, mailVisibleCount.value))
@@ -1071,6 +1115,7 @@ function accountBrand(acc: MailAccount): string {
     email: acc.email,
     imapHost: acc.imapHost,
     smtpHost: acc.smtpHost,
+    apiUrl: acc.apiUrl,
     type: acc.type,
     brand: acc.brand,
   })
@@ -1132,6 +1177,17 @@ function applyFetchResult(acc: MailAccount, result: FetchResult) {
   void accounts.patchAccount(acc.id, patch)
   if (result.ok !== false && mboxes?.length && (acc.isApiSource || (!acc.parentApiId && acc.type === 'http_api'))) {
     accounts.syncApiMailboxes(acc.id, mboxes)
+    // Auto-expand so newly discovered temp mailboxes are visible under the source
+    if (!expandedApiSources.value.has(acc.id)) {
+      const next = new Set(expandedApiSources.value)
+      next.add(acc.id)
+      expandedApiSources.value = next
+      try {
+        localStorage.setItem('openmail.expandedApiSources', JSON.stringify([...next]))
+      } catch {
+        /* ignore */
+      }
+    }
   }
   if (result.ok !== false) {
     try {
@@ -1355,6 +1411,16 @@ async function fetchOne(
         (acc.isApiSource || (!acc.parentApiId && acc.type === 'http_api'))
       ) {
         accounts.syncApiMailboxes(acc.id, mboxes)
+        if (!expandedApiSources.value.has(acc.id)) {
+          const next = new Set(expandedApiSources.value)
+          next.add(acc.id)
+          expandedApiSources.value = next
+          try {
+            localStorage.setItem('openmail.expandedApiSources', JSON.stringify([...next]))
+          } catch {
+            /* ignore */
+          }
+        }
       }
       if (result.ok !== false && msgs.length) {
         try {
@@ -1711,6 +1777,11 @@ function removeGroup(id: string) {
 }
 
 function openEdit(acc: MailAccount) {
+  // Temp mailbox children inherit credentials from the API source — do not edit them.
+  if (acc.parentApiId) {
+    flashMsg(t('console.apiChildReadonly'), 'danger')
+    return
+  }
   editForm.value = {
     id: acc.id,
     email: acc.email,
@@ -2343,7 +2414,16 @@ onUnmounted(() => {
 
                 <td class="col-email">
                   <div class="email-cell" :class="{ 'is-child': !!acc.parentApiId, 'is-api': !!acc.isApiSource }">
-                    <span v-if="acc.parentApiId" class="tree-pad" aria-hidden="true">└</span>
+                    <button
+                      v-if="acc.isApiSource"
+                      type="button"
+                      class="api-expand-btn"
+                      :title="isApiExpanded(acc.id) ? t('console.apiSourceCollapse') : t('console.apiSourceExpand')"
+                      @click="toggleApiExpand(acc.id, $event)"
+                    >
+                      {{ isApiExpanded(acc.id) ? '▾' : '▸' }}
+                    </button>
+                    <span v-else-if="acc.parentApiId" class="tree-pad" aria-hidden="true">└</span>
                     <button
                       type="button"
                       class="copy-cell email"
@@ -2359,6 +2439,20 @@ onUnmounted(() => {
                     <template v-if="acc.apiMailboxes?.length">
                       · {{ t('console.apiMailboxCount', { n: acc.apiMailboxes.length }) }}
                     </template>
+                    <button
+                      type="button"
+                      class="linkish"
+                      @click="toggleApiExpand(acc.id, $event)"
+                    >
+                      {{
+                        isApiExpanded(acc.id)
+                          ? t('console.apiSourceCollapse')
+                          : t('console.apiSourceExpand')
+                      }}
+                    </button>
+                  </div>
+                  <div v-else-if="acc.parentApiId" class="group-tag muted">
+                    {{ t('console.apiChildFetchOnly') }}
                   </div>
                   <div v-else class="group-tag muted">{{ groupName(acc.groupId) }}</div>
                   <!-- Live 2FA when bound -->
@@ -2548,7 +2642,12 @@ onUnmounted(() => {
                     >
                       {{ fetchingId === acc.id ? '…' : t('console.quickFetch') }}
                     </button>
-                    <button type="button" class="btn btn-ghost btn-xs" @click="openEdit(acc)">
+                    <button
+                      v-if="!acc.parentApiId"
+                      type="button"
+                      class="btn btn-ghost btn-xs"
+                      @click="openEdit(acc)"
+                    >
                       {{ t('console.editAccount') }}
                     </button>
                     <button
@@ -4635,55 +4734,7 @@ th.col-act.sticky-act {
   cursor: default;
   user-select: text;
 }
-.group-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.group-list-item {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel-soft);
-}
-.group-main {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-  flex: 1;
-}
-.group-name {
-  font-weight: 600;
-  font-size: 13px;
-}
-.group-stats {
-  font-size: 11px;
-}
-.group-acts {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.group-rename-input {
-  height: 30px;
-  margin-bottom: 4px;
-}
-.group-add-row {
-  margin-top: 14px;
-  display: flex;
-  gap: 8px;
-}
-.group-add-row .input {
-  flex: 1;
-}
+
 /* Desktop: fill grid track; keep a real min so empty state is not toolbar+pager only */
 @media (min-width: 1101px) {
   .table-card {
@@ -4722,25 +4773,71 @@ th.col-act.sticky-act {
   padding: 0 8px !important;
   font-size: 12px;
 }
-.group-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.group-list-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
-}
 .shortcut-hint {
   font-size: 11px;
   color: var(--muted);
   padding: 0 4px;
 }
 
-.group-tag { font-size: 10px; margin-top: 2px; }
+.group-tag {
+  font-size: 10px;
+  margin-top: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.email-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.email-cell .email {
+  min-width: 0;
+}
+.email-cell.is-child {
+  padding-left: 6px;
+}
+.tree-pad {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+  width: 14px;
+  text-align: center;
+}
+.api-expand-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.api-expand-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.linkish {
+  border: 0;
+  background: none;
+  padding: 0;
+  margin: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.linkish:hover {
+  opacity: 0.85;
+}
 
 /* Desktop 3-pane ONLY above 1100px — never apply !important grid on small screens */
 @media (min-width: 1101px) {

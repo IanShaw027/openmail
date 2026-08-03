@@ -43,6 +43,7 @@ export function isKnownBrand(brand?: string | null): brand is MailBrand {
     'proton',
     'zoho',
     'cf_temp',
+    'cloudflare',
     'duckmail',
     'http_api',
     'other',
