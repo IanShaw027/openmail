@@ -24,6 +24,7 @@ import {
   removeAccountUiMetaIfUnused,
 } from '@/utils/accountUiMeta'
 import { exportCredentialsTxt } from '@/utils/exportImport'
+import { useMailCacheStore } from '@/stores/mailCache'
 
 function tt(key: string, params?: Record<string, unknown>): string {
   // vue-i18n Composer typings are strict about message keys; runtime keys are fine.
@@ -31,6 +32,43 @@ function tt(key: string, params?: Record<string, unknown>): string {
 }
 
 type ServerAccountPatch = Parameters<typeof updateServerAccount>[1]
+
+/** Payload sealed into cloud credential envelope (must match openFromCloud consumers). */
+function sealPayloadFromAccount(acc: MailAccount): Record<string, unknown> {
+  return {
+    email: acc.email,
+    type: acc.type,
+    password: acc.password,
+    refreshToken: acc.refreshToken,
+    clientId: acc.clientId,
+    apiUrl: acc.apiUrl,
+    apiKey: acc.apiKey,
+    apiAuthStyle: acc.apiAuthStyle,
+    imapHost: acc.imapHost,
+    imapPort: acc.imapPort,
+    smtpHost: acc.smtpHost,
+    smtpPort: acc.smtpPort,
+    authCode: acc.authCode,
+    sessionCookies: acc.sessionCookies,
+    sessionMeta: acc.sessionMeta,
+  }
+}
+
+/** Drop mail cache for emails no longer present on local or cloud lists. */
+function clearMailCacheIfUnused(emails: string[], stillHave: string[]) {
+  const still = new Set(stillHave.map((e) => e.toLowerCase()))
+  try {
+    const mailCache = useMailCacheStore()
+    for (const email of emails) {
+      if (!still.has(email.toLowerCase())) {
+        mailCache.clearMailbox(email)
+      }
+    }
+    void mailCache.flushPersist()
+  } catch {
+    /* mail cache store may be unavailable during early boot */
+  }
+}
 
 export const useAccountsStore = defineStore('accounts', () => {
   /** Local-only rows — secrets live in encrypted vault when unlocked */
@@ -577,21 +615,7 @@ export const useAccountsStore = defineStore('accounts', () => {
         try {
           const vault = useVaultStore()
           if (vault.status === 'unlocked') {
-            clientSealed = await vault.sealForCloud({
-              email: acc.email,
-              type: acc.type,
-              password: acc.password,
-              refreshToken: acc.refreshToken,
-              clientId: acc.clientId,
-              apiUrl: acc.apiUrl,
-              imapHost: acc.imapHost,
-              imapPort: acc.imapPort,
-              smtpHost: acc.smtpHost,
-              smtpPort: acc.smtpPort,
-              authCode: acc.authCode,
-              sessionCookies: acc.sessionCookies,
-              sessionMeta: acc.sessionMeta,
-            })
+            clientSealed = await vault.sealForCloud(sealPayloadFromAccount(acc))
           }
         } catch {
           /* ignore */
@@ -605,11 +629,16 @@ export const useAccountsStore = defineStore('accounts', () => {
             refreshToken: acc.refreshToken,
             clientId: acc.clientId,
             apiUrl: acc.apiUrl,
+            apiKey: acc.apiKey,
             imapHost: acc.imapHost,
             imapPort: acc.imapPort,
+            smtpHost: acc.smtpHost,
+            smtpPort: acc.smtpPort,
             authCode: acc.authCode,
             note: acc.note,
             proxy: acc.proxy,
+            sessionCookies: acc.sessionCookies,
+            sessionMeta: acc.sessionMeta,
           },
           { syncEnabled: clientSealed ? false : syncEnabled, clientSealed },
         )
@@ -695,6 +724,11 @@ export const useAccountsStore = defineStore('accounts', () => {
         try {
           const vault = useVaultStore()
           if (vault.status === 'unlocked') {
+            const p = partial as Partial<MailAccount> & {
+              sessionCookies?: MailAccount['sessionCookies']
+              sessionMeta?: MailAccount['sessionMeta']
+              apiKey?: string
+            }
             clientSealed = await vault.sealForCloud({
               email: partial.email,
               type: partial.type,
@@ -702,23 +736,37 @@ export const useAccountsStore = defineStore('accounts', () => {
               refreshToken: partial.refreshToken,
               clientId: partial.clientId,
               apiUrl: partial.apiUrl,
+              apiKey: p.apiKey,
               imapHost: partial.imapHost,
               imapPort: partial.imapPort,
               smtpHost: partial.smtpHost,
               smtpPort: partial.smtpPort,
               authCode: partial.authCode,
-              sessionCookies: (partial as { sessionCookies?: unknown }).sessionCookies,
-              sessionMeta: (partial as { sessionMeta?: unknown }).sessionMeta,
+              sessionCookies: p.sessionCookies,
+              sessionMeta: p.sessionMeta,
             })
           }
         } catch {
           /* seal optional */
         }
         // Client-sealed: no server-side poll (cannot decrypt). Plain upload only if seal fails.
-        const body = toCreateBody(partial, {
-          syncEnabled: clientSealed ? false : opts.syncEnabled,
-          clientSealed: clientSealed || undefined,
-        })
+        const p = partial as Partial<MailAccount> & {
+          sessionCookies?: MailAccount['sessionCookies']
+          sessionMeta?: MailAccount['sessionMeta']
+          apiKey?: string
+        }
+        const body = toCreateBody(
+          {
+            ...partial,
+            apiKey: p.apiKey,
+            sessionCookies: p.sessionCookies,
+            sessionMeta: p.sessionMeta,
+          },
+          {
+            syncEnabled: clientSealed ? false : opts.syncEnabled,
+            clientSealed: clientSealed || undefined,
+          },
+        )
         if (checked?.status === 'error') {
           // still allow save; mark after
         }
@@ -856,6 +904,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     for (const email of emailsToMaybeDrop) {
       removeAccountUiMetaIfUnused(email, still)
     }
+    clearMailCacheIfUnused(emailsToMaybeDrop, still)
     if (selectedId.value && removableIds.has(selectedId.value)) {
       selectedId.value = null
     }
@@ -882,10 +931,12 @@ export const useAccountsStore = defineStore('accounts', () => {
     }
     localAccounts.value = localAccounts.value.filter((a) => a.id !== id)
     if (email) {
-      removeAccountUiMetaIfUnused(email, [
+      const still = [
         ...localAccounts.value.map((a) => a.email),
         ...serverAccounts.value.map((a) => a.email),
-      ])
+      ]
+      removeAccountUiMetaIfUnused(email, still)
+      clearMailCacheIfUnused([email], still)
     }
     if (selectedId.value === id) selectedId.value = null
     if (selectedIds.value.has(id)) {
@@ -939,6 +990,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     localAccounts.value = []
     const still = serverAccounts.value.map((a) => a.email)
     for (const email of emails) removeAccountUiMetaIfUnused(email, still)
+    clearMailCacheIfUnused(emails, still)
     selectedId.value = null
     deselectAll()
     await flushPersist()
@@ -949,6 +1001,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     localAccounts.value = []
     const still = serverAccounts.value.map((a) => a.email)
     for (const email of emails) removeAccountUiMetaIfUnused(email, still)
+    clearMailCacheIfUnused(emails, still)
     selectedId.value = null
     deselectAll()
     lastImport.value = null
@@ -1142,10 +1195,23 @@ export const useAccountsStore = defineStore('accounts', () => {
           ...(merged.cloudPendingPatch as ServerAccountPatch | undefined),
           ...cloudMetaBody(normalized),
         }
-        // Client-sealed rows: server cannot use plaintext secrets — skip credential dual-write
-        if (patchTouchesSecrets(normalized) && !merged.clientSealed) {
-          const full = fullCredentialBody(merged)
-          if (full) Object.assign(body, full)
+        if (patchTouchesSecrets(normalized)) {
+          if (merged.clientSealed) {
+            // Re-seal envelope so cloud ciphertext matches new password/tokens
+            try {
+              const vault = useVaultStore()
+              if (vault.status === 'unlocked') {
+                const sealed = await vault.sealForCloud(sealPayloadFromAccount(merged))
+                body.client_sealed = sealed
+                body.sync_enabled = false
+              }
+            } catch (e) {
+              console.warn('[openmail] re-seal for cloud failed', e)
+            }
+          } else {
+            const full = fullCredentialBody(merged)
+            if (full) Object.assign(body, full)
+          }
         }
         // Rolling session dual-write for non-sealed linked accounts (server poll)
         if (
@@ -1161,6 +1227,7 @@ export const useAccountsStore = defineStore('accounts', () => {
             lastCloudSyncError.value = null
             localAccounts.value[li] = clearPendingCloudState({
               ...localAccounts.value[li]!,
+              clientSealed: Boolean(row.client_sealed ?? merged.clientSealed),
               updatedAt: Date.now(),
             })
             const si = serverAccounts.value.findIndex(
@@ -1173,6 +1240,7 @@ export const useAccountsStore = defineStore('accounts', () => {
                 ...serverAccounts.value[si]!,
                 ...normalized,
                 storage: 'server',
+                clientSealed: Boolean(row.client_sealed ?? merged.clientSealed),
                 updatedAt: Date.now(),
               })
             }
@@ -1218,10 +1286,21 @@ export const useAccountsStore = defineStore('accounts', () => {
         const body: Parameters<typeof updateServerAccount>[1] = {
           ...cloudMetaBody(normalized),
         }
-        // Cloud-only secret updates: only full usable snapshot (non-sealed)
-        if (patchTouchesSecrets(normalized) && !next.clientSealed) {
-          const full = fullCredentialBody(next)
-          if (full) Object.assign(body, full)
+        if (patchTouchesSecrets(normalized)) {
+          if (next.clientSealed) {
+            try {
+              const vault = useVaultStore()
+              if (vault.status === 'unlocked') {
+                body.client_sealed = await vault.sealForCloud(sealPayloadFromAccount(next))
+                body.sync_enabled = false
+              }
+            } catch (e) {
+              console.warn('[openmail] re-seal cloud-only failed', e)
+            }
+          } else {
+            const full = fullCredentialBody(next)
+            if (full) Object.assign(body, full)
+          }
         }
         // Rolling session dual-write for non-sealed cloud-only rows
         if (
@@ -1235,7 +1314,10 @@ export const useAccountsStore = defineStore('accounts', () => {
           try {
             const row = await updateServerAccount(prev.serverId, body)
             lastCloudSyncError.value = null
-            serverAccounts.value[si] = mapServerToLocal(row, next)
+            serverAccounts.value[si] = mapServerToLocal(row, {
+              ...next,
+              clientSealed: Boolean(row.client_sealed ?? next.clientSealed),
+            })
           } catch (e) {
             lastCloudSyncError.value = cloudErrorMessage(e)
             // A cloud-only row has no encrypted local outbox. Roll back the

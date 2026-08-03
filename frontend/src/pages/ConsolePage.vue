@@ -1098,12 +1098,6 @@ function onImportSystemFile(e: Event) {
           denseCols.value = !!snap.settings.denseCols
         }
         if (snap.licenseToken) setLicenseToken(snap.licenseToken)
-        if (snap.mailCache) {
-          mailCache.replaceAll(
-            snap.mailCache as Record<string, never[]>,
-            userSettings.s.retentionDays,
-          )
-        }
         if (Array.isArray(snap.twofa) && snap.twofa.length) {
           twofa.replaceAll(snap.twofa as import('@/stores/twofa').TwoFaEntry[])
         }
@@ -1118,6 +1112,20 @@ function onImportSystemFile(e: Event) {
           }
         }
         accounts.localAccounts.splice(0, accounts.localAccounts.length, ...restored)
+        // mailCache: only keep mailboxes that still have an account after restore
+        if (snap.mailCache) {
+          const keep = new Set(
+            restored.map((a) => String(a.email || '').toLowerCase()).filter(Boolean),
+          )
+          const filtered: Record<string, unknown[]> = {}
+          for (const [k, v] of Object.entries(snap.mailCache)) {
+            if (keep.has(k.toLowerCase()) && Array.isArray(v)) filtered[k] = v
+          }
+          mailCache.replaceAll(
+            filtered as Record<string, never[]>,
+            userSettings.s.retentionDays,
+          )
+        }
         await accounts.flushPersist()
         await mailCache.flushPersist()
         await twofa.flushPersist()

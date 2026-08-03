@@ -213,15 +213,36 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       const old = map.get(k) || (uidvalidity != null ? map.get(legacyKey) : undefined)
       if (old && legacyKey !== k) map.delete(legacyKey)
       if (old) {
+        // Body: keep richer content when the new fetch is a thin list row.
+        const body_html = m.body_html || old.body_html
+        const body_text = m.body_text || old.body_text
+        const body_preview = m.body_preview || old.body_preview
+        // Verification code: prefer the new parse when present. If the new
+        // message explicitly has no code (null/undefined/''), drop the sticky
+        // old value so fixed parsers (and false positives) can clear cache.
+        // Only fall back to old when the incoming object omits the field entirely
+        // AND we did not re-fetch a full row (thin merge without re-annotate).
+        let verification_code: string | null | undefined
+        if (Object.prototype.hasOwnProperty.call(m, 'verification_code')) {
+          const incoming = m.verification_code
+          if (incoming != null && String(incoming).trim() !== '') {
+            verification_code = incoming
+          } else {
+            // Explicit empty/null from server → clear stale false positives
+            verification_code = null
+          }
+        } else {
+          verification_code = old.verification_code
+        }
         map.set(k, {
           ...old,
           ...withFolder,
           folder,
           uidvalidity: withFolder.uidvalidity ?? old.uidvalidity,
-          body_html: m.body_html || old.body_html,
-          body_text: m.body_text || old.body_text,
-          body_preview: m.body_preview || old.body_preview,
-          verification_code: m.verification_code || old.verification_code,
+          body_html,
+          body_text,
+          body_preview,
+          verification_code,
         })
       } else {
         map.set(k, withFolder)

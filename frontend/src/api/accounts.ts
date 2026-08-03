@@ -307,6 +307,8 @@ export function toCreateBody(
     refreshToken?: string
     clientId?: string
     apiUrl?: string
+    apiKey?: string
+    apiAuthStyle?: string
     imapHost?: string
     imapPort?: number
     smtpHost?: string
@@ -334,13 +336,15 @@ export function toCreateBody(
   return {
     email: partial.email,
     provider,
-    password: partial.password || partial.authCode || undefined,
+    password: partial.password || partial.authCode || partial.apiKey || undefined,
     credential: credentialFromLocal({
       type: partial.type,
       email: partial.email,
       refreshToken: partial.refreshToken,
       clientId: partial.clientId,
       apiUrl: partial.apiUrl,
+      apiKey: partial.apiKey,
+      apiAuthStyle: partial.apiAuthStyle,
       imapHost: partial.imapHost,
       imapPort: partial.imapPort,
       smtpHost: partial.smtpHost,
