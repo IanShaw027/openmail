@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-08-03
+
+### Added
+
+- Unified **brand logo registry** (`brandLogos.ts`, 100+ Simple Icons / multi-color marks) shared by mail chips, 2FA, and purpose shortcuts
+- Expanded 2FA service presets (OpenAI, Claude, Cloudflare, Docker, Stripe, …)
+- CF temp-mail **expand/collapse** under the API source row (children not flat peers)
+
+### Fixed
+
+- **mail.com** HTML body via lightmailer `mailbody` iframe hydrate
+- Mainstream **body extraction**: nested MIME prefer-HTML, Graph `body`/`uniqueBody`, HttpApi field aliases
+- Incremental fetch no longer uses `lastFetchAt` as `since` (empty pull after cache)
+- Purpose shortcuts: idle → on → used(gray) cycle, live text sync, `~~tag~~` disabled form
+- Manage-groups modal layout consistency
+- CF temp children: read-only credentials, per-child fetch, re-parent orphans on sync
+- **localStorage QuotaExceeded** on `openmail.userSettings` — drop unused `lastFetchAt`, cap `firstFullDone`, safe persist + prune
+
+### Changed
+
+- Brand filter includes `cf_temp`, GMX, Proton, Zoho, DuckMail
+- ChatGPT purpose / 2FA marks resolve to OpenAI glyph
+
 ## [0.2.0] — 2026-08-03
 
 ### Added
@@ -74,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - User registration, admin console, server mail search UI
 - Code-API **create** (legacy token URLs may still resolve if present in DB)
 
-[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/IanShaw027/openmail/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IanShaw027/openmail/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IanShaw027/openmail/releases/tag/v0.1.0
