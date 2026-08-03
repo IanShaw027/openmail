@@ -11,12 +11,16 @@ import email.utils
 import imaplib
 import re
 import socket
-from email.message import Message as EmailMessage
+from email import policy as email_policy
+from email.message import EmailMessage, Message as CompatMessage
 from typing import Any
 
 from app.providers.base import FetchResult, HealthResult, Message
 from app.providers.imap_hosts import resolve_imap_host
 from app.services.parser import annotate_message_code, attach_verification_code
+
+# Type alias: both EmailMessage and legacy Message support walk/get_content_type
+EmailPart = EmailMessage | CompatMessage
 
 # Defaults
 DEFAULT_TIMEOUT = 30.0
@@ -194,18 +198,30 @@ def _addr_list(header_val: str | None) -> tuple[str, str]:
     return display, (addr or "").lower()
 
 
-def _part_payload_text(part: EmailMessage) -> str:
+def _part_payload_text(part: EmailPart) -> str:
+    """Decode a text/* part with charset fallbacks used by CN / global ISPs."""
+    # Prefer modern EmailMessage API when available
+    if hasattr(part, "get_content"):
+        try:
+            content = part.get_content()  # type: ignore[attr-defined]
+            if isinstance(content, str) and content.strip():
+                return content
+        except Exception:
+            pass
     try:
         payload = part.get_payload(decode=True)
     except Exception:
         payload = None
     if payload is None:
         data = part.get_payload()
+        if isinstance(data, list):
+            return ""
         return data if isinstance(data, str) else ""
     if not isinstance(payload, (bytes, bytearray)):
         return str(payload)
-    charset = part.get_content_charset() or "utf-8"
-    for cs in (charset, "utf-8", "gb18030", "latin-1"):
+    charset = (part.get_content_charset() or "").strip() or "utf-8"
+    # QQ / 163 / 126 often declare gb2312/gbk; Gmail/Outlook utf-8
+    for cs in (charset, "utf-8", "gb18030", "gbk", "gb2312", "big5", "latin-1"):
         try:
             return bytes(payload).decode(cs, errors="replace")
         except (LookupError, UnicodeDecodeError):
@@ -213,41 +229,161 @@ def _part_payload_text(part: EmailMessage) -> str:
     return bytes(payload).decode("utf-8", errors="replace")
 
 
+def _looks_like_html(s: str) -> bool:
+    if not s or "<" not in s:
+        return False
+    low = s.lstrip().lower()
+    if low.startswith("<!doctype html") or low.startswith("<html"):
+        return True
+    return bool(
+        re.search(
+            r"<(?:html|body|div|p|table|br|span|font|center|h[1-6])\b",
+            s,
+            re.I,
+        )
+    )
+
+
+def _html_to_text(html: str) -> str:
+    t = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html)
+    t = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", t)
+    t = re.sub(r"<[^>]+>", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _extract_via_get_body(em: EmailPart) -> tuple[str, str] | None:
+    """Official path: EmailMessage.get_body(preferencelist=…).
+
+    See Python docs: https://docs.python.org/3/library/email.message.html
+    RFC 2046 multipart/alternative: preferred part is last; get_body respects that.
+    """
+    if not hasattr(em, "get_body"):
+        return None
+    try:
+        # Prefer HTML for rich UI; still collect plain separately
+        html_part = em.get_body(preferencelist=("html",))  # type: ignore[attr-defined]
+        plain_part = em.get_body(preferencelist=("plain",))  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+    body_html = ""
+    body_text = ""
+    if html_part is not None:
+        try:
+            body_html = _part_payload_text(html_part).strip()
+        except Exception:
+            body_html = ""
+    if plain_part is not None:
+        try:
+            body_text = _part_payload_text(plain_part).strip()
+        except Exception:
+            body_text = ""
+    # If get_body returned something, trust it (even if one side empty)
+    if body_html or body_text:
+        if body_text and not body_html and _looks_like_html(body_text):
+            body_html = body_text
+        return body_text, body_html
+    return None
+
+
+def _extract_text_parts(em: EmailPart) -> tuple[str, str]:
+    """Collect text/plain + text/html from MIME tree.
+
+    1) Prefer EmailMessage.get_body (stdlib best practice).
+    2) Fallback: recursive walk for nested mixed/related (QQ, 163, some gateways).
+    """
+    via = _extract_via_get_body(em)
+    if via is not None:
+        return via
+
+    plains: list[str] = []
+    htmls: list[str] = []
+
+    def visit(part: EmailPart) -> None:
+        ctype = (part.get_content_type() or "").lower()
+        disp = str(part.get("Content-Disposition") or "").lower()
+        maintype = (part.get_content_maintype() or "").lower()
+
+        if part.is_multipart() or maintype == "multipart":
+            try:
+                children = part.get_payload()
+            except Exception:
+                children = None
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, (EmailMessage, CompatMessage)):
+                        visit(child)
+            return
+
+        if "attachment" in disp:
+            if "inline" not in disp and ctype not in ("text/html", "text/plain"):
+                return
+
+        if ctype == "text/plain":
+            t = _part_payload_text(part).strip()
+            if t:
+                plains.append(t)
+        elif ctype in ("text/html", "text/x-amp-html", "application/xhtml+xml"):
+            t = _part_payload_text(part).strip()
+            if t:
+                htmls.append(t)
+        elif ctype.startswith("text/") and not ctype.startswith("text/calendar"):
+            t = _part_payload_text(part).strip()
+            if not t:
+                return
+            if _looks_like_html(t):
+                htmls.append(t)
+            else:
+                plains.append(t)
+
+    visit(em)
+
+    # Longest non-empty wins (RFC 2046 alternative: richest/last often longest HTML)
+    body_text = max(plains, key=len) if plains else ""
+    body_html = max(htmls, key=len) if htmls else ""
+    if body_text and not body_html and _looks_like_html(body_text):
+        body_html = body_text
+    return body_text, body_html
+
+
 def parse_rfc822(raw: bytes | str, *, msg_id: str, folder: str = "inbox") -> Message:
-    """Parse RFC822 bytes into provider Message."""
+    """Parse RFC822 into Message for UI (both plain + HTML).
+
+    Aligns with:
+    - RFC 2046 multipart/alternative (prefer richest/last part for display)
+    - Python email.EmailMessage.get_body(preferencelist=('html'|'plain'))
+    - Common open-source pattern (mailparser: keep both ``html`` and ``text``)
+
+    Mainstream layouts: alternative, related, mixed nesting (QQ/163/Gmail/Outlook),
+    single-part html/plain, gb18030/gbk/utf-8 charsets.
+    """
     if isinstance(raw, str):
         raw_bytes = raw.encode("utf-8", errors="replace")
     else:
         raw_bytes = raw
-    em = email.message_from_bytes(raw_bytes)
+    # policy.default → EmailMessage with get_body / get_content
+    try:
+        em = email.message_from_bytes(raw_bytes, policy=email_policy.default)
+    except Exception:
+        em = email.message_from_bytes(raw_bytes)
 
     subject = _decode_header(em.get("Subject"))
     from_disp, from_addr = _addr_list(em.get("From"))
     to_disp, _ = _addr_list(em.get("To"))
     date_hdr = em.get("Date")
-    date_str = date_hdr.strip() if date_hdr else None
+    date_str = date_hdr.strip() if isinstance(date_hdr, str) else (
+        str(date_hdr).strip() if date_hdr else None
+    )
 
-    body_text = ""
-    body_html = ""
-    if em.is_multipart():
-        for part in em.walk():
-            ctype = (part.get_content_type() or "").lower()
-            disp = str(part.get("Content-Disposition") or "").lower()
-            if "attachment" in disp:
-                continue
-            if ctype == "text/plain" and not body_text:
-                body_text = _part_payload_text(part)
-            elif ctype == "text/html" and not body_html:
-                body_html = _part_payload_text(part)
-    else:
-        ctype = (em.get_content_type() or "text/plain").lower()
-        text = _part_payload_text(em)
-        if ctype == "text/html":
-            body_html = text
-        else:
-            body_text = text
+    body_text, body_html = _extract_text_parts(em)
 
-    preview_src = body_text or re.sub(r"<[^>]+>", " ", body_html or "")
+    # Prefer rich plain for code extraction when HTML is fuller (common CN stubs)
+    if body_html:
+        from_html = _html_to_text(body_html)
+        if not body_text or (from_html and len(from_html) >= len(body_text)):
+            body_text = from_html or body_text
+
+    preview_src = body_text or _html_to_text(body_html or "")
     preview = re.sub(r"\s+", " ", preview_src).strip()[:280]
 
     msg = Message(

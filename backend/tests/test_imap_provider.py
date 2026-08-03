@@ -95,8 +95,70 @@ Content-Type: text/html; charset=utf-8\r
     assert "123456" in msg.subject or msg.verification_code == "123456"
     assert msg.from_address == "auth@example.com"
     assert "123456" in (msg.body_text or "")
+    assert "123456" in (msg.body_html or "")
     assert msg.verification_code == "123456"
     assert msg.folder == "inbox"
+
+
+def test_parse_rfc822_nested_mixed_related_html() -> None:
+    """QQ/163-style: multipart/mixed → alternative → related + html."""
+    raw = b"""From: "QQ" <noreply@qq.com>\r
+To: user@qq.com\r
+Subject: code 998877\r
+MIME-Version: 1.0\r
+Content-Type: multipart/mixed; boundary="mix"\r
+\r
+--mix\r
+Content-Type: multipart/alternative; boundary="alt"\r
+\r
+--alt\r
+Content-Type: text/plain; charset=utf-8\r
+\r
+plain only stub\r
+--alt\r
+Content-Type: multipart/related; boundary="rel"\r
+\r
+--rel\r
+Content-Type: text/html; charset=utf-8\r
+\r
+<html><body><p>Your QQ code is <b>998877</b></p></body></html>\r
+--rel--\r
+--alt--\r
+--mix\r
+Content-Type: application/octet-stream; name="x.bin"\r
+Content-Disposition: attachment; filename="x.bin"\r
+\r
+ATTACH\r
+--mix--\r
+"""
+    msg = parse_rfc822(raw, msg_id="qq1", folder="inbox")
+    assert "998877" in (msg.body_html or "")
+    assert msg.verification_code == "998877"
+    assert "998877" in (msg.body_text or "")
+
+
+def test_parse_rfc822_html_only_part() -> None:
+    raw = (
+        b"From: a@b.com\r\nSubject: Hi\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n\r\n"
+        b"<html><body><div>Hello <b>world</b></div></body></html>\r\n"
+    )
+    msg = parse_rfc822(raw, msg_id="h1")
+    assert "Hello" in (msg.body_html or "")
+    assert "Hello" in (msg.body_text or "")
+    assert "world" in (msg.body_text or "")
+
+
+def test_parse_rfc822_mislabelled_html_as_plain() -> None:
+    raw = (
+        b"From: a@b.com\r\nSubject: otp\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+        b"<html><body><p>code <b>112233</b></p></body></html>\r\n"
+    )
+    msg = parse_rfc822(raw, msg_id="m1")
+    assert msg.body_html
+    assert "112233" in (msg.body_html or "")
+    assert msg.verification_code == "112233"
 
 
 def test_parse_rfc822_gb18030_subject() -> None:

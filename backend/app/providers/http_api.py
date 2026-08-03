@@ -8,6 +8,7 @@ Supports generic JSON shapes:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -183,9 +184,32 @@ def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index
     to_raw = _pick(item, "to", "to_address", "toAddress", default="")
     to_str = _as_str(to_raw) if not isinstance(to_raw, list) else ", ".join(_as_str(x) for x in to_raw)
 
-    body_text = _as_str(_pick(item, "body_text", "bodyText", "text", "content", "body"), default="")
-    body_html = _as_str(_pick(item, "body_html", "bodyHtml", "html"), default="")
+    body_text = _as_str(
+        _pick(item, "body_text", "bodyText", "text", "textBody", "plain", "plainText"),
+        default="",
+    )
+    body_html = _as_str(
+        _pick(item, "body_html", "bodyHtml", "html", "htmlBody", "rawHtml", "source"),
+        default="",
+    )
+    # Generic "body" / "content" — may be HTML or plain depending on Worker
+    generic_body = _as_str(_pick(item, "body", "content", "message", "raw"), default="")
+    if generic_body and not body_html and not body_text:
+        if re.search(r"<(?:html|body|div|p|br|table)\b", generic_body, re.I) or generic_body.lstrip().startswith(
+            "<"
+        ):
+            body_html = generic_body
+        else:
+            body_text = generic_body
+    elif generic_body and not body_html and "<" in generic_body and len(generic_body) > len(body_text):
+        body_html = generic_body
+
     preview = _as_str(_pick(item, "body_preview", "bodyPreview", "preview", "snippet"), default="")
+    if body_html and not body_text:
+        stripped = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", body_html)
+        stripped = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", stripped)
+        stripped = re.sub(r"<[^>]+>", " ", stripped)
+        body_text = re.sub(r"\s+", " ", stripped).strip()
     if not preview and body_text:
         preview = body_text[:200]
     date = _pick(item, "date", "received_at", "receivedAt", "time", "timestamp")

@@ -37,7 +37,9 @@ _FOLDER_MAP = {
     "sent mail": "sentitems",
 }
 
-_SELECT = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead"
+# List endpoint: body is heavy — expand per-message. bodyPreview is list-safe.
+# See https://learn.microsoft.com/en-us/graph/api/resources/message
+_SELECT = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments"
 _TIMEOUT = 30.0
 
 
@@ -106,9 +108,35 @@ def _graph_message_to_message(item: dict[str, Any], *, folder: str) -> Message:
     body = item.get("body") or {}
     content = str(body.get("content") or "")
     content_type = str(body.get("contentType") or "").lower()
-    body_text = content if content_type == "text" else ""
-    body_html = content if content_type == "html" else (content if not body_text else "")
+    # Graph returns body as { contentType: "html"|"text", content: "..." }
+    body_html = ""
+    body_text = ""
+    if content:
+        if content_type == "text":
+            body_text = content
+        else:
+            # default / html / unknown → treat as HTML when markup present
+            if content_type == "html" or "<" in content:
+                body_html = content
+            else:
+                body_text = content
+    # uniqueBody (if ever requested) — prefer as HTML when available
+    ub = item.get("uniqueBody") or {}
+    if isinstance(ub, dict) and ub.get("content") and not body_html and not body_text:
+        uc = str(ub.get("content") or "")
+        ut = str(ub.get("contentType") or "").lower()
+        if ut == "html" or "<" in uc:
+            body_html = uc
+        else:
+            body_text = uc
     preview = str(item.get("bodyPreview") or "")
+    if body_html and not body_text:
+        import re
+
+        body_text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", body_html)
+        body_text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", body_text)
+        body_text = re.sub(r"<[^>]+>", " ", body_text)
+        body_text = re.sub(r"\s+", " ", body_text).strip()
     msg = Message(
         id=str(item.get("id") or ""),
         subject=str(item.get("subject") or ""),
@@ -116,9 +144,9 @@ def _graph_message_to_message(item: dict[str, Any], *, folder: str) -> Message:
         from_address=address,
         to=_format_to(item.get("toRecipients")),
         date=item.get("receivedDateTime"),
-        body_preview=preview,
+        body_preview=preview or (body_text[:280] if body_text else ""),
         body_text=body_text or preview,
-        body_html=body_html if content_type == "html" else "",
+        body_html=body_html,
         folder=folder,
         raw_refs={"graph_id": item.get("id")},
     )
@@ -326,8 +354,8 @@ class OAuthGraphProvider:
                 items = []
 
             messages: list[Message] = []
-            # Fetch body for top few (quick: 3, full: min(top, 10))
-            body_limit = 3 if quick else min(top, 10)
+            # List endpoint omits full body; expand HTML for UI (more rows than before)
+            body_limit = min(top, 12 if quick else 25)
             for i, item in enumerate(items):
                 if not isinstance(item, dict):
                     continue
@@ -336,7 +364,7 @@ class OAuthGraphProvider:
                     try:
                         br = client.get(
                             f"{GRAPH_BASE}/me/messages/{msg_id}"
-                            f"?$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,body",
+                            f"?$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,body,uniqueBody",
                             headers=headers,
                         )
                         if br.status_code < 400:
