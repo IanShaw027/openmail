@@ -25,6 +25,7 @@ from app.config import get_settings
 from app.db import Base, get_db
 from app.main import create_app
 import app.db as app_db
+import app.models  # noqa: F401 — register all tables on Base.metadata before create_all
 import app.services.sync_worker as sync_worker_mod
 
 

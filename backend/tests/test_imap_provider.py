@@ -223,6 +223,42 @@ def test_fetch_with_mocked_imap() -> None:
     mock_conn.logout.assert_called()
 
 
+def test_before_paging_filters_exact_time_within_same_day() -> None:
+    def raw(date: str, subject: str) -> bytes:
+        return (
+            f"From: sender@example.com\r\nDate: {date}\r\nSubject: {subject}\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nbody\r\n"
+        ).encode()
+
+    provider = ImapProvider(timeout=5)
+    conn = MagicMock()
+    conn.login.return_value = ("OK", [b"Logged in"])
+    conn.select.return_value = ("OK", [b"3"])
+    conn.response.return_value = (None, None)
+    conn.logout.return_value = ("BYE", [])
+
+    payloads = {
+        "3": raw("Mon, 03 Aug 2026 15:00:00 +0000", "newer"),
+        "2": raw("Mon, 03 Aug 2026 11:00:00 +0000", "older one"),
+        "1": raw("Mon, 03 Aug 2026 10:00:00 +0000", "older two"),
+    }
+    with (
+        patch.object(provider, "_login_connect", return_value=conn),
+        patch.object(provider, "_uids_before", return_value=["3", "2", "1"]),
+        patch.object(provider, "_fetch_rfc822", side_effect=lambda _conn, uid: payloads[uid]),
+    ):
+        result = provider.fetch(
+                SimpleNamespace(provider="imap", email="u@qq.com"),
+            folder="inbox",
+            quick=True,
+            limits={"before": "2026-08-03T12:00:00Z", "max_messages": 2},
+                credentials={"password": "secret", "imap_host": "imap.qq.com"},
+        )
+
+    assert result.ok is True
+    assert [message.subject for message in result.messages] == ["older one", "older two"]
+
+
 def test_domain_table_keys_present() -> None:
     for d in ("qq.com", "163.com", "126.com", "gmail.com", "outlook.com"):
         assert d in DOMAIN_IMAP_HOSTS

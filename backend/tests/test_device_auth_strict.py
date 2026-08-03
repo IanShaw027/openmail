@@ -10,6 +10,8 @@ import time
 
 import pytest
 
+_EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
+
 
 @pytest.fixture
 def da(tmp_path, monkeypatch):
@@ -65,6 +67,7 @@ def test_legacy_ok_for_quota_only(da):
 
 
 def test_register_and_hmac(da):
+    """GET without body hash: legacy path-only signature still accepted."""
     secret, b64, pid = _secret_pair()
     out = da.register_device_secret(pid, b64)
     assert out.startswith("vk_")
@@ -80,6 +83,158 @@ def test_register_and_hmac(da):
         require_hmac=True,
     )
     assert ok is True, err
+
+
+def test_register_and_hmac_with_body_hash(da):
+    """New format: {ts}.{METHOD}.{path}.{body_sha256}."""
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    body = b'{"a":1}'
+    body_hash = hashlib.sha256(body).hexdigest()
+    msg = f"{ts}.POST./api/fetch/send.{body_hash}".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    ok, err = da.verify_request(
+        out,
+        ts,
+        sig,
+        "POST",
+        "/api/fetch/send",
+        require_hmac=True,
+        body_sha256=body_hash,
+    )
+    assert ok is True, err
+
+
+def test_get_query_string_is_signed(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    path = "/api/accounts?folder=spam&quick=false"
+    msg = f"{ts}.GET.{path}.{_EMPTY_BODY_SHA256}".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    ok, err = da.verify_request(
+        out,
+        ts,
+        sig,
+        "GET",
+        path,
+        require_hmac=True,
+        body_sha256=_EMPTY_BODY_SHA256,
+    )
+    assert ok is True, err
+
+
+def test_get_with_empty_body_hash(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    msg = f"{ts}.GET./api/accounts.{_EMPTY_BODY_SHA256}".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    ok, err = da.verify_request(
+        out,
+        ts,
+        sig,
+        "GET",
+        "/api/accounts",
+        require_hmac=True,
+        body_sha256=_EMPTY_BODY_SHA256,
+    )
+    assert ok is True, err
+
+
+def test_post_requires_body_hash(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    # Legacy path-only signature must not work for POST
+    msg = f"{ts}.POST./api/fetch/send".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    ok, err = da.verify_request(
+        out,
+        ts,
+        sig,
+        "POST",
+        "/api/fetch/send",
+        require_hmac=True,
+        body_sha256=None,
+    )
+    assert ok is False
+    assert err and "Body-Sha256" in err
+
+
+def test_wrong_body_hash_signature_rejected(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    real_hash = hashlib.sha256(b'{"a":1}').hexdigest()
+    wrong_hash = hashlib.sha256(b'{"a":2}').hexdigest()
+    msg = f"{ts}.POST./api/x.{real_hash}".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    ok, err = da.verify_request(
+        out,
+        ts,
+        sig,
+        "POST",
+        "/api/x",
+        require_hmac=True,
+        body_sha256=wrong_hash,
+    )
+    assert ok is False
+
+
+def test_delete_requires_body_sha256(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    # Legacy path-only DELETE must fail
+    msg = f"{ts}.DELETE./api/accounts/x".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    ok, err = da.verify_request(
+        out,
+        ts,
+        sig,
+        "DELETE",
+        "/api/accounts/x",
+        require_hmac=True,
+        body_sha256=None,
+    )
+    assert ok is False
+    assert err and "Body-Sha256" in err
+
+    # Empty-body hash is accepted
+    empty = hashlib.sha256(b"").hexdigest()
+    msg2 = f"{ts}.DELETE./api/accounts/x.{empty}".encode()
+    sig2 = hmac.new(secret, msg2, hashlib.sha256).hexdigest()
+    ok2, err2 = da.verify_request(
+        out,
+        ts,
+        sig2,
+        "DELETE",
+        "/api/accounts/x",
+        require_hmac=True,
+        body_sha256=empty,
+    )
+    assert ok2 is True, err2
+
+
+def test_invalid_body_sha256_format_rejected(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    msg = f"{ts}.POST./api/x.not-a-hash".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    ok, err = da.verify_request(
+        out,
+        ts,
+        sig,
+        "POST",
+        "/api/x",
+        require_hmac=True,
+        body_sha256="not-a-hash",
+    )
+    assert ok is False
+    assert err and "Body-Sha256" in err
 
 
 def test_bad_signature_rejected(da):
@@ -118,3 +273,12 @@ def test_register_rejects_alias_mismatch(da):
         da.register_device_secret(victim, b64)
     # genuine register still works
     assert da.register_device_secret(pid, b64) == pid
+
+
+def test_unknown_device_reloads_registry_written_by_another_worker(da):
+    _, b64, pid = _secret_pair()
+    da.register_device_secret(pid, b64)
+    da._secrets.clear()
+    da._registry.clear()
+    da._loaded = True
+    assert da.is_registered(pid) is True

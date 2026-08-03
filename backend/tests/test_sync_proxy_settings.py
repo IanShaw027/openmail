@@ -87,7 +87,51 @@ def test_list_proxy_candidates_fixed_proxy_no_pool_spin() -> None:
     )
     acc = SimpleNamespace(id="x", proxy="socks5://fixed:1080", email="a@b.com")
     cands = list_proxy_candidates(acc, settings=settings, include_direct=True)
-    assert cands == ["socks5://fixed:1080", None]
+    assert cands == ["socks5://fixed:1080"]
+
+
+def test_fetch_account_fixed_proxy_never_falls_back_direct(db_session, monkeypatch) -> None:
+    from app.models import AccountPool, AccountStatus, ProviderType
+    from app.services.fetch_service import fetch_account
+
+    acc = Account(
+        email="proxy@example.com",
+        provider=ProviderType.http_api,
+        pool=AccountPool.user_private,
+        owner_user_id="vk_proxy_device",
+        proxy="socks5://fixed:1080",
+        status=AccountStatus.ok,
+    )
+    db_session.add(acc)
+    db_session.commit()
+    calls: list[dict[str, object]] = []
+
+    def fake_fetch(account, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return SimpleNamespace(
+            ok=False,
+            messages=[],
+            folder=kwargs.get("folder", "inbox"),
+            error="proxy failed",
+            credential_updates=None,
+        )
+
+    def explode(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.services.proxy.list_proxy_candidates", explode)
+    monkeypatch.setattr("app.services.fetch_service.resolve_provider", lambda account: SimpleNamespace(fetch=fake_fetch))
+    result = fetch_account(
+        db_session,
+        acc,
+        settings=SimpleNamespace(
+            fetch_min_interval_seconds=0.0,
+            fetch_lock_lease_seconds=180.0,
+        ),
+        force=True,
+    )
+    assert result.ok is False
+    assert calls and calls[0]["credentials"]["proxy"] == "socks5://fixed:1080"
 
 
 def test_settings_override(db_session: Session) -> None:
