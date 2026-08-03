@@ -1309,6 +1309,8 @@ async function applyFetchResult(
       // API source row: don't dump all mailboxes' mail into api@host cache unless no filter
       if (!acc.isApiSource || tagged.length) {
         mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+        // Refresh OTP parse on this folder (clears sticky false positives)
+        mailCache.reparseCodes(acc.email, folderTag)
         // Immediate vault write (do not rely on debounce — refresh would lose mail)
         await mailCache.flushPersist()
       }
@@ -1634,6 +1636,7 @@ async function fetchOne(
             }))
             if (!acc.isApiSource || tagged.length) {
               mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+              mailCache.reparseCodes(acc.email, folderTag)
               await mailCache.flushPersist()
             }
           }

@@ -5,6 +5,62 @@ import { ref, watch } from 'vue'
 import type { MailMessage } from '@/api/accounts'
 import { useVaultStore } from '@/stores/vault'
 
+/**
+ * Lightweight client-side OTP re-parse (aligned with backend heuristics).
+ * Used to refresh sticky false positives without a network round-trip.
+ */
+export function extractCodeFromMessage(m: Pick<
+  MailMessage,
+  'subject' | 'body_preview' | 'body_text' | 'body_html'
+>): string | null {
+  const subject = m.subject || ''
+  const body =
+    (m.body_text || '') +
+    '\n' +
+    (m.body_preview || '') +
+    '\n' +
+    String(m.body_html || '').replace(/<[^>]+>/g, ' ')
+  const blob = `${subject}\n${body}`
+
+  const yearOk = (d: string) => !/^(?:19|20)\d{2}$/.test(d)
+
+  // Keyword-adjacent 4–8 digits
+  const nearDigit =
+    /(?:验证码|校验码|动态码|确认码|临时验证码|confirmation\s*code|verification\s*code|security\s*code|access\s*code|login\s*code|auth(?:entication)?\s*code|temporary\s+(?:login\s+|verification\s+)?code|one[-\s]?time\s+(?:pass(?:word|code)|code|otp|pin)|(?<![A-Za-z])code(?![A-Za-z])|\botp\b|\bpin\b)[^\d]{0,48}(\d{4,8})/i.exec(
+      blob,
+    ) ||
+    /(\d{4,8})[^\d]{0,24}(?:验证码|校验码|is\s+your\s+code)/i.exec(blob)
+  if (nearDigit?.[1] && yearOk(nearDigit[1])) return nearDigit[1]
+
+  // Alphanumeric with a digit (8IX-FGG / M1M-J00)
+  const alnum =
+    /(?:验证码|校验码|confirmation\s*code|verification\s*code|access\s*code|login\s*code|(?<![A-Za-z])code(?![A-Za-z])|\botp\b)(?:[\s:：#=\-–—]|is|为|：|是){0,24}([A-Za-z0-9]{3,8}(?:-[A-Za-z0-9]{2,8}){0,3})(?![A-Za-z0-9])/i.exec(
+      blob,
+    )
+  if (alnum?.[1] && /\d/.test(alnum[1].replace(/-/g, ''))) {
+    const t = alnum[1]
+    if (!/^(code|codes|login|token|password)$/i.test(t.replace(/-/g, ''))) return t
+  }
+
+  // Subject bare digits only with code-ish subject
+  const subjLow = subject.toLowerCase()
+  if (
+    /code|otp|验证|校验|pin|login|passcode|sign-?in/.test(subjLow) ||
+    /验证码|校验码/.test(subject)
+  ) {
+    const bare = /(?<!\d)(\d{4,8})(?!\d)/.exec(subject)
+    if (bare?.[1] && yearOk(bare[1])) return bare[1]
+  }
+
+  // Short body 6-digit near code keywords
+  if (blob.length < 1200 && /code|otp|验证|校验|login code|passcode|one-?time/i.test(blob)) {
+    const m6 = /(?<!\d)(\d{6})(?!\d)/.exec(blob)
+    if (m6?.[1] && yearOk(m6[1])) return m6[1]
+  }
+
+  return null
+}
+
 const KEY = 'openmail.mailCache.v1'
 const PER_MAILBOX_CAP = 200
 
@@ -260,6 +316,53 @@ export const useMailCacheStore = defineStore('mailCache', () => {
   }
 
   /**
+   * Re-run client OTP heuristics on cached rows (optional folder scope).
+   * Clears stale false positives and fills codes when body is present.
+   * @returns number of messages whose verification_code changed
+   */
+  function reparseCodes(email: string, folder?: string | null): number {
+    const key = email.toLowerCase()
+    const list = byEmail.value[key]
+    if (!list?.length) return 0
+    const fScope = folder != null && folder !== '' ? normalizeFolder(folder) : null
+    let changed = 0
+    const next = list.map((m) => {
+      if (fScope && normalizeFolder(m.folder) !== fScope) return m
+      const parsed = extractCodeFromMessage(m)
+      const prev =
+        m.verification_code != null && String(m.verification_code).trim() !== ''
+          ? String(m.verification_code)
+          : null
+      const nextCode = parsed
+      if (prev === nextCode) return m
+      // No body and no subject digits → leave alone (cannot improve)
+      const hasText = Boolean(
+        (m.body_text && m.body_text.length > 8) ||
+          (m.body_html && m.body_html.length > 20) ||
+          (m.body_preview && m.body_preview.length > 8) ||
+          (m.subject && /code|otp|验证|校验|pin/i.test(m.subject)),
+      )
+      if (!hasText && nextCode == null && prev != null) {
+        // Clear known year-like / pure-letter false positives even without body
+        if (
+          /^(?:19|20)\d{2}$/.test(prev) ||
+          (!/\d/.test(prev) && prev.length >= 4)
+        ) {
+          changed += 1
+          return { ...m, verification_code: null }
+        }
+        return m
+      }
+      changed += 1
+      return { ...m, verification_code: nextCode }
+    })
+    if (changed) {
+      byEmail.value = { ...byEmail.value, [key]: next }
+    }
+    return changed
+  }
+
+  /**
    * Newest cached message date as UTC ISO, for incremental fetch.
    * When `folder` is set, only that folder is considered (prevents sent dates
    * from advancing the inbox since cursor).
@@ -401,6 +504,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     listFor,
     normalizeFolder,
     merge,
+    reparseCodes,
     newestUtcIso,
     oldestUtcIso,
     clearMailbox,

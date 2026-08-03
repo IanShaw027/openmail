@@ -23,7 +23,7 @@ import {
   patchAccountUiMeta,
   removeAccountUiMetaIfUnused,
 } from '@/utils/accountUiMeta'
-import { exportCredentialsTxt } from '@/utils/exportImport'
+import { exportCredentialsTxt, rebuildRawLine } from '@/utils/exportImport'
 import { useMailCacheStore } from '@/stores/mailCache'
 
 function tt(key: string, params?: Record<string, unknown>): string {
@@ -158,6 +158,23 @@ export const useAccountsStore = defineStore('accounts', () => {
     { deep: true },
   )
 
+  /**
+   * Align rawLine with current secrets (import lines stay stale after edits).
+   * Returns number of rows changed.
+   */
+  function rebuildAllRawLines(): number {
+    let n = 0
+    localAccounts.value = localAccounts.value.map((a) => {
+      const next = rebuildRawLine(a)
+      if (next && next !== a.rawLine) {
+        n += 1
+        return { ...a, rawLine: next, updatedAt: Date.now() }
+      }
+      return a
+    })
+    return n
+  }
+
   /** Call after vault unlock: load encrypted accounts (or migrate legacy plaintext). */
   async function hydrateFromVault(): Promise<void> {
     try {
@@ -183,7 +200,10 @@ export const useAccountsStore = defineStore('accounts', () => {
           /* ignore */
         }
       }
+      // One-shot migration: fix rawLine that still holds pre-edit passwords
+      const fixed = rebuildAllRawLines()
       vaultHydrated.value = true
+      if (fixed > 0) await persistLocalEncrypted()
     } catch {
       localAccounts.value = []
       vaultHydrated.value = false
@@ -1362,6 +1382,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     importText,
     importPartials,
     importPartialsToCloud,
+    rebuildAllRawLines,
     uploadLocalToCloud,
     syncApiMailboxes,
     removeSelected,
