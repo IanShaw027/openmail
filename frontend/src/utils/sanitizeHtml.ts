@@ -3,6 +3,8 @@
  * Uses DOMParser + allowlist (not regex-only).
  */
 
+import { unwrapEmailHref } from '@/utils/emailLinks'
+
 const ALLOWED_TAGS = new Set([
   'a',
   'abbr',
@@ -268,6 +270,12 @@ function walk(node: Node, out: DocumentFragment, doc: Document) {
     if (URL_ATTRS.has(name)) {
       if (!isSafeUrl(val)) continue
       if (name === 'href' && tag === 'a') {
+        // Rewrite tracking wrappers (e.g. /?redirectUrl=https%3A%2F%2F…) to the real URL
+        // so the link is absolute https and SPA does not capture it.
+        const base =
+          typeof location !== 'undefined' ? location.href : 'https://local.invalid/'
+        const unwrapped = unwrapEmailHref(val.trim(), base)
+        if (unwrapped) val = unwrapped
         neo.setAttribute('rel', 'noopener noreferrer nofollow')
         if (!neo.getAttribute('target')) neo.setAttribute('target', '_blank')
       }

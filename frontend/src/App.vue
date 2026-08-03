@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { RouterView } from 'vue-router'
+import { RouterView, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import AppShell from '@/layouts/AppShell.vue'
 import ToastHost from '@/components/ToastHost.vue'
 import VaultGate from '@/components/VaultGate.vue'
@@ -9,7 +10,13 @@ import { useAccountsStore } from '@/stores/accounts'
 import { useTwoFaStore } from '@/stores/twofa'
 import { useMailCacheStore } from '@/stores/mailCache'
 import { useSettingsStore } from '@/stores/settings'
+import {
+  formatLinkPreview,
+  peekLandingRedirect,
+} from '@/utils/emailLinks'
 
+const { t } = useI18n()
+const router = useRouter()
 const vault = useVaultStore()
 const accounts = useAccountsStore()
 const twofa = useTwoFaStore()
@@ -86,6 +93,19 @@ function onPageHide() {
 }
 
 onMounted(() => {
+  // Email tracking links like /?redirectUrl=https://… land on the SPA;
+  // confirm and jump to the real destination (or stay in app if cancelled).
+  const landingDest = peekLandingRedirect()
+  if (landingDest) {
+    // Drop query so cancel/refresh does not re-prompt; keep path for the app
+    void router.replace({ path: router.currentRoute.value.path || '/', query: {}, hash: '' })
+    const shown = formatLinkPreview(landingDest)
+    if (window.confirm(t('console.openLinkConfirm', { url: shown, full: landingDest }))) {
+      window.location.assign(landingDest)
+      return
+    }
+  }
+
   window.addEventListener('pointerdown', onActivity, { passive: true })
   window.addEventListener('keydown', onActivity, { passive: true })
   document.addEventListener('visibilitychange', onVisibility)

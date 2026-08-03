@@ -6,6 +6,7 @@ import { useAccountsStore } from '@/stores/accounts'
 import { copyText } from '@/utils/clipboard'
 import { useToast } from '@/composables/useToast'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
+import { formatLinkPreview, onEmailHtmlClick } from '@/utils/emailLinks'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
 
 const { t } = useI18n()
@@ -115,6 +116,13 @@ const detailHtml = computed(() => {
   if (!m?.body_html?.trim()) return ''
   return sanitizeHtml(m.body_html)
 })
+
+function onMailHtmlClick(ev: MouseEvent) {
+  onEmailHtmlClick(ev, {
+    confirmNavigate: (url) =>
+      window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url })),
+  })
+}
 
 const detailText = computed(() => {
   const m = selected.value
@@ -281,7 +289,12 @@ async function copyCode(code?: string | null) {
             >
               {{ t('console.mailCode') }}: {{ selected.verification_code }}
             </button>
-            <div v-if="detailHtml" class="body-html" v-html="detailHtml" />
+            <div
+              v-if="detailHtml"
+              class="body-html"
+              v-html="detailHtml"
+              @click="onMailHtmlClick"
+            />
             <pre v-else class="body-text">{{ detailText }}</pre>
           </div>
           <div v-else key="empty" class="empty">{{ t('console.mailDetailEmpty') }}</div>

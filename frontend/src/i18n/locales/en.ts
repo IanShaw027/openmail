@@ -636,6 +636,8 @@ export default {
     mailLoadingOlder: 'Loading older mail…',
     mailNoMore: 'No older messages',
     mailShowing: 'Showing {n} / {total}',
+    openLinkConfirm:
+      'Open this external link in a new tab?\n\n{url}\n\nFull URL:\n{full}',
     mailClearRefetch: 'Clear & refetch',
     mailClearHint: 'After success, clear this folder cache and fetch the latest 20 (list kept while loading)',
     mailClearConfirm: 'On success, clear this folder’s local cache and write the latest 20. Continue?',

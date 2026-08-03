@@ -421,6 +421,57 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     persistInBackground()
   }
 
+  /**
+   * Atomically replace one folder's messages (drop old folder rows, write `messages`).
+   * Used by 清空重拉 so merge cannot leave stale mails after a short/partial page.
+   * Other folders on the same mailbox are preserved.
+   */
+  function replaceFolder(
+    email: string,
+    folder: string,
+    messages: MailMessage[],
+    retentionDays?: number,
+  ) {
+    const key = email.toLowerCase()
+    const f = normalizeFolder(folder)
+    const prev = byEmail.value[key] || []
+    const kept = prev.filter((m) => normalizeFolder(m.folder || 'inbox') !== f)
+    const map = new Map<string, MailMessage>()
+    for (const m of messages) {
+      if (!m?.id) continue
+      // Force target folder so mis-tagged rows cannot escape the replace scope
+      const withFolder: MailMessage = {
+        ...m,
+        folder: f,
+        ...(m.uidvalidity != null && Number.isFinite(Number(m.uidvalidity))
+          ? { uidvalidity: Number(m.uidvalidity) }
+          : {}),
+      }
+      const k = messageCacheKey(withFolder)
+      if (!k) continue
+      map.set(k, withFolder)
+    }
+    let nextList = [...kept, ...map.values()].sort((a, b) => {
+      const da = parseMessageDateMs(a.date) ?? 0
+      const db = parseMessageDateMs(b.date) ?? 0
+      return db - da
+    })
+    if (retentionDays != null && retentionDays > 0) {
+      nextList = pruneByRetention(nextList, retentionDays)
+    }
+    if (!nextList.length) {
+      const next = { ...byEmail.value }
+      delete next[key]
+      byEmail.value = next
+    } else {
+      byEmail.value = {
+        ...byEmail.value,
+        [key]: nextList.slice(0, PER_MAILBOX_CAP),
+      }
+    }
+    persistInBackground()
+  }
+
   /** Prune all mailboxes to retention window (call on settings load / change). */
   function pruneAll(retentionDays: number) {
     const days = Math.max(0, Number(retentionDays) || 0)
@@ -509,6 +560,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     oldestUtcIso,
     clearMailbox,
     clearMailboxFolder,
+    replaceFolder,
     pruneAll,
     search,
     replaceAll,

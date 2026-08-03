@@ -32,6 +32,7 @@ import {
 } from '@/utils/exportImport'
 import { getDeviceId, getLicenseToken, setLicenseToken } from '@/utils/device'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
+import { formatLinkPreview, onEmailHtmlClick } from '@/utils/emailLinks'
 import {
   type MailGroup,
   DEFAULT_GROUP_ID,
@@ -339,11 +340,20 @@ const selectedMessageId = ref<string | null>(null)
 const mailLoading = ref(false)
 /** How many cached mails to show in the panel (scroll load-more grows this). */
 const mailVisibleCount = ref(20)
+/**
+ * Unified fetch page sizes (single-account / list row / batch all share these):
+ * - Empty folder cache → latest MAIL_FIRST_PAGE (no since)
+ * - Has cache → catch-up with since=newest, pages of CATCH_UP_PAGE until short page
+ * - Load older (scroll) → before=oldest, MAIL_LOAD_MORE
+ */
 const MAIL_FIRST_PAGE = 20
 const MAIL_LOAD_MORE = 20
 const MAIL_FOLDERS = ['inbox', 'spam', 'sent'] as const
-const CATCH_UP_MAX_ROUNDS = 5
+/** Backend caps max_messages at 100; loop until short page or this many rounds. */
 const CATCH_UP_PAGE = 100
+const CATCH_UP_MAX_ROUNDS = 20
+/** Overlap when using newest-mail as since (clock skew / same-second mails). */
+const SINCE_SKEW_MS = 120_000
 /** Server fetch: loading older messages beyond cache */
 const mailLoadingMore = ref(false)
 /** Last load-more returned 0 new messages */
@@ -400,6 +410,14 @@ const detailHtml = computed(() => {
   const html = (m.body_html || '').trim()
   return html ? sanitizeHtml(html) : ''
 })
+
+/** Confirm then open unwrapped http(s) links from email HTML (tracking redirectUrl etc.). */
+function onMailHtmlClick(ev: MouseEvent) {
+  onEmailHtmlClick(ev, {
+    confirmNavigate: (url) =>
+      window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url })),
+  })
+}
 
 /**
  * Display recipient: prefer message.to; when providers (esp. CF temp) omit To,
@@ -461,6 +479,18 @@ const mailEmptyKind = computed(() => {
 const showLoadMoreHint = computed(
   () => hasMoreCached.value || !mailNoMoreRemote.value,
 )
+
+/**
+ * After a successful page fetch of size `requested`, if the server returned
+ * fewer than `requested` messages, there is no older page — stop infinite scroll.
+ * (Applies to 清空重拉 / first window / load-more.)
+ */
+function markNoMoreIfShortPage(fetchedCount: number, requested: number) {
+  const need = Math.max(1, requested)
+  if (fetchedCount < need) {
+    mailNoMoreRemote.value = true
+  }
+}
 
 /**
  * Load messages for account from local cache (filtered by current folder tab).
@@ -1266,6 +1296,8 @@ async function applyFetchResult(
     generation?: number
     /** Wipe folder cache only after this successful result */
     clearFirst?: boolean
+    /** Requested page size (for short-page → no-more-remote). */
+    requestedMax?: number
   } = {},
 ): Promise<boolean> {
   const code = extractCode(result)
@@ -1308,10 +1340,6 @@ async function applyFetchResult(
     try {
       // Tag folder so inbox/spam/sent tabs filter correctly
       const folderTag = mailCache.normalizeFolder(result.folder || mailFolder.value)
-      // clearFirst (清空重拉): only wipe after success, then replace with new page
-      if (opts.clearFirst) {
-        mailCache.clearMailboxFolder(acc.email, folderTag)
-      }
       const uv =
         result.uidvalidity != null && Number.isFinite(Number(result.uidvalidity))
           ? Number(result.uidvalidity)
@@ -1321,10 +1349,19 @@ async function applyFetchResult(
         folder: mailCache.normalizeFolder(m.folder || folderTag),
         uidvalidity: m.uidvalidity ?? uv,
       }))
-      // Merge into durable local cache, then show full cached list
       // API source row: don't dump all mailboxes' mail into api@host cache unless no filter
-      if (!acc.isApiSource || tagged.length) {
-        mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+      if (!acc.isApiSource || tagged.length || opts.clearFirst) {
+        if (opts.clearFirst) {
+          // Atomic replace: drop ALL old rows for this folder, then write only this page
+          mailCache.replaceFolder(
+            acc.email,
+            folderTag,
+            tagged,
+            userSettings.s.retentionDays,
+          )
+        } else if (tagged.length) {
+          mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+        }
         // Refresh OTP parse on this folder (clears sticky false positives)
         mailCache.reparseCodes(acc.email, folderTag)
         // Immediate vault write (do not rely on debounce — refresh would lose mail)
@@ -1337,11 +1374,16 @@ async function applyFetchResult(
         // clearFirst → reset visible window; load-more / refresh → preserve scroll window
         loadMessagesFromCache(acc, {
           preserveVisible: !opts.clearFirst,
-          resetRemoteFlag: Boolean(opts.clearFirst),
+          // Don't let loadMessagesFromCache force no-more=false when we just got a short page
+          resetRemoteFlag: false,
         })
         if (opts.clearFirst) {
           mailVisibleCount.value = Math.min(MAIL_FIRST_PAGE, messages.value.length)
-          mailNoMoreRemote.value = false
+        }
+        // Short page (e.g. 7 < 20) ⇒ no older remote mail — stop pull-to-load
+        const requested = opts.requestedMax ?? MAIL_FIRST_PAGE
+        if (opts.clearFirst || opts.requestedMax != null) {
+          markNoMoreIfShortPage(msgs.length, requested)
         }
         lastFetchEmpty.value = messages.value.length === 0
       }
@@ -1642,25 +1684,29 @@ async function fetchOne(
       if (result.ok !== false) {
         try {
           const folderTag = mailCache.normalizeFolder(result.folder || folder)
-          // clearFirst only after success (keep UI list until then)
+          const uv =
+            result.uidvalidity != null && Number.isFinite(Number(result.uidvalidity))
+              ? Number(result.uidvalidity)
+              : undefined
+          const tagged = msgs.map((m) => ({
+            ...m,
+            folder: mailCache.normalizeFolder(m.folder || folderTag),
+            uidvalidity: m.uidvalidity ?? uv,
+          }))
           if (opts.clearFirst) {
-            mailCache.clearMailboxFolder(acc.email, folderTag)
-          }
-          if (msgs.length) {
-            const uv =
-              result.uidvalidity != null && Number.isFinite(Number(result.uidvalidity))
-                ? Number(result.uidvalidity)
-                : undefined
-            const tagged = msgs.map((m) => ({
-              ...m,
-              folder: mailCache.normalizeFolder(m.folder || folderTag),
-              uidvalidity: m.uidvalidity ?? uv,
-            }))
-            if (!acc.isApiSource || tagged.length) {
-              mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
-              mailCache.reparseCodes(acc.email, folderTag)
-              await mailCache.flushPersist()
-            }
+            // Atomic replace so old mails cannot survive a short page
+            mailCache.replaceFolder(
+              acc.email,
+              folderTag,
+              tagged,
+              userSettings.s.retentionDays,
+            )
+            mailCache.reparseCodes(acc.email, folderTag)
+            await mailCache.flushPersist()
+          } else if (msgs.length && (!acc.isApiSource || tagged.length)) {
+            mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+            mailCache.reparseCodes(acc.email, folderTag)
+            await mailCache.flushPersist()
           }
           userSettings.markFetched(acc.email, true, folderTag)
           userSettings.flushPersist()
@@ -1676,15 +1722,19 @@ async function fetchOne(
         mailCache.normalizeFolder(folder) === mailCache.normalizeFolder(mailFolder.value)
       ) {
         loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
+        if (opts.clearFirst) {
+          markNoMoreIfShortPage(msgs.length, maxMessages ?? MAIL_FIRST_PAGE)
+        }
       }
       return { ok: result.ok !== false, count: msgs.length }
     }
 
-    // Stale interactive fetch: still durable-merge via apply, but panel gated
+    // Interactive fetch: durable merge/replace + panel update
     await applyFetchResult(acc, result, {
       expectedAccountId,
       generation: gen,
       clearFirst: Boolean(opts.clearFirst),
+      requestedMax: maxMessages ?? MAIL_FIRST_PAGE,
     })
     return { ok: result.ok !== false, count: (result.messages ?? []).length }
   } catch (e) {
@@ -1715,9 +1765,123 @@ async function fetchOne(
 }
 
 /**
+ * since cursor for catch-up: newest cached mail in this folder (minus skew),
+ * else settings.sinceFor (lookback). Never wall-clock-only.
+ */
+function catchUpSinceIso(email: string, folder: string): string | undefined {
+  const newest = mailCache.newestUtcIso(email, folder)
+  if (newest) {
+    const t = Date.parse(newest)
+    if (Number.isFinite(t)) {
+      return new Date(Math.min(t - SINCE_SKEW_MS, Date.now())).toISOString()
+    }
+  }
+  return userSettings.sinceFor(email, folder)
+}
+
+type FolderCatchUpResult = {
+  ok: boolean
+  count: number
+  hardFail: boolean
+  /**
+   * First-window pull (empty cache or forceRecent 20): short page means no older mail.
+   * Catch-up (since=newest) short page only means no *newer* mail — older may still exist.
+   */
+  firstWindowCount?: number
+}
+
+/**
+ * One folder for multi-folder fetch (shared by list-row / panel / batch).
+ *
+ * Policy (unified):
+ * - **No local mails** for this folder → latest `MAIL_FIRST_PAGE` (20), no since.
+ * - **Has local mails** → since=newest (skewed), page `CATCH_UP_PAGE` until a short
+ *   page (all new mail since last known), not limited to 20.
+ */
+async function fetchFolderCatchUp(
+  acc: MailAccount,
+  folder: MailFolderKey,
+  state: { hardFail: boolean },
+): Promise<FolderCatchUpResult> {
+  if (state.hardFail) return { ok: false, count: 0, hardFail: true }
+
+  const live = accounts.findById(acc.id) || acc
+  const empty = mailCache.listFor(live.email, folder).length === 0
+  const baseOpts: FetchOneOpts = {
+    silent: true,
+    nested: true,
+    manageUi: false,
+    folder,
+  }
+
+  // —— Empty cache: first window = latest 20 ——
+  if (empty) {
+    const r = await fetchOne(live, true, {
+      ...baseOpts,
+      forceRecent: true,
+      maxMessages: MAIL_FIRST_PAGE,
+    })
+    if (!r.ok) {
+      const err = (accounts.findById(acc.id) || live).lastError
+      if (isHardAuthError(err)) return { ok: false, count: 0, hardFail: true }
+      return { ok: false, count: 0, hardFail: false }
+    }
+    return { ok: true, count: r.count, hardFail: false, firstWindowCount: r.count }
+  }
+
+  // —— Has cache: full catch-up of mail newer than newest local ——
+  let total = 0
+  let anyOk = false
+  for (let rounds = 0; rounds < CATCH_UP_MAX_ROUNDS; rounds++) {
+    const current = accounts.findById(acc.id) || live
+    const since = catchUpSinceIso(current.email, folder)
+    if (!since) {
+      // Cache rows exist but no parseable date + no firstFull cursor → recent 20 once
+      const r = await fetchOne(current, true, {
+        ...baseOpts,
+        forceRecent: true,
+        maxMessages: MAIL_FIRST_PAGE,
+      })
+      if (!r.ok) {
+        if (isHardAuthError((accounts.findById(acc.id) || current).lastError)) {
+          return { ok: anyOk, count: total, hardFail: true }
+        }
+        return { ok: anyOk, count: total, hardFail: false }
+      }
+      return {
+        ok: true,
+        count: total + r.count,
+        hardFail: false,
+        firstWindowCount: r.count,
+      }
+    }
+
+    const r = await fetchOne(current, true, {
+      ...baseOpts,
+      since,
+      maxMessages: CATCH_UP_PAGE,
+      forceRecent: false,
+    })
+    if (!r.ok) {
+      if (isHardAuthError((accounts.findById(acc.id) || current).lastError)) {
+        return { ok: anyOk, count: total, hardFail: true }
+      }
+      return { ok: anyOk, count: total, hardFail: false }
+    }
+    anyOk = true
+    total += r.count
+    // Short page ⇒ no more newer mail in this window
+    if (r.count < CATCH_UP_PAGE) break
+  }
+  return { ok: anyOk, count: total, hardFail: false }
+}
+
+/**
  * Fetch inbox + spam + sent for one account.
- * Cookie accounts: serial folders so rolling cookies are reused (no triple login).
- * IMAP/OAuth: parallel folders (cap 3).
+ * Same path for: list-row 取件 · panel 取件 · 批量取件.
+ *
+ * Cookie accounts: serial folders (reuse session cookies).
+ * IMAP/OAuth: parallel folders.
  */
 async function fetchAccountFolders(
   acc: MailAccount,
@@ -1747,71 +1911,23 @@ async function fetchAccountFolders(
   let anyOk = false
   let hardFail = false
   let totalNew = 0
+  const failState = { hardFail: false }
+  /** first-window counts per folder (for short-page → no more older) */
+  const firstWindowByFolder = new Map<string, number>()
 
   const runFolder = async (folder: MailFolderKey): Promise<void> => {
-    if (hardFail) return
-    // Re-read account so sessionCookies from prior folder are included
-    const live = accounts.findById(acc.id) || acc
-    const cached = mailCache.listFor(live.email, folder)
-    const empty = cached.length === 0
-    const baseOpts: FetchOneOpts = {
-      silent: true,
-      nested: true,
-      manageUi: false,
-      folder,
+    if (failState.hardFail) return
+    const r = await fetchFolderCatchUp(acc, folder, failState)
+    if (r.hardFail) {
+      failState.hardFail = true
+      hardFail = true
     }
-
-    if (empty) {
-      const r = await fetchOne(live, true, {
-        ...baseOpts,
-        forceRecent: true,
-        maxMessages: MAIL_FIRST_PAGE,
-      })
-      if (r.ok) {
-        anyOk = true
-        totalNew += r.count
-      } else {
-        const err = (accounts.findById(acc.id) || live).lastError
-        if (isHardAuthError(err)) hardFail = true
-      }
-      return
-    }
-
-    // Catch-up: since=newest in this folder; loop until under page size
-    let rounds = 0
-    while (rounds < CATCH_UP_MAX_ROUNDS && !hardFail) {
-      rounds += 1
-      const current = accounts.findById(acc.id) || live
-      const since =
-        mailCache.newestUtcIso(current.email, folder) ||
-        userSettings.sinceFor(current.email, folder)
-      if (!since) {
-        const r = await fetchOne(current, true, {
-          ...baseOpts,
-          forceRecent: true,
-          maxMessages: MAIL_FIRST_PAGE,
-        })
-        if (r.ok) {
-          anyOk = true
-          totalNew += r.count
-        } else if (isHardAuthError((accounts.findById(acc.id) || current).lastError)) {
-          hardFail = true
-        }
-        break
-      }
-      const r = await fetchOne(current, true, {
-        ...baseOpts,
-        since,
-        maxMessages: CATCH_UP_PAGE,
-        forceRecent: false,
-      })
-      if (!r.ok) {
-        if (isHardAuthError((accounts.findById(acc.id) || current).lastError)) hardFail = true
-        break
-      }
+    if (r.ok) {
       anyOk = true
       totalNew += r.count
-      if (r.count < CATCH_UP_PAGE) break
+      if (r.firstWindowCount != null) {
+        firstWindowByFolder.set(folder, r.firstWindowCount)
+      }
     }
   }
 
@@ -1832,6 +1948,13 @@ async function fetchAccountFolders(
         loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
         lastFetchOk.value = anyOk
         lastFetchEmpty.value = messages.value.length === 0
+        // Empty-folder first pull of 20 returned short page → no older mail to scroll for
+        const fw = firstWindowByFolder.get(
+          mailCache.normalizeFolder(mailFolder.value) as MailFolderKey,
+        )
+        if (fw != null) {
+          markNoMoreIfShortPage(fw, MAIL_FIRST_PAGE)
+        }
         if (hardFail && !anyOk) {
           flashMsg(
             (accounts.findById(acc.id) || acc).lastError || t('console.fetchFailed'),
@@ -1876,19 +1999,25 @@ function messageDedupeKey(m: Pick<MailMessage, 'id' | 'folder' | 'uidvalidity'>)
  * Expand visible list from cache, or fetch older from server (current tab only).
  * Never clears the existing list; only appends after a successful response.
  * Loading indicator is shown at the bottom (mailLoadingMore).
+ *
+ * Short page rule: if the server returns fewer than requested (20), mark
+ * mailNoMoreRemote so pull-up load-more stops (same as 清空重拉 short page).
  */
 async function onLoadMoreMails() {
   const acc = selected.value
   if (!acc) return
+  // Already at EOF — do not request again
+  if (mailNoMoreRemote.value) return
   // 1) Still more in local cache → just grow the window
   if (messages.value.length > mailVisibleCount.value) {
     mailVisibleCount.value = Math.min(
       mailVisibleCount.value + MAIL_LOAD_MORE,
       messages.value.length,
     )
+    // If expanding cache exhausts local list and we already know remote EOF, stay quiet
     return
   }
-  if (mailNoMoreRemote.value || mailLoadingMore.value || mailLoading.value) return
+  if (mailLoadingMore.value || mailLoading.value) return
   if (accountFetchLocks.has(acc.id)) return
 
   const folder = mailFolder.value
@@ -1910,17 +2039,24 @@ async function onLoadMoreMails() {
     try {
       const prevCount = messages.value.length
       const prevKeys = new Set(messages.value.map(messageDedupeKey))
+      const requested = Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE)
       const r = await fetchOne(acc, false, {
         ...loadMoreFetch,
-        maxMessages: Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE),
+        maxMessages: requested,
         forceRecent: true,
       })
       if (accounts.selectedId !== acc.id) return
       loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
       const added = messages.value.filter((m) => !prevKeys.has(messageDedupeKey(m))).length
-      if (!r.ok || added === 0) {
+      // Short page or no new rows ⇒ no more older mail
+      if (!r.ok) {
+        // Network failure: keep list, do not mark EOF
+        return
+      }
+      if (added === 0 || r.count < requested) {
         mailNoMoreRemote.value = true
-      } else {
+      }
+      if (added > 0) {
         mailVisibleCount.value = Math.min(
           messages.value.length,
           mailVisibleCount.value + Math.max(added, MAIL_LOAD_MORE),
@@ -1936,10 +2072,11 @@ async function onLoadMoreMails() {
   try {
     const prevKeys = new Set(messages.value.map(messageDedupeKey))
     const prevCount = messages.value.length
+    const requested = MAIL_LOAD_MORE
     const r = await fetchOne(acc, true, {
       ...loadMoreFetch,
       before: String(before),
-      maxMessages: MAIL_LOAD_MORE,
+      maxMessages: requested,
     })
     if (accounts.selectedId !== acc.id) return
     if (!r.ok) {
@@ -1948,8 +2085,13 @@ async function onLoadMoreMails() {
     }
     loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
     const added = messages.value.filter((m) => !prevKeys.has(messageDedupeKey(m))).length
+    // Server returned fewer than a full page → no older mail beyond this
+    if (r.count < requested) {
+      mailNoMoreRemote.value = true
+    }
     if (added === 0 && messages.value.length <= prevCount) {
-      if (providerTimePaging(acc.type) === 'local_filter') {
+      if (providerTimePaging(acc.type) === 'local_filter' && r.count >= requested) {
+        // Full page but all duplicates under local_filter — try a larger recent window once
         const growTarget = Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE * 2)
         const r2 = await fetchOne(acc, false, {
           ...loadMoreFetch,
@@ -1959,9 +2101,11 @@ async function onLoadMoreMails() {
         if (accounts.selectedId !== acc.id) return
         loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
         const added2 = messages.value.filter((m) => !prevKeys.has(messageDedupeKey(m))).length
-        if (!r2.ok || added2 === 0) {
+        if (!r2.ok) return
+        if (added2 === 0 || r2.count < growTarget) {
           mailNoMoreRemote.value = true
-        } else {
+        }
+        if (added2 > 0) {
           mailVisibleCount.value = Math.min(
             messages.value.length,
             mailVisibleCount.value + Math.max(added2, MAIL_LOAD_MORE),
@@ -1970,7 +2114,7 @@ async function onLoadMoreMails() {
         return
       }
       mailNoMoreRemote.value = true
-    } else {
+    } else if (added > 0) {
       mailVisibleCount.value = Math.min(
         messages.value.length,
         Math.max(
@@ -1984,7 +2128,7 @@ async function onLoadMoreMails() {
   }
 }
 
-/** Clear local mails for current folder tab, then pull latest 20. */
+/** Clear local mails for current folder tab, then pull latest 20 (replace, not merge). */
 async function onClearAndRefetch() {
   const acc = selected.value
   if (!acc) {
@@ -1992,6 +2136,7 @@ async function onClearAndRefetch() {
     return
   }
   if (!window.confirm(t('console.mailClearConfirm'))) return
+  // Will be re-set from short-page rule after success; open until then
   mailNoMoreRemote.value = false
   await fetchOne(acc, true, {
     silent: false,
@@ -3454,6 +3599,7 @@ onUnmounted(() => {
                   v-if="detailHtml"
                   class="detail-body detail-html"
                   v-html="detailHtml"
+                  @click="onMailHtmlClick"
                 />
                 <pre v-else class="detail-body">{{ detailText || t('console.mailNoBody') }}</pre>
               </div>
@@ -3980,7 +4126,12 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
           <span>{{ selectedMessage.date || '—' }}</span>
         </div>
         <div class="modal-body body-modal-content">
-          <div v-if="detailHtml" class="detail-body detail-html" v-html="detailHtml" />
+          <div
+            v-if="detailHtml"
+            class="detail-body detail-html"
+            v-html="detailHtml"
+            @click="onMailHtmlClick"
+          />
           <pre v-else class="detail-body">{{ detailText || t('console.mailNoBody') }}</pre>
         </div>
       </div>

@@ -633,6 +633,8 @@ export default {
     mailLoadingOlder: '正在加载更早邮件…',
     mailNoMore: '没有更早的邮件了',
     mailShowing: '显示 {n} / {total}',
+    openLinkConfirm:
+      '即将在新标签页打开外部链接：\n\n{url}\n\n完整地址：\n{full}\n\n确认跳转？',
     mailClearRefetch: '清空重拉',
     mailClearHint: '成功后清空当前文件夹缓存并重新拉取最近 20 封（请求中保留原列表）',
     mailClearConfirm: '成功取件后将清空当前文件夹本地缓存，并写入最新 20 封。确定继续？',
