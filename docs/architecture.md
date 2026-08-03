@@ -14,6 +14,11 @@ Pinia + localStorage (ciphertext)       Proxy fetch / send (ephemeral creds)
                                     Graph / IMAP / SMTP / HttpApi / mail.com
 ```
 
+## Security & durability notes
+
+See **[18-security-and-cache-review.md](./18-security-and-cache-review.md)** for
+HMAC body binding, poll quota durability, fetch leases, and residual risks.
+
 ## Repository layout
 
 ```

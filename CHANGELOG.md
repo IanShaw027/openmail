@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-03
+
+### Security
+
+- Device HMAC **body binding** (`X-Device-Body-Sha256`); mutating methods (POST/PUT/PATCH/DELETE) require body hash
+- **Transfer** routes require registered vault device; status limited to host/guest/claim-token; HTTP-level auth tests
+- **Cloud account quota** floored on live `COUNT(accounts)` + conditional UPDATE; IntegrityError reconcile
+- **Poll quota** durable in DB with per-device serialization (SQLite `BEGIN IMMEDIATE` when available)
+- **Fetch lease** token-owned DB lock with expiry, post-lease min-interval recheck, `retry_after` on contention
+- Client-sealed accounts reject accidental server-side credential unseal (require `_om_unwrap_sealed` or `client_sealed`)
+- HttpApi **streamed** response body limit (no full buffer before cap); IMAP BEFORE candidate budget
+- Unique `(owner, email)` migrate fail-closed with duplicate-key diagnostics
+
+### Added
+
+- Durable `device_poll_events` / poll quota state; cloud `device_quota_state`
+- Fetch lock `lease_token`; code-API cache TTL config
+- Docs: security & cache review (`docs/18-security-and-cache-review.md`)
+- Frontend: provider capability helpers, account UI meta utilities
+
+### Changed
+
+- Credential PATCH **deep-merge** (empty string clears a key; partial patch no longer wipes blob)
+- mailCache keys include IMAP **UIDVALIDITY**; upgrade path drops legacy same-folder keys
+- Transfer status no longer enumerable by arbitrary registered devices
+
+### Fixed
+
+- Concurrent cloud create / poll quota races under multi-worker
+- Permanent fetch in-flight after worker crash (lease expiry)
+- Transfer anonymous create / unauthenticated status
+
 ## [0.2.1] — 2026-08-03
 
 ### Added
@@ -97,7 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - User registration, admin console, server mail search UI
 - Code-API **create** (legacy token URLs may still resolve if present in DB)
 
-[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/IanShaw027/openmail/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/IanShaw027/openmail/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IanShaw027/openmail/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IanShaw027/openmail/releases/tag/v0.1.0
