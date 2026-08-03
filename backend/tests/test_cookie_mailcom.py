@@ -12,12 +12,15 @@ import pytest
 from app.providers.base import resolve_provider
 from app.providers.cookie_mailcom import (
     MailcomCookieProvider,
+    collect_messagelist_with_paging,
+    extract_messagelist_next_url,
     extract_ott,
     html_indicates_bad_credentials,
     is_mailcom_login_failed_url,
     is_transient_login_error,
     normalize_mailcom_success_url,
     parse_forms,
+    parse_lightmailer_message_list,
     parse_message_detail_html,
     parse_message_list_html,
     pick_login_form,
@@ -96,6 +99,74 @@ def test_parse_message_list_fixture() -> None:
     assert msgs[0].id == "msg-001"
     assert "verification" in msgs[0].subject.lower()
     assert msgs[0].from_address == "noreply@example.com"
+
+
+def test_extract_messagelist_next_url() -> None:
+    page1 = _load("messagelist_page1.html")
+    base = "https://lightmailer.mail.com/messagelist?folderId=INBOX&page=1"
+    nxt = extract_messagelist_next_url(base, page1)
+    assert nxt is not None
+    assert "page=2" in nxt
+    assert "messagelist" in nxt
+
+    page2 = _load("messagelist_page2.html")
+    base2 = "https://lightmailer.mail.com/messagelist?folderId=INBOX&page=2"
+    assert extract_messagelist_next_url(base2, page2) is None
+
+
+def test_collect_messagelist_with_paging_two_pages() -> None:
+    page1 = _load("messagelist_page1.html")
+    page2 = _load("messagelist_page2.html")
+    base = "https://lightmailer.mail.com/messagelist?folderId=INBOX&page=1"
+
+    class _PagingClient:
+        def __init__(self) -> None:
+            self.gets: list[str] = []
+
+        def get(self, url: str, **kwargs: Any) -> _FakeResp:
+            self.gets.append(url)
+            if "page=2" in url:
+                return _FakeResp(page2, url=url)
+            return _FakeResp(page1, url=url)
+
+    client = _PagingClient()
+    # limit 3 forces following next page (page1 only has 2)
+    msgs = collect_messagelist_with_paging(
+        client,
+        first_url=base,
+        first_html=page1,
+        limit=3,
+        folder="inbox",
+    )
+    assert len(msgs) == 3
+    ids = [m.id for m in msgs]
+    assert "1001" in ids and "1002" in ids and "1003" in ids
+    # second page fetched once
+    assert any("page=2" in u for u in client.gets)
+
+    # limit 2 stays on first page (no extra GET beyond first_html)
+    client2 = _PagingClient()
+    msgs2 = collect_messagelist_with_paging(
+        client2,
+        first_url=base,
+        first_html=page1,
+        limit=2,
+        folder="inbox",
+    )
+    assert len(msgs2) == 2
+    assert client2.gets == []
+
+
+def test_parse_lightmailer_page1() -> None:
+    msgs = parse_lightmailer_message_list(
+        "https://lightmailer.mail.com/messagelist",
+        _load("messagelist_page1.html"),
+        limit=10,
+        folder="inbox",
+    )
+    assert len(msgs) == 2
+    assert msgs[0].id == "1001"
+    assert "Newest" in msgs[0].subject
 
 
 def test_parse_message_detail_and_code() -> None:

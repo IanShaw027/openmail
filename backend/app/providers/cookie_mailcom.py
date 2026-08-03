@@ -37,6 +37,9 @@ MAX_LOGIN_URL_PROBES = 2
 MAX_FOLDER_PROBES = 3
 # List view often has subject only — pull bodies for more rows so UI is not empty
 MAX_DETAIL_HYDRATE = 8
+# messagelist pagination: hard caps so a flaky pager cannot hang the fetch
+MAX_LIST_PAGES = 10
+MAX_LIST_RAW_ROWS = 200
 
 # Session-valid markers (helper: FolderListPage)
 SESSION_OK_MARKERS = (
@@ -477,6 +480,147 @@ def parse_login_form_helper(home_html: str) -> tuple[str, dict[str, str]]:
     raise RuntimeError("未找到 mail.com 登录表单。")
 
 
+def _page_index_from_url(url: str) -> int | None:
+    """Best-effort page/offset number from a list URL (None if absent)."""
+    if not url:
+        return None
+    m = re.search(r"[?&](?:page|offset|start|first|from)=(\d+)", url, re.I)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def extract_messagelist_next_url(listing_url: str, listing_html: str) -> str | None:
+    """Find the next messagelist page URL from lightmailer / generic list HTML.
+
+    Supports common patterns: rel=next, aria-label Next, class next, page=N links
+    that point at messagelist. Skips prev/lower page indices. Returns absolute URL or None.
+    """
+    html = listing_html or ""
+    if not html:
+        return None
+    import html as html_mod
+
+    # (priority, rel_href) — lower priority number wins
+    scored: list[tuple[int, str]] = []
+
+    def _add(priority: int, rel: str) -> None:
+        if rel:
+            scored.append((priority, html_mod.unescape(rel)))
+
+    # rel="next" — highest confidence
+    for m in re.finditer(
+        r'<a[^>]+rel=["\']next["\'][^>]*href=["\']([^"\']+)["\']',
+        html,
+        re.I,
+    ):
+        _add(0, m.group(1))
+    for m in re.finditer(
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*rel=["\']next["\']',
+        html,
+        re.I,
+    ):
+        _add(0, m.group(1))
+
+    # aria-label / title containing next (not prev)
+    for m in re.finditer(
+        r'<a[^>]+(?:aria-label|title)=["\']([^"\']*)["\'][^>]*href=["\']([^"\']+)["\']',
+        html,
+        re.I,
+    ):
+        label, href = m.group(1), m.group(2)
+        low = label.lower()
+        if re.search(r"prev|previous|上一页|«|‹", low):
+            continue
+        if re.search(r"next|下一页|»|›", low):
+            _add(1, href)
+    for m in re.finditer(
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*(?:aria-label|title)=["\']([^"\']*)["\']',
+        html,
+        re.I,
+    ):
+        href, label = m.group(1), m.group(2)
+        low = label.lower()
+        if re.search(r"prev|previous|上一页|«|‹", low):
+            continue
+        if re.search(r"next|下一页|»|›", low):
+            _add(1, href)
+
+    # class*="next" / pagination__next (not prev)
+    for m in re.finditer(
+        r'<a[^>]+class=["\']([^"\']*)["\'][^>]*href=["\']([^"\']+)["\']',
+        html,
+        re.I,
+    ):
+        cls, href = m.group(1), m.group(2)
+        cl = cls.lower()
+        if re.search(r"prev|previous", cl):
+            continue
+        if re.search(r"pagination__next|pager-next|nav-next|\bnext\b", cl):
+            _add(1, href)
+    for m in re.finditer(
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*class=["\']([^"\']*)["\']',
+        html,
+        re.I,
+    ):
+        href, cls = m.group(1), m.group(2)
+        cl = cls.lower()
+        if re.search(r"prev|previous", cl):
+            continue
+        if re.search(r"pagination__next|pager-next|nav-next|\bnext\b", cl):
+            _add(1, href)
+
+    # Link text Next / 下一页
+    for m in re.finditer(
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>\s*(?:Next|下一页|»|›)\s*</a>',
+        html,
+        re.I,
+    ):
+        _add(1, m.group(1))
+
+    # Explicit Prev text — never
+    # Messagelist page/offset links: only if index > current (lower confidence)
+    cur_page = _page_index_from_url(listing_url) or 1
+    for m in re.finditer(
+        r'href=["\']([^"\']*messagelist[^"\']*(?:page|offset|start|first|from)=[^"\']+)["\']',
+        html,
+        re.I,
+    ):
+        rel = m.group(1)
+        # skip if surrounding context looks like prev (cheap check on full match window later)
+        abs_try = urljoin(listing_url or "", html_mod.unescape(rel).replace("&amp;", "&"))
+        nxt_page = _page_index_from_url(abs_try)
+        if nxt_page is not None and nxt_page > cur_page:
+            _add(2, rel)
+
+    base = listing_url or ""
+    base_key = base.split("#", 1)[0].rstrip("/")
+    seen: set[str] = set()
+    scored.sort(key=lambda x: x[0])
+    for _prio, rel in scored:
+        if not rel or rel.startswith("#") or rel.lower().startswith("javascript:"):
+            continue
+        # skip explicit prev link text patterns already partially filtered
+        abs_url = urljoin(base, rel.replace("&amp;", "&"))
+        key = abs_url.split("#", 1)[0].rstrip("/")
+        if key in seen or key == base_key:
+            continue
+        seen.add(key)
+        # Reject lower/equal page index when both sides have numbers
+        nxt_page = _page_index_from_url(abs_url)
+        if nxt_page is not None and nxt_page <= cur_page:
+            continue
+        low = abs_url.lower()
+        if "messagelist" in low or "page=" in low or "offset=" in low or "start=" in low:
+            return abs_url
+        if _prio <= 1:
+            return abs_url
+    return None
+
+
 def parse_lightmailer_message_list(listing_url: str, listing_html: str, *, limit: int, folder: str) -> list[Message]:
     """Parse lightmailer MessageListPage (mail.com.helper heuristics)."""
     import html as html_mod
@@ -537,6 +681,78 @@ def parse_lightmailer_message_list(listing_url: str, listing_html: str, *, limit
         )
         messages.append(msg)
     return messages
+
+
+def collect_messagelist_with_paging(
+    client: Any,
+    *,
+    first_url: str,
+    first_html: str,
+    limit: int,
+    folder: str,
+    max_pages: int = MAX_LIST_PAGES,
+    max_raw: int = MAX_LIST_RAW_ROWS,
+) -> list[Message]:
+    """Parse first list page then follow next links until limit / caps.
+
+    Uses the same HTTP client (session cookies) — no re-login between pages.
+    """
+    by_id: dict[str, Message] = {}
+    order: list[str] = []
+    page_url = first_url
+    page_html = first_html
+    pages_seen = 0
+    visited: set[str] = set()
+
+    while page_url and pages_seen < max_pages and len(order) < max(limit, 1):
+        key = page_url.split("#", 1)[0].rstrip("/")
+        if key in visited:
+            break
+        visited.add(key)
+        pages_seen += 1
+
+        if pages_seen == 1:
+            html = page_html
+            url = page_url
+        else:
+            try:
+                resp = client.get(page_url)
+            except Exception:
+                break
+            html = _resp_text(resp)
+            url = str(getattr(resp, "url", page_url))
+            if not html or _looks_like_session_loss(html):
+                break
+
+        # Per-page: parse without artificial tiny limit so next-page still useful
+        page_limit = max(limit, min(max_raw, limit * 3 if limit else max_raw))
+        if "message-list__item" in (html or ""):
+            batch = parse_lightmailer_message_list(url, html, limit=page_limit, folder=folder)
+        else:
+            batch = parse_message_list_html(html, limit=page_limit, folder=folder)
+
+        if not batch:
+            break
+
+        for msg in batch:
+            mid = str(msg.id or "").strip()
+            if not mid or mid in by_id:
+                continue
+            by_id[mid] = msg
+            order.append(mid)
+            if len(order) >= max_raw:
+                break
+
+        if len(order) >= limit or len(order) >= max_raw:
+            break
+
+        nxt = extract_messagelist_next_url(url, html)
+        if not nxt or nxt.split("#", 1)[0].rstrip("/") in visited:
+            break
+        page_url = nxt
+
+    out = [by_id[i] for i in order[:limit]]
+    return out
 
 
 def _http_client(timeout: float, proxy: str | None = None):
@@ -1435,8 +1651,12 @@ class MailcomCookieProvider:
                         listing = client.get(list_url)
                         listing_html = _resp_text(listing)
                         listing_url = str(getattr(listing, "url", list_url))
-                        msgs = parse_lightmailer_message_list(
-                            listing_url, listing_html, limit=limit, folder=folder_l
+                        msgs = collect_messagelist_with_paging(
+                            client,
+                            first_url=listing_url,
+                            first_html=listing_html,
+                            limit=limit,
+                            folder=folder_l,
                         )
                         if msgs:
                             return msgs
@@ -1444,10 +1664,22 @@ class MailcomCookieProvider:
                         pass
 
             if "message-list__item" in html:
-                msgs = parse_lightmailer_message_list(final_url, html, limit=limit, folder=folder_l)
+                msgs = collect_messagelist_with_paging(
+                    client,
+                    first_url=final_url,
+                    first_html=html,
+                    limit=limit,
+                    folder=folder_l,
+                )
                 if msgs:
                     return msgs
-            msgs = parse_message_list_html(html, limit=limit, folder=folder_l)
+            msgs = collect_messagelist_with_paging(
+                client,
+                first_url=final_url,
+                first_html=html,
+                limit=limit,
+                folder=folder_l,
+            )
             if msgs:
                 return msgs
 

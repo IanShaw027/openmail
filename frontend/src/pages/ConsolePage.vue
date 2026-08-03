@@ -335,11 +335,20 @@ const mailLoading = ref(false)
 /** How many cached mails to show in the panel (scroll load-more grows this). */
 const mailVisibleCount = ref(20)
 const MAIL_FIRST_PAGE = 20
-const MAIL_LOAD_MORE = 10
+const MAIL_LOAD_MORE = 20
+const MAIL_FOLDERS = ['inbox', 'spam', 'sent'] as const
+const CATCH_UP_MAX_ROUNDS = 5
+const CATCH_UP_PAGE = 100
 /** Server fetch: loading older messages beyond cache */
 const mailLoadingMore = ref(false)
 /** Last load-more returned 0 new messages */
 const mailNoMoreRemote = ref(false)
+/** Per-account mutex: prevent double-click / batch overlap stampeding cookie logins */
+const accountFetchLocks = new Set<string>()
+/** Sentinel for infinite-scroll load-more */
+const mailListScrollEl = ref<HTMLElement | null>(null)
+const mailLoadMoreSentinel = ref<HTMLElement | null>(null)
+let mailListObserver: IntersectionObserver | null = null
 /** Mobile: expand sticky actions for a single row */
 const expandedActId = ref<string | null>(null)
 
@@ -1343,6 +1352,8 @@ function resolveFetchAccount(acc: MailAccount): MailAccount {
   }
 }
 
+type MailFolderKey = (typeof MAIL_FOLDERS)[number]
+
 type FetchOneOpts = {
   silent?: boolean
   /** Load older messages before this ISO (pagination). */
@@ -1352,23 +1363,61 @@ type FetchOneOpts = {
   clearFirst?: boolean
   /** Skip incremental `since` (always recent window). */
   forceRecent?: boolean
+  /** Explicit folder (default: current mail tab). */
+  folder?: string
+  /**
+   * Explicit since ISO for catch-up. When set (and not forceRecent/before),
+   * used instead of settings.sinceFor.
+   */
+  since?: string
+  /**
+   * When false, caller owns fetchingId / mailLoading / generation.
+   * Default: true for interactive (!silent), false for silent.
+   */
+  manageUi?: boolean
+  /** Nested multi-folder step: always silent apply + no UI ownership. */
+  nested?: boolean
+}
+
+type FetchOneResult = { ok: boolean; count: number }
+
+function isCookieHeavyAccount(acc: Pick<MailAccount, 'type'>): boolean {
+  const t = String(acc.type || '').toLowerCase()
+  return t === 'cookie' || t === 'unknown'
+}
+
+function isHardAuthError(err: string | null | undefined): boolean {
+  if (!err) return false
+  const e = err.toLowerCase()
+  return (
+    e.includes('password') ||
+    e.includes('密码') ||
+    e.includes('授权码') ||
+    e.includes('refresh token') ||
+    e.includes('刷新令牌') ||
+    e.includes('need_reauth') ||
+    e.includes('invalid_grant') ||
+    e.includes('认证失败') ||
+    e.includes('凭证')
+  )
 }
 
 /**
- * Core fetch for one account.
- * When silent=true (batch): do not clobber global selection / message panel.
- * Returns true if fetch succeeded (ok !== false).
+ * Core fetch for one account + one folder.
+ * When silent/nested: do not clobber global selection / message panel.
  */
 async function fetchOne(
   acc: MailAccount,
   quick = true,
   opts: FetchOneOpts = {},
-): Promise<boolean> {
-  const silent = Boolean(opts.silent)
+): Promise<FetchOneResult> {
+  const nested = Boolean(opts.nested)
+  const silent = Boolean(opts.silent) || nested
+  const manageUi = opts.manageUi ?? !silent
   // Capture identity at start so a late response cannot clobber another account's panel
   let gen = 0
   const expectedAccountId = acc.id
-  if (!silent) {
+  if (manageUi) {
     fetchGeneration.value += 1
     gen = fetchGeneration.value
     fetchingId.value = acc.id
@@ -1380,12 +1429,12 @@ async function fetchOne(
     lastFetchOk.value = false
   }
   try {
-    // Folder used for this request (silent batch uses inbox default / current tab)
-    const folder = mailFolder.value
+    // Prefer explicit folder (multi-folder / load-more); else current tab
+    const folder = mailCache.normalizeFolder(opts.folder || mailFolder.value)
     if (opts.clearFirst) {
       // Only wipe the current folder tab — keep spam/sent/other cache intact
       mailCache.clearMailboxFolder(acc.email, folder)
-      if (!silent && accounts.selectedId === expectedAccountId && gen === fetchGeneration.value) {
+      if (manageUi && accounts.selectedId === expectedAccountId && gen === fetchGeneration.value) {
         messages.value = []
         selectedMessageId.value = null
         mailVisibleCount.value = MAIL_FIRST_PAGE
@@ -1393,17 +1442,17 @@ async function fetchOne(
       }
     }
     // Manual / clear / first-full → recent window (no since).
-    // Silent batch may use since based on newest *folder* mail date only (see settings.sinceFor).
+    // Catch-up passes opts.since from newest cached mail in that folder.
     // Cookie/HttpApi use local date filter (provider time_paging=local_filter).
     const wantRecent =
       Boolean(opts.forceRecent) ||
       Boolean(opts.clearFirst) ||
-      (!opts.before && userSettings.needsFullFetch(acc.email, folder))
+      (!opts.before && !opts.since && userSettings.needsFullFetch(acc.email, folder))
     const canSince = supportsIncrementalSince(acc)
     const since =
       opts.before || wantRecent || !canSince
         ? undefined
-        : userSettings.sinceFor(acc.email, folder)
+        : opts.since || userSettings.sinceFor(acc.email, folder)
     const full = wantRecent && !opts.before
     const maxMessages =
       opts.maxMessages ??
@@ -1411,7 +1460,7 @@ async function fetchOne(
         ? MAIL_LOAD_MORE
         : wantRecent || !since
           ? MAIL_FIRST_PAGE
-          : MAIL_FIRST_PAGE)
+          : CATCH_UP_PAGE)
     // Prefer local-vault secrets (cloud mirror of client-sealed rows has none)
     const src = resolveFetchAccount(acc)
     // Child mailbox under HttpApi: fetch with parent api_url + this address as filter
@@ -1491,7 +1540,7 @@ async function fetchOne(
       })
     }
 
-    if (silent) {
+    if (silent || nested) {
       // Apply status/code/cache without toast spam or panel overwrite
       const code = extractCode(result)
       const msgs = result.messages ?? []
@@ -1501,10 +1550,20 @@ async function fetchOne(
         Array.isArray((result.session_meta as { mailboxes?: string[] }).mailboxes)
           ? (result.session_meta as { mailboxes: string[] }).mailboxes
           : null)
+      // Nested multi-folder: soft folder errors (e.g. no Sent) must not mark whole account error
+      const failHard =
+        result.ok === false && (!nested || isHardAuthError(result.error || undefined))
+      // Always write cookies first so the next multi-folder step can reuse session
       await accounts.patchAccount(acc.id, {
         latestCode: code ?? acc.latestCode,
-        status: result.ok === false ? 'error' : 'ok',
-        lastError: result.ok === false ? result.error || t('console.fetchFailed') : undefined,
+        ...(result.ok !== false
+          ? { status: 'ok' as const, lastError: undefined }
+          : failHard
+            ? {
+                status: 'error' as const,
+                lastError: result.error || t('console.fetchFailed'),
+              }
+            : {}),
         ...(result.ok !== false && result.session_cookies?.length
           ? {
               sessionCookies: result.session_cookies as Array<Record<string, unknown>>,
@@ -1515,6 +1574,10 @@ async function fetchOne(
           ? { isApiSource: acc.isApiSource ?? !acc.parentApiId, apiMailboxes: mboxes }
           : {}),
       })
+      if (result.ok !== false && result.session_cookies?.length) {
+        // Critical path: flush vault so next folder request cannot race empty cookies
+        await accounts.flushPersist()
+      }
       if (
         result.ok !== false &&
         mboxes?.length &&
@@ -1550,8 +1613,16 @@ async function fetchOne(
           /* ignore */
         }
       }
-      // Never overwrite the right-hand mail panel for a different selected account
-      return result.ok !== false
+      // Nested multi-folder: refresh open tab panel from cache without stealing selection
+      if (
+        nested &&
+        !opts.silent &&
+        accounts.selectedId === expectedAccountId &&
+        mailCache.normalizeFolder(folder) === mailCache.normalizeFolder(mailFolder.value)
+      ) {
+        loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
+      }
+      return { ok: result.ok !== false, count: msgs.length }
     }
 
     // Stale interactive fetch: still durable-merge via apply, but panel gated
@@ -1559,13 +1630,13 @@ async function fetchOne(
       expectedAccountId,
       generation: gen,
     })
-    return result.ok !== false
+    return { ok: result.ok !== false, count: (result.messages ?? []).length }
   } catch (e) {
     await accounts.patchAccount(acc.id, {
       status: 'error',
       lastError: errorMessage(e, t('console.fetchFailed')),
     })
-    if (!silent) {
+    if (manageUi) {
       const mayUpdatePanel =
         accounts.selectedId === expectedAccountId && gen === fetchGeneration.value
       if (mayUpdatePanel) {
@@ -1574,9 +1645,9 @@ async function fetchOne(
         flashMsg(errorMessage(e, t('console.fetchFailed')), 'danger')
       }
     }
-    return false
+    return { ok: false, count: 0 }
   } finally {
-    if (!silent) {
+    if (manageUi) {
       // Only clear loading UI if this request still owns the interactive slot
       if (gen === fetchGeneration.value) {
         fetchingId.value = null
@@ -1587,20 +1658,156 @@ async function fetchOne(
   }
 }
 
-async function onFetchSelected(quick = true) {
+/**
+ * Fetch inbox + spam + sent for one account.
+ * Cookie accounts: serial folders so rolling cookies are reused (no triple login).
+ * IMAP/OAuth: parallel folders (cap 3).
+ */
+async function fetchAccountFolders(
+  acc: MailAccount,
+  opts: { silent?: boolean } = {},
+): Promise<boolean> {
+  const silent = Boolean(opts.silent)
+  if (accountFetchLocks.has(acc.id)) {
+    if (!silent) flashMsg(t('console.fetchInProgress'), 'info')
+    return false
+  }
+  accountFetchLocks.add(acc.id)
+
+  let gen = 0
+  const expectedAccountId = acc.id
+  if (!silent) {
+    fetchGeneration.value += 1
+    gen = fetchGeneration.value
+    fetchingId.value = acc.id
+    mailLoading.value = true
+    accounts.select(acc.id)
+    if (!messages.value.length) loadMessagesFromCache(acc)
+    lastFetchEmpty.value = false
+    lastFetchOk.value = false
+    mailNoMoreRemote.value = false
+  }
+
+  let anyOk = false
+  let hardFail = false
+  let totalNew = 0
+
+  const runFolder = async (folder: MailFolderKey): Promise<void> => {
+    if (hardFail) return
+    // Re-read account so sessionCookies from prior folder are included
+    const live = accounts.findById(acc.id) || acc
+    const cached = mailCache.listFor(live.email, folder)
+    const empty = cached.length === 0
+    const baseOpts: FetchOneOpts = {
+      silent: true,
+      nested: true,
+      manageUi: false,
+      folder,
+    }
+
+    if (empty) {
+      const r = await fetchOne(live, true, {
+        ...baseOpts,
+        forceRecent: true,
+        maxMessages: MAIL_FIRST_PAGE,
+      })
+      if (r.ok) {
+        anyOk = true
+        totalNew += r.count
+      } else {
+        const err = (accounts.findById(acc.id) || live).lastError
+        if (isHardAuthError(err)) hardFail = true
+      }
+      return
+    }
+
+    // Catch-up: since=newest in this folder; loop until under page size
+    let rounds = 0
+    while (rounds < CATCH_UP_MAX_ROUNDS && !hardFail) {
+      rounds += 1
+      const current = accounts.findById(acc.id) || live
+      const since =
+        mailCache.newestUtcIso(current.email, folder) ||
+        userSettings.sinceFor(current.email, folder)
+      if (!since) {
+        const r = await fetchOne(current, true, {
+          ...baseOpts,
+          forceRecent: true,
+          maxMessages: MAIL_FIRST_PAGE,
+        })
+        if (r.ok) {
+          anyOk = true
+          totalNew += r.count
+        } else if (isHardAuthError((accounts.findById(acc.id) || current).lastError)) {
+          hardFail = true
+        }
+        break
+      }
+      const r = await fetchOne(current, true, {
+        ...baseOpts,
+        since,
+        maxMessages: CATCH_UP_PAGE,
+        forceRecent: false,
+      })
+      if (!r.ok) {
+        if (isHardAuthError((accounts.findById(acc.id) || current).lastError)) hardFail = true
+        break
+      }
+      anyOk = true
+      totalNew += r.count
+      if (r.count < CATCH_UP_PAGE) break
+    }
+  }
+
+  try {
+    if (isCookieHeavyAccount(acc)) {
+      for (const folder of MAIL_FOLDERS) {
+        await runFolder(folder)
+        if (hardFail) break
+      }
+    } else {
+      await Promise.all(MAIL_FOLDERS.map((f) => runFolder(f)))
+    }
+
+    if (!silent) {
+      const still =
+        accounts.selectedId === expectedAccountId && gen === fetchGeneration.value
+      if (still) {
+        loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
+        lastFetchOk.value = anyOk
+        lastFetchEmpty.value = messages.value.length === 0
+        if (hardFail && !anyOk) {
+          flashMsg(
+            (accounts.findById(acc.id) || acc).lastError || t('console.fetchFailed'),
+            'danger',
+          )
+        } else if (anyOk) {
+          flashMsg(t('console.fetchFoldersDone', { n: totalNew }), 'info')
+        } else {
+          flashMsg(
+            (accounts.findById(acc.id) || acc).lastError || t('console.fetchFailed'),
+            'danger',
+          )
+        }
+      }
+    }
+    return anyOk
+  } finally {
+    accountFetchLocks.delete(acc.id)
+    if (!silent && gen === fetchGeneration.value) {
+      fetchingId.value = null
+      mailLoading.value = false
+    }
+  }
+}
+
+async function onFetchSelected(_quick = true) {
   const acc = selected.value
   if (!acc) {
     flashMsg(t('console.needSelectAccount'), 'danger')
     return
   }
-  mailNoMoreRemote.value = false
-  // Always pull latest N (not since=lastFetchAt). Incremental since was too aggressive
-  // after a successful fetch and looked like "broken" until Clear & refetch.
-  await fetchOne(acc, quick, {
-    silent: false,
-    maxMessages: MAIL_FIRST_PAGE,
-    forceRecent: true,
-  })
+  await fetchAccountFolders(acc, { silent: false })
 }
 
 function messageDedupeKey(m: Pick<MailMessage, 'id' | 'folder' | 'uidvalidity'>): string {
@@ -1609,7 +1816,7 @@ function messageDedupeKey(m: Pick<MailMessage, 'id' | 'folder' | 'uidvalidity'>)
   return uv ? `${f}::${uv}::${m.id}` : `${f}::${m.id}`
 }
 
-/** Expand visible list from cache, or fetch older from server. */
+/** Expand visible list from cache, or fetch older from server (current tab only). */
 async function onLoadMoreMails() {
   const acc = selected.value
   if (!acc) {
@@ -1625,11 +1832,13 @@ async function onLoadMoreMails() {
     return
   }
   if (mailNoMoreRemote.value || mailLoadingMore.value || mailLoading.value) return
+  if (accountFetchLocks.has(acc.id)) return
 
+  const folder = mailFolder.value
   // 2) Pull older page: native since_before can use before=; local_filter falls back
   // to a larger recent window so we do not pretend to have a stable remote cursor.
   const before =
-    mailCache.oldestUtcIso(acc.email, mailFolder.value) ||
+    mailCache.oldestUtcIso(acc.email, folder) ||
     messages.value[messages.value.length - 1]?.date ||
     undefined
   if (!before || !supportsRemoteLoadOlder(acc)) {
@@ -1637,15 +1846,16 @@ async function onLoadMoreMails() {
     mailLoadingMore.value = true
     try {
       const prevCount = messages.value.length
-      await fetchOne(acc, false, {
+      const r = await fetchOne(acc, false, {
         silent: false,
+        folder,
         maxMessages: Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE),
         forceRecent: true,
       })
       if (accounts.selectedId !== acc.id) return
-      if (messages.value.length <= prevCount) {
+      if (!r.ok || messages.value.length <= prevCount) {
         mailNoMoreRemote.value = true
-        flashMsg(t('console.mailNoMore'), 'danger')
+        if (r.ok) flashMsg(t('console.mailNoMore'), 'info')
       } else {
         mailVisibleCount.value = Math.min(
           messages.value.length,
@@ -1662,12 +1872,13 @@ async function onLoadMoreMails() {
   try {
     const prevKeys = new Set(messages.value.map(messageDedupeKey))
     const prevCount = messages.value.length
-    const ok = await fetchOne(acc, true, {
+    const r = await fetchOne(acc, true, {
       silent: false,
+      folder,
       before: String(before),
       maxMessages: MAIL_LOAD_MORE,
     })
-    if (!ok) return
+    if (!r.ok) return
     if (accounts.selectedId !== acc.id) return
     const added = messages.value.filter((m) => !prevKeys.has(messageDedupeKey(m))).length
     if (added === 0 && messages.value.length <= prevCount) {
@@ -1675,15 +1886,16 @@ async function onLoadMoreMails() {
       // more mail exists — try one larger forceRecent window before EOF.
       if (providerTimePaging(acc.type) === 'local_filter') {
         const growTarget = Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE * 2)
-        await fetchOne(acc, false, {
+        const r2 = await fetchOne(acc, false, {
           silent: false,
+          folder,
           maxMessages: growTarget,
           forceRecent: true,
         })
         if (accounts.selectedId !== acc.id) return
-        if (messages.value.length <= prevCount) {
+        if (!r2.ok || messages.value.length <= prevCount) {
           mailNoMoreRemote.value = true
-          flashMsg(t('console.mailNoMore'), 'danger')
+          flashMsg(t('console.mailNoMore'), 'info')
         } else {
           mailVisibleCount.value = Math.min(
             messages.value.length,
@@ -1693,7 +1905,7 @@ async function onLoadMoreMails() {
         return
       }
       mailNoMoreRemote.value = true
-      flashMsg(t('console.mailNoMore'), 'danger')
+      flashMsg(t('console.mailNoMore'), 'info')
     } else {
       mailVisibleCount.value = Math.min(
         messages.value.length,
@@ -1711,7 +1923,7 @@ async function onLoadMoreMails() {
   }
 }
 
-/** Clear local mails for selected mailbox, then pull latest 20. */
+/** Clear local mails for current folder tab, then pull latest 20. */
 async function onClearAndRefetch() {
   const acc = selected.value
   if (!acc) {
@@ -1722,6 +1934,7 @@ async function onClearAndRefetch() {
   mailNoMoreRemote.value = false
   await fetchOne(acc, true, {
     silent: false,
+    folder: mailFolder.value,
     clearFirst: true,
     forceRecent: true,
     maxMessages: MAIL_FIRST_PAGE,
@@ -1740,7 +1953,7 @@ async function onBatchFetch() {
   try {
     const list = ids.map((id) => accounts.findById(id)).filter(Boolean) as MailAccount[]
     await mapPool(list, batchConcurrency.value, async (acc) => {
-      const success = await fetchOne(acc, true, { silent: true })
+      const success = await fetchAccountFolders(acc, { silent: true })
       if (success) ok += 1
       else fail += 1
     })
@@ -1784,7 +1997,13 @@ async function tickAutoDetect() {
     await mapPool(batch, Math.min(AUTO_DETECT_BATCH, batchConcurrency.value || 3), async (acc) => {
       autoDetectInflight.add(acc.id)
       try {
-        await fetchOne(acc, true, { silent: true })
+        // First probe: inbox only (cheap); full 3-folder fetch is user/batch driven
+        await fetchOne(acc, true, {
+          silent: true,
+          folder: 'inbox',
+          forceRecent: true,
+          maxMessages: MAIL_FIRST_PAGE,
+        })
       } finally {
         autoDetectInflight.delete(acc.id)
       }
@@ -2203,6 +2422,30 @@ function stepSelect(delta: number) {
   if (next) accounts.select(next.id)
 }
 
+function setupMailListInfiniteScroll() {
+  mailListObserver?.disconnect()
+  mailListObserver = null
+  const root = mailListScrollEl.value
+  const target = mailLoadMoreSentinel.value
+  if (!root || !target || typeof IntersectionObserver === 'undefined') return
+  mailListObserver = new IntersectionObserver(
+    (entries) => {
+      const hit = entries.some((e) => e.isIntersecting)
+      if (!hit) return
+      if (mailLoading.value || mailLoadingMore.value || mailNoMoreRemote.value) return
+      if (!hasMoreCached.value && mailNoMoreRemote.value) return
+      if (!selected.value) return
+      if (!hasMoreCached.value && mailNoMoreRemote.value) return
+      // Trigger when more cache or remote may exist
+      if (hasMoreCached.value || !mailNoMoreRemote.value) {
+        void onLoadMoreMails()
+      }
+    },
+    { root, rootMargin: '80px', threshold: 0 },
+  )
+  mailListObserver.observe(target)
+}
+
 onMounted(() => {
   document.addEventListener('keydown', onKeydown)
   mqNarrow = window.matchMedia(NARROW_MQ)
@@ -2230,7 +2473,16 @@ onMounted(() => {
   if (sel) loadMessagesFromCache(sel)
   // 未检测账号自动轮询检测（5s）
   startAutoDetect()
+  // Defer observer until list DOM exists
+  window.setTimeout(() => setupMailListInfiniteScroll(), 0)
 })
+
+watch(
+  [mailListScrollEl, mailLoadMoreSentinel, () => visibleMessages.value.length, mailFolder],
+  () => {
+    window.setTimeout(() => setupMailListInfiniteScroll(), 0)
+  },
+)
 
 // When account set shrinks (delete / CF re-sync), keep settings maps tight
 watch(
@@ -2281,6 +2533,8 @@ onUnmounted(() => {
   mqNarrow?.removeEventListener('change', onNarrowChange)
   twofa.stopTicker()
   stopAutoDetect()
+  mailListObserver?.disconnect()
+  mailListObserver = null
 })
 </script>
 
@@ -2822,7 +3076,7 @@ onUnmounted(() => {
                       class="btn btn-primary btn-xs act-btn"
                       :disabled="fetchingId === acc.id || !canFetch(acc)"
                       :title="fetchDisabledReason(acc)"
-                      @click="fetchOne(acc, true, { maxMessages: MAIL_FIRST_PAGE, forceRecent: true })"
+                      @click="fetchAccountFolders(acc, { silent: false })"
                     >
                       {{ fetchingId === acc.id ? '…' : t('console.quickFetch') }}
                     </button>
@@ -3038,57 +3292,60 @@ onUnmounted(() => {
               </button>
             </div>
             <template v-else>
-              <button
-                v-for="m in visibleMessages"
-                :key="m.id"
-                type="button"
-                class="mail-item"
-                :class="{ active: selectedMessage?.id === m.id }"
-                @click="selectedMessageId = m.id"
-              >
-                <div class="mail-item-top">
-                  <span class="mail-from">
-                    {{ m.from || m.from_address || '—' }}
-                  </span>
-                  <span
-                    v-if="m.verification_code"
-                    class="code-chip copy-cell"
-                    @click.stop="
-                      toggleRevealCode($event, `m-${m.id}`, m.verification_code || undefined)
-                    "
-                  >
-                    {{ displayCode(m.verification_code, `m-${m.id}`) }}
-                  </span>
-                </div>
-                <div class="mail-sub">
-                  {{ m.subject || t('console.mailNoSubject') }}
-                </div>
-                <div v-if="messageTo(m)" class="mail-to muted">
-                  → {{ messageTo(m) }}
-                </div>
-              </button>
-              <div class="mail-load-more">
-                <span class="muted mail-count">
-                  {{ t('console.mailShowing', { n: visibleMessages.length, total: messages.length }) }}
-                </span>
+              <div ref="mailListScrollEl" class="mail-list-scroll">
                 <button
-                  v-if="hasMoreCached || !mailNoMoreRemote"
+                  v-for="m in visibleMessages"
+                  :key="m.id"
                   type="button"
-                  class="btn btn-outline btn-sm"
-                  :disabled="mailLoading || mailLoadingMore"
-                  @click="onLoadMoreMails"
+                  class="mail-item"
+                  :class="{ active: selectedMessage?.id === m.id }"
+                  @click="selectedMessageId = m.id"
                 >
-                  {{
-                    mailLoadingMore
-                      ? t('common.loading')
-                      : hasMoreCached
-                        ? t('console.mailLoadMoreCache')
-                        : t('console.mailLoadMore')
-                  }}
+                  <div class="mail-item-top">
+                    <span class="mail-from">
+                      {{ m.from || m.from_address || '—' }}
+                    </span>
+                    <span
+                      v-if="m.verification_code"
+                      class="code-chip copy-cell"
+                      @click.stop="
+                        toggleRevealCode($event, `m-${m.id}`, m.verification_code || undefined)
+                      "
+                    >
+                      {{ displayCode(m.verification_code, `m-${m.id}`) }}
+                    </span>
+                  </div>
+                  <div class="mail-sub">
+                    {{ m.subject || t('console.mailNoSubject') }}
+                  </div>
+                  <div v-if="messageTo(m)" class="mail-to muted">
+                    → {{ messageTo(m) }}
+                  </div>
                 </button>
-                <p v-if="mailNoMoreRemote && !hasMoreCached" class="muted mail-no-more">
-                  {{ t('console.mailNoMore') }}
-                </p>
+                <div ref="mailLoadMoreSentinel" class="mail-load-more-sentinel" aria-hidden="true" />
+                <div class="mail-load-more">
+                  <span class="muted mail-count">
+                    {{ t('console.mailShowing', { n: visibleMessages.length, total: messages.length }) }}
+                  </span>
+                  <button
+                    v-if="hasMoreCached || !mailNoMoreRemote"
+                    type="button"
+                    class="btn btn-outline btn-sm"
+                    :disabled="mailLoading || mailLoadingMore"
+                    @click="onLoadMoreMails"
+                  >
+                    {{
+                      mailLoadingMore
+                        ? t('common.loading')
+                        : hasMoreCached
+                          ? t('console.mailLoadMoreCache')
+                          : t('console.mailLoadMore')
+                    }}
+                  </button>
+                  <p v-if="mailNoMoreRemote && !hasMoreCached" class="muted mail-no-more">
+                    {{ t('console.mailNoMore') }}
+                  </p>
+                </div>
               </div>
             </template>
           </div>
@@ -4183,6 +4440,17 @@ th.col-act.sticky-act {
   max-width: 200px;
   justify-content: flex-end;
 }
+.mail-list-scroll {
+  height: 100%;
+  max-height: 100%;
+  overflow: auto;
+  min-height: 0;
+}
+.mail-load-more-sentinel {
+  height: 1px;
+  width: 100%;
+  pointer-events: none;
+}
 .mail-load-more {
   display: flex;
   flex-direction: column;
@@ -4534,9 +4802,12 @@ th.col-act.sticky-act {
   grid-template-columns: minmax(220px, 300px) 1fr;
 }
 .mail-list-pane {
-  overflow: auto;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--panel-soft) 60%, transparent);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 .mail-item {
   display: block;
