@@ -3216,29 +3216,6 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <button
-          v-if="panelCode"
-          type="button"
-          class="code-banner copy-cell"
-          :class="{ copied: copiedKey === 'panel-code' }"
-          :title="t('console.clickToCopy')"
-          @click="
-            codeMasked && !revealedCodes.has('panel')
-              ? toggleRevealCode($event, 'panel', panelCode)
-              : doCopy('panel-code', panelCode)
-          "
-        >
-          <span class="code-banner-label">{{ t('console.mailCode') }}</span>
-          <span class="code-banner-value">{{ displayCode(panelCode, 'panel') }}</span>
-          <span class="code-banner-hint">
-            {{
-              codeMasked && !revealedCodes.has('panel')
-                ? t('console.codeClickReveal')
-                : t('console.clickToCopy')
-            }}
-          </span>
-        </button>
-
         <div class="mail-body">
           <div class="mail-list-pane">
             <div v-if="mailEmptyKind === 'loading'" class="empty-sm">
@@ -4753,46 +4730,6 @@ th.col-act.sticky-act {
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 2px 6px;
-}
-
-.code-banner {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 10px 14px;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--accent) 16%, transparent),
-    color-mix(in srgb, var(--accent-2) 10%, transparent)
-  );
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  cursor: pointer;
-  text-align: left;
-}
-.code-banner-label {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--accent);
-  opacity: 0.85;
-}
-.code-banner-value {
-  font-family: var(--mono);
-  font-size: 18px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-.code-banner-hint {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--muted);
-  font-weight: 600;
 }
 
 .mail-body {

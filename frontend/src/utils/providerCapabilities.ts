@@ -19,14 +19,14 @@ export function providerTimePaging(
   return 'none'
 }
 
-/** True when remote load-older is supported (native or multi-page local filter). */
+/** True when remote load-older is supported with a stable paging cursor. */
 export function supportsRemoteLoadOlder(
   acc: Pick<MailAccount, 'type'> | null | undefined,
 ): boolean {
   if (!acc) return false
-  const mode = providerTimePaging(acc.type)
-  // cookie: multi-page messagelist + before=; http_api still best-effort
-  return mode === 'since_before' || mode === 'local_filter'
+  const t = String(acc.type || '').toLowerCase()
+  if (t === 'cookie') return true
+  return providerTimePaging(acc.type) === 'since_before'
 }
 
 /** True when silent incremental should send `since=` for this account type. */

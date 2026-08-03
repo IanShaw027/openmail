@@ -350,6 +350,47 @@ def test_fetch_message_list() -> None:
     assert len(msgs) == 2
 
 
+def test_fetch_before_filters_after_paging(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = MailcomCookieProvider()
+    base = "https://lightmailer.mail.com/messagelist?folderId=INBOX&page=1"
+
+    class _PagingClient:
+        def __init__(self) -> None:
+            self.gets: list[str] = []
+
+        def get(self, url: str, **kwargs: Any) -> _FakeResp:
+            self.gets.append(url)
+            if "page=2" in url:
+                return _FakeResp(_load("messagelist_page2.html"), url=url)
+            return _FakeResp(_load("messagelist_page1.html"), url=url)
+
+    client = _PagingClient()
+    monkeypatch.setattr("app.providers.cookie_mailcom._http_client", lambda *a, **k: client)
+    monkeypatch.setattr(
+        MailcomCookieProvider,
+        "try_restore",
+        lambda self, client, cookies, *, site="mail.com", meta=None: (
+            True,
+            {"folder_url": base, "last_probe": "restore_ok"},
+        ),
+    )
+    monkeypatch.setattr(MailcomCookieProvider, "fetch_detail", lambda *a, **k: None)
+
+    acc = SimpleNamespace(provider="cookie", email="user@mail.com", proxy=None)
+    result = provider.fetch(
+        acc,
+        credentials={
+            "cookies": [{"name": "sid", "value": "abc"}],
+            "site": "mail.com",
+        },
+        limits={"before": "2026-08-03T00:30:00Z", "max_messages": 2},
+        quick=False,
+    )
+    assert result.ok is True
+    assert [m.id for m in result.messages] == ["1003", "1004"]
+    assert any("page=2" in u for u in client.gets)
+
+
 def test_fetch_restores_cookies_and_returns_updates(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = MailcomCookieProvider()
     client = _FakeClient(

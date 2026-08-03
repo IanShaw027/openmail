@@ -1122,7 +1122,8 @@ class MailcomCookieProvider:
                 limit = max(1, min(int(limits["max_messages"]), 100))
             except (TypeError, ValueError):
                 pass
-        # When local since/before filter will run, pull a wider list first
+        # When local since/before filter will run, pull enough raw rows to
+        # keep paging past the first screen before the final time filter.
         list_limit = limit
         if limits and (
             limits.get("since")
@@ -1130,7 +1131,7 @@ class MailcomCookieProvider:
             or limits.get("received_after")
             or limits.get("received_before")
         ):
-            list_limit = max(limit, min(100, limit * 3))
+            list_limit = max(limit, MAX_LIST_RAW_ROWS)
 
         client = None
         try:
