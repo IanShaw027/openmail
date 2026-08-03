@@ -51,7 +51,7 @@ x-warp-common: &warp-common
 services:
   openmail:
     # Default: Docker Hub (CI release). `docker compose build` still works (build: .).
-    image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.3.2}
+    image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.3.3}
     build: .
     pull_policy: ${OPENMAIL_PULL_POLICY:-missing}
     container_name: openmail
