@@ -226,7 +226,11 @@ async function copyCode(code?: string | null) {
                   </span>
                 </div>
                 <div class="subj">{{ m.subject || t('console.mailNoSubject') }}</div>
-                <div class="meta">{{ m.from || m.from_address }} · {{ m.date }}</div>
+                <div class="meta">
+                  {{ m.from || m.from_address }}
+                  <template v-if="m.to"> · → {{ m.to }}</template>
+                  · {{ m.date }}
+                </div>
               </button>
             </template>
           </div>
@@ -264,7 +268,10 @@ async function copyCode(code?: string | null) {
           <div v-if="selected" :key="rowKey(selected)" class="detail-inner">
             <h2>{{ selected.subject || t('console.mailNoSubject') }}</h2>
             <p class="meta">
-              {{ selected.accountEmail }} · {{ selected.from }} · {{ selected.date }}
+              {{ selected.accountEmail }}
+              · {{ selected.from }}
+              <template v-if="selected.to"> · → {{ selected.to }}</template>
+              · {{ selected.date }}
             </p>
             <button
               v-if="selected.verification_code"

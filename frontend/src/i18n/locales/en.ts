@@ -597,6 +597,7 @@ export default {
     mailDetail: 'Detail',
     mailCode: 'Code',
     mailFrom: 'From',
+    mailTo: 'To',
     mailDate: 'Date',
     mailSubject: 'Subject',
     mailNoSelection: 'No account selected',

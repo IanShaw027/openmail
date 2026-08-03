@@ -377,6 +377,26 @@ const detailHtml = computed(() => {
   return html ? sanitizeHtml(html) : ''
 })
 
+/**
+ * Display recipient: prefer message.to; when providers (esp. CF temp) omit To,
+ * fall back to the selected concrete mailbox address.
+ */
+function messageTo(m: { to?: string | null } | null | undefined): string {
+  const raw = (m?.to || '').trim()
+  if (raw) return raw
+  const sel = selected.value
+  if (
+    sel &&
+    !sel.isApiSource &&
+    sel.email &&
+    !/^api@/i.test(sel.email) &&
+    sel.email.includes('@')
+  ) {
+    return sel.email
+  }
+  return ''
+}
+
 const detailText = computed(() => {
   const m = selectedMessage.value
   if (!m) return ''
@@ -2493,28 +2513,20 @@ onUnmounted(() => {
                 </td>
 
                 <td class="col-type">
-                  <button
-                    type="button"
-                    class="type-chip copy-cell"
+                  <span
+                    class="type-chip"
                     :class="`type-${accountBrand(acc)}`"
                     :title="`${brandLabel(accountBrand(acc))} · ${typeLabel(acc.type)}${acc.imapHost ? ' · ' + acc.imapHost : ''}`"
-                    @click="onCopyCell($event, `brand-${acc.id}`, brandLabel(accountBrand(acc)), acc)"
                   >
                     <BrandMark :brand="accountBrand(acc)" :size="15" />
                     <span>{{ brandLabel(accountBrand(acc)) }}</span>
-                  </button>
+                  </span>
                 </td>
 
                 <td v-if="!effectiveDense">
-                  <button
-                    type="button"
-                    class="copy-cell mono host"
-                    :class="{ copied: copiedKey === `host-${acc.id}` }"
-                    :title="hostCopyValue(acc)"
-                    @click="onCopyCell($event, `host-${acc.id}`, hostCopyValue(acc), acc)"
-                  >
+                  <span class="mono host" :title="hostCopyValue(acc)">
                     {{ hostLabel(acc) }}
-                  </button>
+                  </span>
                 </td>
 
                 <td v-if="!effectiveDense">
@@ -2604,14 +2616,12 @@ onUnmounted(() => {
                 </td>
 
                 <td v-if="!effectiveDense">
-                  <button
-                    type="button"
-                    class="copy-cell muted time"
+                  <span
+                    class="muted time"
                     :title="acc.updatedAt ? new Date(acc.updatedAt).toLocaleString() : ''"
-                    @click="onCopyCell($event, `time-${acc.id}`, formatTime(acc.updatedAt), acc)"
                   >
                     {{ formatTime(acc.updatedAt) }}
-                  </button>
+                  </span>
                 </td>
 
                 <td
@@ -2877,10 +2887,7 @@ onUnmounted(() => {
                 @click="selectedMessageId = m.id"
               >
                 <div class="mail-item-top">
-                  <span
-                    class="mail-from copy-cell"
-                    @click.stop="doCopy(`from-${m.id}`, m.from || m.from_address || '')"
-                  >
+                  <span class="mail-from">
                     {{ m.from || m.from_address || '—' }}
                   </span>
                   <span
@@ -2893,11 +2900,11 @@ onUnmounted(() => {
                     {{ displayCode(m.verification_code, `m-${m.id}`) }}
                   </span>
                 </div>
-                <div
-                  class="mail-sub copy-cell"
-                  @click.stop="doCopy(`sub-${m.id}`, m.subject || '')"
-                >
+                <div class="mail-sub">
                   {{ m.subject || t('console.mailNoSubject') }}
+                </div>
+                <div v-if="messageTo(m)" class="mail-to muted">
+                  → {{ messageTo(m) }}
                 </div>
               </button>
               <div class="mail-load-more">
@@ -2929,13 +2936,9 @@ onUnmounted(() => {
           <div class="mail-detail-pane">
             <template v-if="selectedMessage">
               <div class="detail-head">
-                <button
-                  type="button"
-                  class="detail-title copy-cell"
-                  @click="doCopy('d-sub', selectedMessage.subject || '')"
-                >
+                <h3 class="detail-title">
                   {{ selectedMessage.subject || t('console.mailNoSubject') }}
-                </button>
+                </h3>
                 <div class="detail-head-actions">
                   <button
                     type="button"
@@ -2956,26 +2959,19 @@ onUnmounted(() => {
                 </div>
               </div>
               <div class="detail-meta">
-                <button
-                  type="button"
-                  class="copy-cell meta-part"
-                  @click="
-                    doCopy(
-                      'd-from',
-                      selectedMessage.from || selectedMessage.from_address || '',
-                    )
-                  "
-                >
+                <span class="meta-part">
+                  <span class="meta-label">{{ t('console.mailFrom') }}</span>
                   {{ selectedMessage.from || selectedMessage.from_address || '—' }}
-                </button>
+                </span>
+                <template v-if="messageTo(selectedMessage)">
+                  <span class="dot">·</span>
+                  <span class="meta-part" :title="messageTo(selectedMessage)">
+                    <span class="meta-label">{{ t('console.mailTo') }}</span>
+                    {{ messageTo(selectedMessage) }}
+                  </span>
+                </template>
                 <span class="dot">·</span>
-                <button
-                  type="button"
-                  class="copy-cell meta-part"
-                  @click="doCopy('d-date', selectedMessage.date || '')"
-                >
-                  {{ selectedMessage.date || '—' }}
-                </button>
+                <span class="meta-part">{{ selectedMessage.date || '—' }}</span>
               </div>
               <div class="detail-body-scroll">
                 <div
@@ -2983,11 +2979,7 @@ onUnmounted(() => {
                   class="detail-body detail-html"
                   v-html="detailHtml"
                 />
-                <pre
-                  v-else
-                  class="detail-body copy-cell"
-                  @click="doCopy('d-body', detailText)"
-                >{{ detailText || t('console.mailNoBody') }}</pre>
+                <pre v-else class="detail-body">{{ detailText || t('console.mailNoBody') }}</pre>
               </div>
             </template>
             <div v-else class="empty-sm">{{ t('console.mailDetailEmpty') }}</div>
@@ -3497,7 +3489,17 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
           </div>
         </header>
         <div class="modal-body body-modal-meta muted">
-          <span>{{ selectedMessage.from || selectedMessage.from_address || '—' }}</span>
+          <span>
+            <span class="meta-label">{{ t('console.mailFrom') }}</span>
+            {{ selectedMessage.from || selectedMessage.from_address || '—' }}
+          </span>
+          <template v-if="messageTo(selectedMessage)">
+            <span class="dot">·</span>
+            <span :title="messageTo(selectedMessage)">
+              <span class="meta-label">{{ t('console.mailTo') }}</span>
+              {{ messageTo(selectedMessage) }}
+            </span>
+          </template>
           <span class="dot">·</span>
           <span>{{ selectedMessage.date || '—' }}</span>
         </div>
@@ -4133,7 +4135,7 @@ th.col-act.sticky-act {
   font-size: 11px;
   font-weight: 650;
   line-height: 1;
-  cursor: copy;
+  cursor: default;
   white-space: nowrap;
   max-width: 100%;
   background: #eef2ff;
@@ -4141,9 +4143,6 @@ th.col-act.sticky-act {
 }
 .type-chip :deep(.brand-mark) {
   opacity: 0.95;
-}
-.type-chip:hover {
-  filter: brightness(0.97);
 }
 .type-chip.type-microsoft {
   background: #e8f3fc;
@@ -4420,6 +4419,22 @@ th.col-act.sticky-act {
   display: block;
   width: 100%;
   text-align: left;
+}
+.mail-to {
+  font-size: 10px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.meta-label {
+  font-weight: 650;
+  opacity: 0.75;
+  margin-right: 4px;
+}
+.meta-label::after {
+  content: ':';
 }
 .code-chip {
   font-size: 10px;

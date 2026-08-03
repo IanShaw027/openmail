@@ -594,6 +594,7 @@ export default {
     mailDetail: '邮件详情',
     mailCode: '验证码',
     mailFrom: '发件人',
+    mailTo: '收件人',
     mailDate: '日期',
     mailSubject: '主题',
     mailNoSelection: '未选择账号',

@@ -159,6 +159,28 @@ def _pick(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
+def _format_address_list(raw: Any) -> str:
+    """Normalize to/from recipient fields: str | list | dict → display string."""
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, dict):
+        addr = _as_str(_pick(raw, "address", "email", "emailAddress", "mail"), default="")
+        name = _as_str(_pick(raw, "name", "display", "displayName"), default="")
+        if name and addr:
+            return f"{name} <{addr}>"
+        return addr or name
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for x in raw:
+            s = _format_address_list(x)
+            if s:
+                parts.append(s)
+        return ", ".join(parts)
+    return _as_str(raw)
+
+
 def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index: int = 0) -> Message:
     """Map a generic JSON message object to Message."""
     mid = _as_str(_pick(item, "id", "message_id", "uid", "messageId"), default=f"http-{index}")
@@ -181,8 +203,20 @@ def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index
         from_address = _as_str(_pick(item, "from_address", "fromAddress", "sender_email"), default="")
         from_display = from_address
 
-    to_raw = _pick(item, "to", "to_address", "toAddress", default="")
-    to_str = _as_str(to_raw) if not isinstance(to_raw, list) else ", ".join(_as_str(x) for x in to_raw)
+    to_raw = _pick(
+        item,
+        "to",
+        "to_address",
+        "toAddress",
+        "recipient",
+        "recipients",
+        "mailbox",
+        "address",
+        "to_mail",
+        "toMail",
+        default="",
+    )
+    to_str = _format_address_list(to_raw)
 
     body_text = _as_str(
         _pick(item, "body_text", "bodyText", "text", "textBody", "plain", "plainText"),
