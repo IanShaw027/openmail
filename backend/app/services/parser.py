@@ -22,12 +22,17 @@ _ALNUM_TOKEN = re.compile(
     r"(?![A-Za-z0-9])"
 )
 
+# Keywords that introduce a verification code. Avoid bare "one-time" (matches
+# "one-time purchase") and prefer compound phrases over lone "code" where possible.
 _KW = (
-    r"验证码|校验码|动态码|确认码|"
+    r"验证码|校验码|动态码|确认码|临时验证码|"
     r"confirmation\s*code|verification\s*code|security\s*code|"
     r"access\s*code|login\s*code|auth(?:entication)?\s*code|"
-    r"one[-\s]?time(?:\s+pass(?:word|code))?|"
-    r"\botp\b|\bpin\b|\bcode\b"
+    r"temporary\s+(?:login\s+|verification\s+|sign[-\s]?in\s+)?code|"
+    r"one[-\s]?time\s+(?:pass(?:word|code)|code|otp|pin)|"
+    r"\botp\b|\bpin\b|"
+    # Lone "code" still needed for "Your code is 123456" but only as a word
+    r"(?<![A-Za-z])code(?![A-Za-z])"
 )
 
 _SUBJECT_NEAR = re.compile(
@@ -123,8 +128,22 @@ def _normalize_code(raw: str | None) -> str | None:
     return code
 
 
+def _is_plausible_digit_code(token: str) -> bool:
+    """Reject years / obvious non-OTP pure digit runs."""
+    t = (token or "").strip()
+    if not re.fullmatch(r"\d{4,8}", t):
+        return False
+    # Calendar years commonly appear in marketing / legal / © footers
+    if re.fullmatch(r"(?:19|20)\d{2}", t):
+        return False
+    # All same digit (000000) — weak signal, rarely a real OTP in our corpus
+    if len(set(t)) == 1:
+        return False
+    return True
+
+
 def _is_plausible_alnum(token: str) -> bool:
-    """Accept 8IX-FGG / AB12CD; reject pure digits (handled elsewhere) and words."""
+    """Accept 8IX-FGG / AB12CD / M1M-J00; reject pure words like purchase / two-factor."""
     t = token.strip()
     if len(t) < 4 or len(t) > 24:
         return False
@@ -134,15 +153,16 @@ def _is_plausible_alnum(token: str) -> bool:
     # Must include at least one letter (digit-only is digit path)
     if not re.search(r"[A-Za-z]", compact):
         return False
-    # Prefer mixed or hyphenated (stronger signal)
-    has_digit = bool(re.search(r"\d", compact))
-    has_hyphen = "-" in t
-    if not has_digit and not has_hyphen and len(compact) < 6:
-        # short all-letter without hyphen is usually English
+    # Real product codes almost always mix a digit in (8IX-FGG, M1M-J00, X9Y8Z7).
+    # Pure letter tokens ("purchase", "two-factor", "anti-spam") are English noise.
+    if not re.search(r"\d", compact):
         return False
     if compact.lower() in _ALNUM_STOP:
         return False
     if t.lower() in _ALNUM_STOP:
+        return False
+    # Reject multi-hyphen English phrases (choose-your-country)
+    if t.count("-") >= 2 and not re.search(r"\d", t):
         return False
     return True
 
@@ -161,6 +181,26 @@ def _find_alnum_near(blob: str) -> str | None:
         cand = _normalize_code(m.group(1))
         if cand and _is_plausible_alnum(cand):
             return cand
+    return None
+
+
+def _digit_from_match(m: re.Match[str] | None) -> str | None:
+    if not m:
+        return None
+    g = _first_group(m) if m.lastindex else _normalize_code(m.group(0))
+    if g and _is_plausible_digit_code(g):
+        return g
+    # single-group digit patterns
+    if m.lastindex is None:
+        g2 = _normalize_code(m.group(1) if m.groups() else m.group(0))
+        if g2 and _is_plausible_digit_code(g2):
+            return g2
+    for g in m.groups() or ():
+        if not g:
+            continue
+        g = _normalize_code(g)
+        if g and _is_plausible_digit_code(g):
+            return g
     return None
 
 
@@ -192,40 +232,57 @@ def extract_verification_code(
                     continue
                 if m.lastindex:
                     for i in range(1, m.lastindex + 1):
-                        g = m.group(i)
+                        g = (m.group(i) or "").strip()
                         if not g:
                             continue
-                        g = g.strip()
+                        # custom captures: keep short digits; filter year-like 4-digit
                         if re.fullmatch(r"\d{3,12}", g):
-                            return g
+                            if len(g) < 4 or _is_plausible_digit_code(g):
+                                return g
+                            continue
                         if _is_plausible_alnum(g):
                             return g
-                # whole match may be the code
                 whole = _normalize_code(m.group(0))
                 if whole and _is_plausible_alnum(whole):
                     return whole
                 digits = re.search(r"\d{4,8}", m.group(0))
-                if digits:
+                if digits and _is_plausible_digit_code(digits.group(0)):
                     return digits.group(0)
 
     # 1) Subject: keyword-adjacent digits
     m = _SUBJECT_NEAR.search(subject)
     if m:
-        g = _first_group(m)
+        g = _digit_from_match(m)
         if g:
             return g
     # 1b) Subject alphanumeric near confirmation/code keywords
     alnum = _find_alnum_near(subject)
     if alnum:
         return alnum
-    m = _DIGIT_RUN.search(subject)
-    if m:
-        return m.group(1)
+    # Bare digits in subject ONLY when subject also looks code-related
+    subj_low = subject.lower()
+    if any(
+        k in subj_low
+        for k in (
+            "code",
+            "otp",
+            "验证",
+            "校验",
+            "pin",
+            "login",
+            "sign-in",
+            "signin",
+            "passcode",
+        )
+    ):
+        m = _DIGIT_RUN.search(subject)
+        if m and _is_plausible_digit_code(m.group(1)):
+            return m.group(1)
 
     # 2) Body near keywords (digits)
     m = _BODY_NEAR.search(body_blob)
     if m:
-        g = _first_group(m)
+        g = _digit_from_match(m)
         if g:
             return g
     # 2b) Body alphanumeric (SpaceXAI etc.)
@@ -238,24 +295,43 @@ def extract_verification_code(
         stripped = _strip_html(body_html)
         m = _BODY_NEAR.search(stripped)
         if m:
-            g = _first_group(m)
+            g = _digit_from_match(m)
             if g:
                 return g
         alnum = _find_alnum_near(stripped)
         if alnum:
             return alnum
         m = _DIGIT_RUN.search(stripped)
-        if m and any(k in stripped.lower() for k in ("code", "otp", "验证", "校验", "pin", "confirm")):
+        if (
+            m
+            and _is_plausible_digit_code(m.group(1))
+            and any(k in stripped.lower() for k in ("code", "otp", "验证", "校验", "pin", "confirm"))
+        ):
             return m.group(1)
 
     # Fallback: first 6-digit run in short body that looks code-like
     if body_blob and len(body_blob) < 1200:
         low = body_blob.lower()
-        if any(k in low for k in ("code", "otp", "验证", "校验", "login", "sign", "pin", "confirm")):
+        # Require stronger signals than bare "confirm" (marketing noise)
+        if any(
+            k in low
+            for k in (
+                "code",
+                "otp",
+                "验证",
+                "校验",
+                "login code",
+                "sign-in",
+                "signin",
+                "passcode",
+                "one-time",
+                "onetime",
+            )
+        ):
             m6 = re.search(r"(?<!\d)(\d{6})(?!\d)", body_blob)
-            if m6:
+            if m6 and _is_plausible_digit_code(m6.group(1)):
                 return m6.group(1)
-            # last resort: hyphenated alnum token near code-ish body
+            # last resort: hyphenated alnum WITH a digit near code-ish body
             for m in _ALNUM_TOKEN.finditer(body_blob):
                 cand = _normalize_code(m.group(1))
                 if cand and _is_plausible_alnum(cand) and "-" in cand:

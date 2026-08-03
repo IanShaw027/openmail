@@ -104,3 +104,70 @@ def test_alphanumeric_not_random_words() -> None:
         )
         is None
     )
+
+
+def test_reject_one_time_purchase_as_code() -> None:
+    """'one-time purchase' must not match OTP keyword + alnum."""
+    assert (
+        extract_verification_code(
+            subject="Premium from $2.99 — 30 days, no auto-renewal",
+            body_text=(
+                "Knight membership now starts at $2.99 for 30 days with a "
+                "one-time purchase — no subscription and no auto-renewal."
+            ),
+        )
+        is None
+    )
+
+
+def test_reject_two_factor_anti_spam_words() -> None:
+    assert (
+        extract_verification_code(
+            subject="New login to your SpaceXAI account",
+            body_text=(
+                "Your SpaceXAI account has been accessed from a new IP address. "
+                "Enable two-factor authentication for better security."
+            ),
+        )
+        is None
+    )
+    assert (
+        extract_verification_code(
+            subject="Please confirm your Novada subscription",
+            body_text="To comply with anti-spam regulations please confirm.",
+        )
+        is None
+    )
+
+
+def test_reject_year_as_verification_code() -> None:
+    assert (
+        extract_verification_code(
+            subject="New: Lower GPT-5.6 pricing",
+            body_text="© 2026 OpenAI. All Rights Reserved. Update your code preferences.",
+        )
+        is None
+    )
+    # Bare year in subject without code context
+    assert extract_verification_code(subject="Newsletter 2026 highlights") is None
+
+
+def test_still_extract_chatgpt_and_xai_codes() -> None:
+    assert (
+        extract_verification_code(
+            subject="Your temporary ChatGPT login code",
+            body_text="Your ChatGPT code is 980220. It expires in 10 minutes.",
+        )
+        == "980220"
+    )
+    assert (
+        extract_verification_code(subject="SpaceXAI confirmation code: I5L-7JB")
+        == "I5L-7JB"
+    )
+    assert (
+        extract_verification_code(
+            subject="M1M-J00 xAI confirmation code",
+            body_text="Please use the code below to validate your email address. M1M-J00",
+        )
+        == "M1M-J00"
+    )
