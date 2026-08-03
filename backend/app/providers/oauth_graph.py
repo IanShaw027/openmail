@@ -158,6 +158,7 @@ class OAuthGraphProvider:
     """Real Microsoft Graph OAuth provider."""
 
     name = "oauth"
+    time_paging = "since_before"
 
     def __init__(self, *, client: httpx.Client | None = None) -> None:
         self._client = client

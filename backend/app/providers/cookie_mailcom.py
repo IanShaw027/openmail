@@ -862,6 +862,8 @@ class MailcomCookieProvider:
     """Cookie-class provider specialized for mail.com / lightmailer sites."""
 
     name = "cookie"
+    # Local date filter applied after list fetch (no server-side cursor)
+    time_paging = "local_filter"
 
     def __init__(self, *, timeout: float = DEFAULT_TIMEOUT) -> None:
         self.timeout = timeout
@@ -904,6 +906,15 @@ class MailcomCookieProvider:
                 limit = max(1, min(int(limits["max_messages"]), 100))
             except (TypeError, ValueError):
                 pass
+        # When local since/before filter will run, pull a wider list first
+        list_limit = limit
+        if limits and (
+            limits.get("since")
+            or limits.get("before")
+            or limits.get("received_after")
+            or limits.get("received_before")
+        ):
+            list_limit = max(limit, min(100, limit * 3))
 
         client = None
         try:
@@ -984,7 +995,7 @@ class MailcomCookieProvider:
                     meta.update(meta_update)
 
             messages = self.fetch_message_list(
-                client, folder=folder, limit=limit, site=site, meta=meta
+                client, folder=folder, limit=list_limit, site=site, meta=meta
             )
             # List rows are often subject-only (lightmailer). Pull detail HTML for bodies.
             hydrate_n = MAX_DETAIL_HYDRATE if quick else min(15, limit)
@@ -1026,6 +1037,18 @@ class MailcomCookieProvider:
                     continue
 
             attach_verification_code(messages)
+            # Local time filter: lightmailer has no since/before API
+            if limits:
+                from app.providers.base import filter_messages_by_time
+
+                since_s = limits.get("since") or limits.get("received_after")
+                before_s = limits.get("before") or limits.get("received_before")
+                messages = filter_messages_by_time(
+                    messages,
+                    since=str(since_s) if since_s else None,
+                    before=str(before_s) if before_s else None,
+                )
+                messages = messages[:limit]
             cookie_dump = dump_client_cookies(client)
             return FetchResult(
                 ok=True,

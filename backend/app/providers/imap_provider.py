@@ -11,6 +11,7 @@ import email.utils
 import imaplib
 import re
 import socket
+from datetime import datetime, timezone
 from email import policy as email_policy
 from email.message import EmailMessage, Message as CompatMessage
 from typing import Any
@@ -406,6 +407,7 @@ class ImapProvider:
     """Real IMAP fetch provider (stdlib imaplib)."""
 
     name = "imap"
+    time_paging = "since_before"
 
     def __init__(self, *, timeout: float = DEFAULT_TIMEOUT) -> None:
         self.timeout = timeout
@@ -464,6 +466,8 @@ class ImapProvider:
             if selected is None:
                 return FetchResult(ok=False, folder=folder, error=f"无法打开文件夹 {folder}")
 
+            uidvalidity = self._read_uidvalidity(conn)
+
             since = None
             before = None
             if limits:
@@ -476,18 +480,54 @@ class ImapProvider:
             else:
                 uids = self._recent_uids(conn, limit)
             messages: list[Message] = []
+            folder_out = folder.lower()
+            since_dt: datetime | None = None
+            before_dt: datetime | None = None
+            for bound, attr in ((since, "since"), (before, "before")):
+                if not bound:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(str(bound).replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if attr == "since":
+                        since_dt = dt
+                    else:
+                        before_dt = dt
+                except (TypeError, ValueError):
+                    pass
             for uid in uids:
                 raw = self._fetch_rfc822(conn, uid)
                 if raw is None:
                     continue
-                messages.append(parse_rfc822(raw, msg_id=str(uid), folder=folder.lower()))
+                msg = parse_rfc822(raw, msg_id=str(uid), folder=folder_out)
+                if since_dt is not None or before_dt is not None:
+                    try:
+                        msg_dt = email.utils.parsedate_to_datetime(msg.date)
+                        if msg_dt is None:
+                            msg_dt = datetime.fromisoformat(str(msg.date).replace("Z", "+00:00"))
+                        if msg_dt.tzinfo is None:
+                            msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+                        if since_dt is not None and msg_dt < since_dt:
+                            continue
+                        if before_dt is not None and msg_dt >= before_dt:
+                            continue
+                    except (TypeError, ValueError, OverflowError, IndexError):
+                        # A bounded query cannot safely place an unparseable date.
+                        continue
+                if uidvalidity is not None:
+                    msg.uidvalidity = uidvalidity
+                messages.append(msg)
+                if before and len(messages) >= limit:
+                    break
 
             attach_verification_code(messages)
             return FetchResult(
                 ok=True,
                 messages=messages,
-                folder=folder.lower(),
+                folder=folder_out,
                 session_restored=False,
+                uidvalidity=uidvalidity,
             )
         except imaplib.IMAP4.error as exc:
             return FetchResult(ok=False, folder=folder, error=self._map_imap_error(exc))
@@ -540,7 +580,6 @@ class ImapProvider:
             host, port, use_ssl=use_ssl
         )
         tls_name = (server_hostname or sni or host).strip()
-        socket.setdefaulttimeout(self.timeout)
         if use_ssl:
             return _imap4_ssl_with_sni(
                 connect_host,
@@ -595,6 +634,82 @@ class ImapProvider:
             raise last_err
         return None
 
+    def _read_uidvalidity(self, conn: imaplib.IMAP4) -> int | None:
+        """Parse UIDVALIDITY from untagged SELECT response (or STATUS)."""
+        import re
+
+        def _parse_vals(vals: Any) -> int | None:
+            if isinstance(vals, (bytes, bytearray, str)):
+                vals = [vals]
+            for item in vals or []:
+                try:
+                    if isinstance(item, (bytes, bytearray)):
+                        return int(item)
+                    if isinstance(item, str):
+                        return int(item.strip())
+                    if isinstance(item, (list, tuple)) and item:
+                        return int(item[0])
+                    return int(item)
+                except (TypeError, ValueError, IndexError):
+                    continue
+            return None
+
+        try:
+            untagged = getattr(conn, "untagged_responses", {}) or {}
+            for key, vals in untagged.items():
+                key_name = key.decode(errors="replace") if isinstance(key, bytes) else str(key)
+                if key_name.upper() == "UIDVALIDITY":
+                    n = _parse_vals(vals)
+                    if n is not None:
+                        return n
+            # Some test doubles and older imaplib variants expose responses via
+            # response() rather than untagged_responses.
+            response = getattr(conn, "response", None)
+            if callable(response):
+                typ, vals = response("UIDVALIDITY")
+                n = _parse_vals(vals)
+                if n is not None:
+                    return n
+            folder_name = getattr(conn, "_current_folder", None) or "INBOX"
+            typ, data = conn.status(str(folder_name), "(UIDVALIDITY)")
+            if typ == "OK" and data:
+                blob = data[0]
+                if isinstance(blob, (bytes, bytearray)):
+                    blob = blob.decode("utf-8", errors="replace")
+                m = re.search(r"UIDVALIDITY\s+(\d+)", str(blob), re.I)
+                if m:
+                    return int(m.group(1))
+        except Exception:
+            pass
+        return None
+
+    def _sequence_to_uids(
+        self, conn: imaplib.IMAP4, seqs: list[bytes | str]
+    ) -> list[str]:
+        """Convert sequence numbers returned by non-UID SEARCH to stable UIDs."""
+        out: list[str] = []
+        for seq in seqs:
+            token = seq.decode() if isinstance(seq, bytes) else str(seq)
+            try:
+                typ, data = conn.fetch(token, "(UID)")
+                blob = b""
+                if typ == "OK" and data:
+                    for item in data:
+                        part = item[0] if isinstance(item, tuple) and item else item
+                        if isinstance(part, str):
+                            part = part.encode()
+                        if isinstance(part, (bytes, bytearray)):
+                            blob += bytes(part)
+                    match = re.search(rb"\bUID\s+(\d+)", blob, re.I)
+                    if match:
+                        out.append(match.group(1).decode())
+                        continue
+            except Exception:
+                pass
+            # Preserve the token as a last resort for permissive test servers.
+            out.append(token)
+        return out
+
     def _select_folder(self, conn: imaplib.IMAP4, folder: str) -> str | None:
         folder_l = (folder or "inbox").lower()
         candidates: list[str]
@@ -635,6 +750,10 @@ class ImapProvider:
                 try:
                     typ, _ = conn.select(variant, readonly=True)
                     if typ == "OK":
+                        try:
+                            conn._current_folder = variant  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
                         return variant
                 except (imaplib.IMAP4.error, UnicodeEncodeError, UnicodeDecodeError):
                     continue
@@ -700,7 +819,7 @@ class ImapProvider:
                 return []
             seqs = data[0].split()[-limit:]
             seqs.reverse()
-            return [x.decode() if isinstance(x, bytes) else str(x) for x in seqs]
+            return self._sequence_to_uids(conn, seqs)
         if typ != "OK" or not data or not data[0]:
             return []
         all_uids = data[0].split()[-limit:]
@@ -727,6 +846,11 @@ class ImapProvider:
         except Exception:
             day = self._imap_day(before)
 
+        # Cap candidates so a large mailbox cannot force unbounded UID lists
+        # (and subsequent RFC822 fetches) when client-side date filtering skips
+        # many messages. Budget scales with page size but stays hard-capped.
+        candidate_budget = max(limit * 10, 50)
+        candidate_budget = min(candidate_budget, 500)
         try:
             typ, data = conn.uid("search", None, "BEFORE", day)
         except imaplib.IMAP4.error:
@@ -737,16 +861,18 @@ class ImapProvider:
             if typ != "OK" or not data or not data[0]:
                 return []
             seqs = data[0].split()
-            # ascending: take last limit (newest among older set)
-            seqs = seqs[-limit:] if len(seqs) > limit else seqs
+            # Newest-of-older window: take the rightmost slice before reverse.
+            seqs = seqs[-candidate_budget:]
             seqs.reverse()
-            return [x.decode() if isinstance(x, bytes) else str(x) for x in seqs]
+            return self._sequence_to_uids(conn, seqs)
         if typ != "OK" or not data or not data[0]:
             return []
+        # BEFORE only has day precision. Return a bounded newest-first candidate
+        # window; fetch() applies the exact timestamp and stops after `limit`.
         all_uids = data[0].split()
-        recent = all_uids[-limit:] if len(all_uids) > limit else all_uids
-        recent.reverse()
-        return [u.decode() if isinstance(u, bytes) else str(u) for u in recent]
+        all_uids = all_uids[-candidate_budget:]
+        all_uids.reverse()
+        return [u.decode() if isinstance(u, bytes) else str(u) for u in all_uids]
 
     def _recent_uids(self, conn: imaplib.IMAP4, limit: int) -> list[str]:
         try:

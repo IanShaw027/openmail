@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -26,9 +27,11 @@ class Message:
     folder: str = "inbox"
     verification_code: str | None = None
     raw_refs: dict[str, Any] = field(default_factory=dict)
+    # IMAP: UIDVALIDITY of the selected mailbox (UIDs only unique per validity)
+    uidvalidity: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "subject": self.subject,
             "from": self.from_,
@@ -42,6 +45,9 @@ class Message:
             "verification_code": self.verification_code,
             "raw_refs": self.raw_refs,
         }
+        if self.uidvalidity is not None:
+            d["uidvalidity"] = self.uidvalidity
+        return d
 
 
 @dataclass
@@ -79,10 +85,16 @@ class FetchResult:
     credential_updates: CredentialUpdates | None = None
     session_restored: bool = False
     error: str | None = None
+    # IMAP SELECT UIDVALIDITY for the fetched folder (propagated to messages)
+    uidvalidity: int | None = None
 
     def __post_init__(self) -> None:
         if self.message_count == 0 and self.messages:
             self.message_count = len(self.messages)
+        if self.uidvalidity is not None:
+            for m in self.messages:
+                if m.uidvalidity is None:
+                    m.uidvalidity = self.uidvalidity
 
 
 @dataclass
@@ -98,6 +110,8 @@ class ProviderNotImplemented(Exception):
 @runtime_checkable
 class Provider(Protocol):
     name: str
+    # "since_before" = honors limits.since / limits.before; "none" = max_messages only
+    time_paging: str
 
     def can_handle(self, account: Any) -> bool:
         """Return True if this provider can process the account."""
@@ -120,10 +134,78 @@ class Provider(Protocol):
         ...
 
 
+def filter_messages_by_time(
+    messages: list[Message],
+    *,
+    since: str | None = None,
+    before: str | None = None,
+) -> list[Message]:
+    """Client-side date filter for providers that lack server-side since/before.
+
+    Messages without a parseable date are kept when filtering by since (cannot
+    prove they are old) and dropped when filtering by before if unparseable
+    (cannot prove they are older).
+    """
+    if not since and not before:
+        return messages
+
+    def _ms(date: str | int | float | None) -> float | None:
+        if date is None:
+            return None
+        if isinstance(date, (int, float)):
+            value = float(date)
+            return value if abs(value) >= 100_000_000_000 else value * 1000.0
+        if not isinstance(date, str):
+            return None
+        try:
+            s = date.strip()
+            numeric = float(s)
+            return numeric if abs(numeric) >= 100_000_000_000 else numeric * 1000.0
+        except ValueError:
+            pass
+        try:
+            s = date.strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp() * 1000.0
+        except Exception:
+            try:
+                dt = parsedate_to_datetime(date.strip())
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp() * 1000.0
+            except Exception:
+                return None
+
+    since_ms = _ms(since) if since else None
+    before_ms = _ms(before) if before else None
+    # small slack so boundary messages are not dropped by clock skew
+    if since_ms is not None:
+        since_ms -= 120_000.0
+    out: list[Message] = []
+    for m in messages:
+        t = _ms(m.date)
+        if since_ms is not None:
+            if t is None:
+                out.append(m)
+                continue
+            if t < since_ms:
+                continue
+        if before_ms is not None:
+            if t is None:
+                continue
+            if t >= before_ms:
+                continue
+        out.append(m)
+    return out
+
+
 class StubProvider:
     """Base stub used until real providers are implemented."""
 
     name: str = "stub"
+    time_paging: str = "none"
     _user_error: str = "该取件方式尚未实现 / Provider not implemented yet"
 
     def can_handle(self, account: Any) -> bool:

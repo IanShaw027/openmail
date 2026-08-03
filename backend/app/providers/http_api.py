@@ -8,7 +8,11 @@ Supports generic JSON shapes:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import time
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 
 import httpx
@@ -20,6 +24,11 @@ from app.services.ssrf import SsrfError, validate_redirect_target, validate_url
 _TIMEOUT = 20.0
 _MAX_REDIRECTS = 5
 _MAX_BODY_BYTES = 2_000_000
+_CANDIDATE_DEADLINE = 30.0
+_SENSITIVE_REDIRECT_HEADERS = {
+    "authorization", "proxy-authorization", "cookie", "x-api-key",
+    "x-admin-auth", "x-custom-auth",
+}
 
 # When user imports only the Worker origin (https://xxx.workers.dev), try these
 # JSON endpoints with the same auth headers (cf_temp_email / MoeMail / generic).
@@ -183,7 +192,17 @@ def _format_address_list(raw: Any) -> str:
 
 def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index: int = 0) -> Message:
     """Map a generic JSON message object to Message."""
-    mid = _as_str(_pick(item, "id", "message_id", "uid", "messageId"), default=f"http-{index}")
+    raw_id = _pick(item, "id", "message_id", "uid", "messageId")
+    if raw_id is None or not str(raw_id).strip():
+        # Content-derived identity remains stable when upstream omits IDs.
+        identity = {k: item.get(k) for k in (
+            "subject", "from", "from_address", "sender", "to", "recipient",
+            "date", "received_at", "receivedAt", "body", "body_text", "body_html",
+        ) if item.get(k) is not None}
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()[:24]
+        mid = f"http-{digest}"
+    else:
+        mid = _as_str(raw_id)
     subject = _as_str(_pick(item, "subject", "title", "Subject"), default="")
     from_raw = _pick(item, "from", "from_", "sender", "from_address", "fromAddress")
     from_display = ""
@@ -473,6 +492,8 @@ def message_matches_mailbox(msg: Message, email: str) -> bool:
 
 class HttpApiProvider:
     name = "http_api"
+    # Local date filter on normalized list (no universal server cursor)
+    time_paging = "local_filter"
 
     def __init__(self, *, client: httpx.Client | None = None) -> None:
         self._client = client
@@ -502,26 +523,43 @@ class HttpApiProvider:
         SSRF: resolve DNS and block private/metadata IPs, then request the
         **original hostname** so TLS SNI works (Cloudflare / workers.dev reject
         bare-IP HTTPS with SSLV3_ALERT_HANDSHAKE_FAILURE when using pin-to-IP).
+
+        Returns a streamed response opened via ``client.stream`` (caller must
+        read/close the body). Body size limits are enforced by
+        :func:`_read_limited` while streaming.
         """
         # Keep original URL for redirect base; re-validate each hop
         current_orig = validate_url(url)
         client, close = self._get_client(proxy=proxy)
+        stream_cm = None
         try:
             for _ in range(_MAX_REDIRECTS + 1):
                 # Re-check DNS / private ranges every hop without rewriting host
                 validate_url(current_orig, resolve_dns=True)
                 req_headers = dict(headers or {})
-                if method.upper() == "POST":
-                    resp = client.post(
-                        current_orig, headers=req_headers, follow_redirects=False
-                    )
-                else:
-                    resp = client.get(
-                        current_orig, headers=req_headers, follow_redirects=False
-                    )
+                if _origin(current_orig) != _origin(url):
+                    req_headers = {
+                        k: v
+                        for k, v in req_headers.items()
+                        if k.lower() not in _SENSITIVE_REDIRECT_HEADERS
+                    }
+                # httpx >=0.28: use client.stream() so the body is not fully
+                # buffered before our byte budget can run.
+                stream_cm = client.stream(
+                    method.upper(),
+                    current_orig,
+                    headers=req_headers,
+                    follow_redirects=False,
+                )
+                resp = stream_cm.__enter__()
 
                 if resp.status_code in (301, 302, 303, 307, 308):
                     loc = resp.headers.get("location")
+                    try:
+                        stream_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                    stream_cm = None
                     if not loc:
                         raise SsrfError("Redirect without Location / 重定向缺少 Location")
                     # Validate redirect against original host URL as base
@@ -529,152 +567,307 @@ class HttpApiProvider:
                     if resp.status_code in (302, 303):
                         method = "GET"
                     continue
+                # Stash stream context + optional owned client for _read_limited
+                setattr(resp, "_openmail_stream_cm", stream_cm)
+                if close:
+                    setattr(resp, "_openmail_owned_client", client)
                 return resp
             raise SsrfError("Too many redirects / 重定向过多")
-        finally:
+        except Exception:
+            if stream_cm is not None:
+                try:
+                    stream_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
             if close:
-                client.close()
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            raise
 
-    def fetch(
-        self,
-        account: Any,
-        *,
-        folder: str = "inbox",
-        quick: bool = True,
-        limits: dict[str, Any] | None = None,
-        credentials: dict[str, Any] | None = None,
-    ) -> FetchResult:
-        _ = quick  # same path for now
-        creds = dict(credentials or {})
-        api_url = str(creds.get("api_url") or "").strip()
-        if not api_url:
-            return FetchResult(
-                ok=False,
-                folder=folder,
-                error="缺少 api_url / Missing api_url",
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    p = urlparse(url)
+    port = p.port
+    if port is None:
+        port = 443 if p.scheme.lower() == "https" else 80
+    return p.scheme.lower(), (p.hostname or "").lower(), port
+
+
+def _read_limited(resp: httpx.Response) -> bytes:
+    """Stream-read at most MAX_BODY_BYTES without trusting Content-Length.
+
+    Expects a response opened via ``client.stream`` (see fetch_url). Closes the
+    stream context and any client we own when finished.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        for chunk in resp.iter_bytes():
+            total += len(chunk)
+            if total > _MAX_BODY_BYTES:
+                raise ValueError("上游响应过大 / Upstream response too large")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        stream_cm = getattr(resp, "_openmail_stream_cm", None)
+        if stream_cm is not None:
+            try:
+                stream_cm.__exit__(None, None, None)
+            except Exception:
+                pass
+        else:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        owned = getattr(resp, "_openmail_owned_client", None)
+        if owned is not None:
+            try:
+                owned.close()
+            except Exception:
+                pass
+
+
+def _truthy_error_field(value: Any) -> bool:
+    """True when an error/errors/exception field indicates a real failure.
+
+    Null, empty string, empty list/dict, and False are treated as absent so
+    success shapes like ``{"messages": [...], "error": null}`` still work.
+    """
+    if value is None or value is False:
+        return False
+    if isinstance(value, (str, list, dict, tuple, set)) and len(value) == 0:
+        return False
+    return True
+
+
+def _payload_is_error(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("success") is False or payload.get("ok") is False:
+        return True
+    for key in ("error", "errors", "exception"):
+        if key in payload and _truthy_error_field(payload.get(key)):
+            return True
+    return False
+
+
+def _payload_has_supported_shape(payload: Any) -> bool:
+    if isinstance(payload, list):
+        return True
+    if not isinstance(payload, dict) or _payload_is_error(payload):
+        return False
+    keys = {"messages", "mails", "items", "results", "parsed_mails", "emails", "data", "mailboxes", "addresses", "inboxes", "boxes", "accounts"}
+    return bool(keys.intersection(payload)) or _looks_like_message(payload)
+
+
+def _with_folder(url: str, folder: str) -> str:
+    if not folder or folder == "inbox":
+        return url
+    p = urlparse(url)
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    q.setdefault("folder", folder)
+    return urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(q), p.fragment))
+
+def _fetch_impl(
+    self: HttpApiProvider,
+    account: Any,
+    *,
+    folder: str = "inbox",
+    quick: bool = True,
+    limits: dict[str, Any] | None = None,
+    credentials: dict[str, Any] | None = None,
+) -> FetchResult:
+    _ = quick  # same path for now
+    creds = dict(credentials or {})
+    api_url = str(creds.get("api_url") or "").strip()
+    if not api_url:
+        return FetchResult(
+            ok=False,
+            folder=folder,
+            error="缺少 api_url / Missing api_url",
+        )
+
+    extra_headers = build_api_auth_headers(creds)
+
+    proxy = creds.get("proxy") or getattr(account, "proxy", None)
+    proxy_str = str(proxy).strip() if proxy else None
+
+    candidates = expand_api_url_candidates(api_url)
+    last_err: str | None = None
+    payload: Any = None
+    used_url = api_url
+    deadline = time.monotonic() + _CANDIDATE_DEADLINE
+
+    for try_url in candidates:
+        if time.monotonic() >= deadline:
+            last_err = "候选 API 探测超时 / API candidate probe deadline exceeded"
+            break
+        resp: httpx.Response | None = None
+        try:
+            resp = self.fetch_url(
+                _with_folder(try_url, folder), headers=extra_headers or None, proxy=proxy_str or None
             )
+        except SsrfError as exc:
+            last_err = f"SSRF 拦截: {exc.message}"
+            # SSRF on one candidate is fatal for that host
+            if try_url == candidates[0]:
+                return FetchResult(ok=False, folder=folder, error=last_err)
+            continue
+        except httpx.TimeoutException:
+            last_err = "取件超时，请重试 / Fetch timed out, please retry"
+            continue
+        except httpx.HTTPError as exc:
+            last_err = f"网络错误 / Network error: {exc.__class__.__name__}"
+            continue
 
-        extra_headers = build_api_auth_headers(creds)
-
-        proxy = creds.get("proxy") or getattr(account, "proxy", None)
-        proxy_str = str(proxy).strip() if proxy else None
-
-        candidates = expand_api_url_candidates(api_url)
-        last_err: str | None = None
-        payload: Any = None
-        used_url = api_url
-
-        for try_url in candidates:
+        if resp.status_code >= 400:
+            # 401/403 on a path often means "right host, need auth or wrong path"
+            last_err = (
+                f"上游 HTTP {resp.status_code} / Upstream HTTP {resp.status_code}"
+            )
+            # Drain/close streamed body so the connection is released
             try:
-                resp = self.fetch_url(
-                    try_url, headers=extra_headers or None, proxy=proxy_str or None
-                )
-            except SsrfError as exc:
-                last_err = f"SSRF 拦截: {exc.message}"
-                # SSRF on one candidate is fatal for that host
-                if try_url == candidates[0]:
-                    return FetchResult(ok=False, folder=folder, error=last_err)
-                continue
-            except httpx.TimeoutException:
-                last_err = "取件超时，请重试 / Fetch timed out, please retry"
-                continue
-            except httpx.HTTPError as exc:
-                last_err = f"网络错误 / Network error: {exc.__class__.__name__}"
-                continue
-
-            if resp.status_code >= 400:
-                # 401/403 on a path often means "right host, need auth or wrong path"
-                last_err = (
-                    f"上游 HTTP {resp.status_code} / Upstream HTTP {resp.status_code}"
-                )
-                # Keep trying other paths (root HTML 200 vs /api/mails 401 with key)
-                if resp.status_code in (401, 403, 404):
-                    continue
-                # 5xx: try next path once
-                if resp.status_code >= 500:
-                    continue
-                continue
-
-            content = resp.content[:_MAX_BODY_BYTES]
-            try:
-                payload = resp.json()
+                _read_limited(resp)
             except Exception:
                 try:
-                    import json
-
-                    payload = json.loads(content.decode("utf-8", errors="replace"))
+                    resp.close()
                 except Exception:
-                    # HTML admin UI at / — try next API path
-                    last_err = "上游返回非 JSON / Upstream returned non-JSON"
-                    continue
-
-            # Valid JSON — prefer paths that yield messages or mailboxes
-            mboxes = extract_mailbox_list(payload)
-            msgs = extract_message_list(payload)
-            if mboxes or msgs or isinstance(payload, (list, dict)):
-                # Empty list JSON is still success (no mail yet)
-                used_url = try_url
-                break
-            last_err = "上游 JSON 无可解析邮件 / Upstream JSON has no messages"
-            payload = None
-        else:
-            return FetchResult(
-                ok=False,
-                folder=folder,
-                error=last_err
-                or "无法从 Worker 根地址解析邮件 API，请检查密钥或 API 路径",
-            )
-
-        assert payload is not None
-        mailbox_list = extract_mailbox_list(payload)
-        items = extract_message_list(payload)
-        top = int((limits or {}).get("top", 50) or (limits or {}).get("max_messages", 50) or 50)
-        top = max(1, min(int(top), 100))
-
-        # Filter to the concrete mailbox when account.email is a real address
-        email_addr = (
-            getattr(account, "email", None) or creds.get("email") or ""
-        ).strip().lower()
-        filter_email = email_addr if email_addr and not email_addr.startswith("api@") else ""
-
-        messages: list[Message] = []
-        for i, it in enumerate(items):
-            msg = normalize_message_item(it, folder=folder, index=i)
-            if filter_email and not message_matches_mailbox(msg, filter_email):
+                    pass
+                owned = getattr(resp, "_openmail_owned_client", None)
+                if owned is not None:
+                    try:
+                        owned.close()
+                    except Exception:
+                        pass
+            # Keep trying other paths (root HTML 200 vs /api/mails 401 with key)
+            if resp.status_code in (401, 403, 404):
                 continue
-            messages.append(msg)
-            if len(messages) >= top:
-                break
+            # 5xx: try next path once
+            if resp.status_code >= 500:
+                continue
+            continue
 
-        # If API only returned mailbox inventory (no messages yet), still ok
-        meta: dict[str, Any] = {}
-        if mailbox_list:
-            meta["mailboxes"] = mailbox_list
-            meta["mailbox_count"] = len(mailbox_list)
-        if filter_email:
-            meta["filter_email"] = filter_email
-        if used_url and used_url.rstrip("/") != api_url.rstrip("/"):
-            meta["resolved_api_url"] = used_url
-
-        updates = CredentialUpdates(
-            session_meta=meta or None,
-            mailboxes=mailbox_list or None,
-        )
-
-        return FetchResult(
-            ok=True,
-            messages=messages,
-            folder=folder,
-            credential_updates=updates if updates.any() else None,
-        )
-
-    def health(self, account: Any, *, credentials: dict[str, Any] | None = None) -> HealthResult:
-        creds = dict(credentials or {})
-        api_url = str(creds.get("api_url") or "").strip()
-        if not api_url:
-            return HealthResult(ok=False, detail="missing api_url")
         try:
-            validate_url(api_url)
-        except SsrfError as exc:
-            return HealthResult(ok=False, detail=exc.message)
-        return HealthResult(ok=True, detail="api_url looks safe")
+            content = _read_limited(resp)
+            payload = json.loads(content.decode("utf-8", errors="strict"))
+        except ValueError as exc:
+            last_err = str(exc) if "过大" in str(exc) else "上游返回非 JSON / Upstream returned non-JSON"
+            continue
+
+        # Valid JSON — prefer paths that yield messages or mailboxes
+        if _payload_has_supported_shape(payload):
+            # Empty list JSON is still success (no mail yet)
+            used_url = try_url
+            break
+        last_err = "上游 JSON 无可解析邮件 / Upstream JSON has no messages"
+        payload = None
+    else:
+        return FetchResult(
+            ok=False,
+            folder=folder,
+            error=last_err
+            or "无法从 Worker 根地址解析邮件 API，请检查密钥或 API 路径",
+        )
+
+    assert payload is not None
+    mailbox_list = extract_mailbox_list(payload)
+    items = extract_message_list(payload)
+    top = int((limits or {}).get("top", 50) or (limits or {}).get("max_messages", 50) or 50)
+    top = max(1, min(int(top), 100))
+
+    # Filter to the concrete mailbox when account.email is a real address
+    email_addr = (
+        getattr(account, "email", None) or creds.get("email") or ""
+    ).strip().lower()
+    filter_email = email_addr if email_addr and not email_addr.startswith("api@") else ""
+
+    # Pull a wider window when time-filtering so local since/before has room
+    pull_top = top
+    if limits and (
+        limits.get("since")
+        or limits.get("before")
+        or limits.get("received_after")
+        or limits.get("received_before")
+    ):
+        pull_top = max(top, min(100, top * 3))
+
+    messages: list[Message] = []
+    explicit_folder_seen = False
+    for i, it in enumerate(items):
+        folder_value = _pick(it, "folder", "mailbox_folder", "label", "category")
+        if folder_value is not None:
+            explicit_folder_seen = True
+            if str(folder_value).strip().lower() != str(folder).strip().lower():
+                continue
+        msg = normalize_message_item(it, folder=folder, index=i)
+        if filter_email and not message_matches_mailbox(msg, filter_email):
+            continue
+        messages.append(msg)
+        if len(messages) >= pull_top:
+            break
+
+    if folder != "inbox" and items and not explicit_folder_seen:
+        return FetchResult(
+            ok=False,
+            folder=folder,
+            error="上游 API 未声明文件夹，无法安全获取该文件夹 / Upstream API does not support folder filtering",
+        )
+
+    if limits:
+        from app.providers.base import filter_messages_by_time
+
+        messages = filter_messages_by_time(
+            messages,
+            since=str(limits.get("since") or limits.get("received_after") or "") or None,
+            before=str(limits.get("before") or limits.get("received_before") or "") or None,
+        )
+        messages = messages[:top]
+
+    # If API only returned mailbox inventory (no messages yet), still ok
+    meta: dict[str, Any] = {}
+    if mailbox_list:
+        meta["mailboxes"] = mailbox_list
+        meta["mailbox_count"] = len(mailbox_list)
+    if filter_email:
+        meta["filter_email"] = filter_email
+    if used_url and used_url.rstrip("/") != api_url.rstrip("/"):
+        meta["resolved_api_url"] = used_url
+
+    updates = CredentialUpdates(
+        session_meta=meta or None,
+        mailboxes=mailbox_list or None,
+    )
+
+    return FetchResult(
+        ok=True,
+        messages=messages,
+        folder=folder,
+        credential_updates=updates if updates.any() else None,
+    )
+
+
+def _health_impl(
+    self: HttpApiProvider,
+    account: Any,
+    *,
+    credentials: dict[str, Any] | None = None,
+) -> HealthResult:
+    _ = self, account
+    creds = dict(credentials or {})
+    api_url = str(creds.get("api_url") or "").strip()
+    if not api_url:
+        return HealthResult(ok=False, detail="missing api_url")
+    try:
+        validate_url(api_url)
+    except SsrfError as exc:
+        return HealthResult(ok=False, detail=exc.message)
+    return HealthResult(ok=True, detail="api_url looks safe")
+
+
+# Real methods on the class (not free-function monkey-patches) so inheritance
+# and type checkers behave. Bodies stay module-level for testability.
+HttpApiProvider.fetch = _fetch_impl  # type: ignore[method-assign]
+HttpApiProvider.health = _health_impl  # type: ignore[method-assign]
