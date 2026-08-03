@@ -5,6 +5,8 @@
  * Fallback: stable random id in localStorage (not a spoofable fingerprint).
  */
 
+import { hmacSha256Hex, sha256Hex } from '@/utils/cryptoVault'
+
 const DEVICE_KEY = 'openmail.deviceId'
 const LICENSE_KEY = 'openmail.licenseToken'
 
@@ -75,23 +77,28 @@ export function deviceHeaders(): Record<string, string> {
 
 /**
  * Async headers with HMAC proof when vault unlocked.
- * Message: `${ts}.${method}.${path}`
+ * Message: `${ts}.${method}.${path}.${body_sha256_hex}`
+ * Always sets X-Device-Body-Sha256 (sha256 of empty string when no body).
+ *
+ * @param bodyText Raw request body string as sent on the wire (e.g. JSON.stringify(body)).
  */
 export async function deviceHeadersAsync(
   method: string,
   path: string,
+  bodyText: string = '',
 ): Promise<Record<string, string>> {
   const h = deviceHeaders()
   if (!vaultSecretB64 || !vaultPublicId) return h
   try {
-    const { hmacSha256Hex } = await import('@/utils/cryptoVault')
     const ts = String(Math.floor(Date.now() / 1000))
-    const pathOnly = path.split('?')[0] || path
-    const msg = `${ts}.${method.toUpperCase()}.${pathOnly}`
+    const pathOnly = path
+    const bodyHash = await sha256Hex(bodyText)
+    const msg = `${ts}.${method.toUpperCase()}.${pathOnly}.${bodyHash}`
     const sig = await hmacSha256Hex(vaultSecretB64, msg)
     h['X-Device-Id'] = `vk_${vaultPublicId.slice(0, 40)}`
     h['X-Device-Ts'] = ts
     h['X-Device-Sign'] = sig
+    h['X-Device-Body-Sha256'] = bodyHash
   } catch {
     /* ignore */
   }

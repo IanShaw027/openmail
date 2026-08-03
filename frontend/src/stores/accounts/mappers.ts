@@ -1,6 +1,7 @@
 import type { MailAccount } from '@/types/account'
 import { resolveAccountBrand, resolveDomainProfile } from '@/utils/domainBrand'
 import type { ServerAccountOut } from '@/api/accounts'
+import { applyCloudAccountUiMeta } from '@/utils/accountUiMeta'
 
 export const LOCAL_ACCOUNTS_KEY = 'openmail.accounts.local'
 
@@ -52,7 +53,7 @@ export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): Mai
   else if (row.status === 'error' || row.status === 'need_reauth') status = 'error'
   const createdAt = row.created_at ? Date.parse(row.created_at) || Date.now() : Date.now()
   const updatedAt = row.updated_at ? Date.parse(row.updated_at) || Date.now() : Date.now()
-  return {
+  const mapped: MailAccount = {
     id: prev?.id && prev.storage === 'server' ? prev.id : `srv_${row.id}`,
     email,
     type,
@@ -61,13 +62,16 @@ export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): Mai
     status,
     serverId: row.id,
     clientSealed: Boolean(row.client_sealed),
-    note: row.note || prev?.note,
-    proxy: row.proxy || prev?.proxy,
+    // Prefer server fields when present (incl. empty string after clear); else keep prev
+    note: row.note != null ? row.note : prev?.note,
+    proxy: row.proxy != null ? row.proxy : prev?.proxy,
     latestCode: row.latest_verification_code || prev?.latestCode,
     lastError: row.last_error || undefined,
     syncEnabled: Boolean(row.sync_enabled),
     tags: prev?.tags || [],
+    // groupId / starred: prev session → durable browser UI meta (see applyAccountUiMeta)
     groupId: prev?.groupId || 'default',
+    starred: prev?.starred,
     // Secrets never come from the API — keep whatever the browser vault already has
     password: prev?.password,
     refreshToken: prev?.refreshToken,
@@ -86,4 +90,5 @@ export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): Mai
     createdAt: prev?.createdAt || createdAt,
     updatedAt,
   }
+  return applyCloudAccountUiMeta(mapped)
 }

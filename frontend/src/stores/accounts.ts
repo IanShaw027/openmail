@@ -10,12 +10,26 @@ import {
   updateServerAccount,
 } from '@/api/accounts'
 import { ApiError } from '@/api/client'
+import { i18n } from '@/i18n'
+import { useVaultStore } from '@/stores/vault'
 import {
   LOCAL_ACCOUNTS_KEY,
   loadAccountsPlain,
   mapServerToLocal,
   normalizeLocalAccounts,
 } from './accounts/mappers'
+import {
+  fillMissingAccountUiMeta,
+  patchAccountUiMeta,
+  removeAccountUiMetaIfUnused,
+} from '@/utils/accountUiMeta'
+
+function tt(key: string, params?: Record<string, unknown>): string {
+  // vue-i18n Composer typings are strict about message keys; runtime keys are fine.
+  return String((i18n.global as { t: (k: string, p?: Record<string, unknown>) => unknown }).t(key, params))
+}
+
+type ServerAccountPatch = Parameters<typeof updateServerAccount>[1]
 
 export const useAccountsStore = defineStore('accounts', () => {
   /** Local-only rows — secrets live in encrypted vault when unlocked */
@@ -24,6 +38,8 @@ export const useAccountsStore = defineStore('accounts', () => {
   const serverAccounts = ref<MailAccount[]>([])
   const cloudLoading = ref(false)
   const vaultHydrated = ref(false)
+  /** Last dual-write / cloud sync failure message (UI may watch). */
+  const lastCloudSyncError = ref<string | null>(null)
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
   const selectedId = ref<string | null>(null)
@@ -60,20 +76,31 @@ export const useAccountsStore = defineStore('accounts', () => {
   })
 
   async function persistLocalEncrypted() {
+    const vault = useVaultStore()
+    if (vault.status !== 'unlocked') return
+    await vault.saveAccounts(localAccounts.value)
+    // wipe legacy plaintext if still present
     try {
-      const { useVaultStore } = await import('@/stores/vault')
-      const vault = useVaultStore()
-      if (vault.status !== 'unlocked') return
-      await vault.saveAccounts(localAccounts.value)
-      // wipe legacy plaintext if still present
-      try {
-        localStorage.removeItem(LOCAL_ACCOUNTS_KEY)
-      } catch {
-        /* ignore */
-      }
+      localStorage.removeItem(LOCAL_ACCOUNTS_KEY)
     } catch {
-      /* vault locked or crypto fail — do not write plaintext */
+      /* ignore */
     }
+  }
+
+  function persistInBackground(): void {
+    void flushPersist().catch((error) => {
+      console.warn('[openmail] account vault persist failed', error)
+    })
+  }
+
+  /** Cancel debounce and write vault immediately (pagehide / critical patches). */
+  async function flushPersist(): Promise<void> {
+    if (persistTimer) {
+      clearTimeout(persistTimer)
+      persistTimer = null
+    }
+    if (!vaultHydrated.value) return
+    await persistLocalEncrypted()
   }
 
   watch(
@@ -81,9 +108,13 @@ export const useAccountsStore = defineStore('accounts', () => {
     () => {
       if (!vaultHydrated.value) return
       if (persistTimer) clearTimeout(persistTimer)
+      // Short debounce for bulk edits; always flush on pagehide as well
       persistTimer = setTimeout(() => {
-        void persistLocalEncrypted()
-      }, 200)
+        persistTimer = null
+        void persistLocalEncrypted().catch((error) => {
+          console.warn('[openmail] account vault persist failed', error)
+        })
+      }, 80)
     },
     { deep: true },
   )
@@ -91,7 +122,6 @@ export const useAccountsStore = defineStore('accounts', () => {
   /** Call after vault unlock: load encrypted accounts (or migrate legacy plaintext). */
   async function hydrateFromVault(): Promise<void> {
     try {
-      const { useVaultStore } = await import('@/stores/vault')
       const vault = useVaultStore()
       if (vault.status !== 'unlocked') {
         localAccounts.value = []
@@ -100,10 +130,12 @@ export const useAccountsStore = defineStore('accounts', () => {
       }
       const raw = await vault.loadAccounts()
       if (Array.isArray(raw) && raw.length) {
-        localAccounts.value = normalizeLocalAccounts(raw as MailAccount[])
+        localAccounts.value = normalizeLocalAccounts(raw as MailAccount[]).map(
+          fillMissingAccountUiMeta,
+        )
       } else {
         // one-shot legacy
-        const legacy = loadAccountsPlain()
+        const legacy = loadAccountsPlain().map(fillMissingAccountUiMeta)
         localAccounts.value = legacy
         if (legacy.length) await vault.saveAccounts(legacy)
         try {
@@ -235,7 +267,7 @@ export const useAccountsStore = defineStore('accounts', () => {
           password: src.apiKey || src.password || o.password,
           apiAuthStyle: src.apiAuthStyle || o.apiAuthStyle || 'auto',
           groupId: src.groupId || o.groupId || 'default',
-          note: o.note || '临时邮箱',
+          note: o.note || tt('console.apiTempMailboxNote'),
           updatedAt: now,
         }
         have.add(email)
@@ -259,12 +291,13 @@ export const useAccountsStore = defineStore('accounts', () => {
         rawLine: src.apiKey
           ? `${email}----${src.apiKey}----${src.apiUrl}`
           : `${email}----${src.apiUrl}`,
-        note: '临时邮箱',
+        note: tt('console.apiTempMailboxNote'),
         createdAt: now,
         updatedAt: now,
       })
       have.add(email)
     }
+    persistInBackground()
   }
 
   const filtered = computed(() => {
@@ -336,7 +369,10 @@ export const useAccountsStore = defineStore('accounts', () => {
           prevByEmail.get(emailKey)
         return mapServerToLocal(r, prev)
       })
-      // Link local rows to cloud ids when email matches (keeps secrets in vault)
+      // Link local rows to cloud ids when email matches (keeps secrets in vault).
+      // Heal missing local metadata from cloud, but NEVER resurrect a cleared note:
+      // empty local note after dual-write means user cleared purpose tags intentionally.
+      let healed = false
       for (const srv of serverAccounts.value) {
         if (!srv.serverId) continue
         const li = localAccounts.value.findIndex(
@@ -344,15 +380,48 @@ export const useAccountsStore = defineStore('accounts', () => {
         )
         if (li < 0) continue
         const loc = localAccounts.value[li]!
-        if (loc.serverId !== srv.serverId || loc.clientSealed !== srv.clientSealed) {
+        // Only fill note when local has never set one (undefined/null), not when ''.
+        // Prefer != null so cloud empty string is preserved (cleared on server).
+        const nextNote =
+          loc.note === undefined || loc.note === null
+            ? srv.note != null
+              ? srv.note
+              : undefined
+            : loc.note
+        const nextProxy =
+          loc.proxy === undefined || loc.proxy === null
+            ? srv.proxy != null
+              ? srv.proxy
+              : undefined
+            : loc.proxy
+        const nextCode = loc.latestCode || srv.latestCode
+        const linkChanged =
+          loc.serverId !== srv.serverId || loc.clientSealed !== srv.clientSealed
+        const metaChanged =
+          nextNote !== loc.note || nextProxy !== loc.proxy || nextCode !== loc.latestCode
+        if (linkChanged || metaChanged) {
+          healed = true
           localAccounts.value[li] = {
             ...loc,
             serverId: srv.serverId,
             clientSealed: srv.clientSealed,
+            note: nextNote,
+            proxy: nextProxy,
+            latestCode: nextCode,
+            // Prefer cloud status when local never fetched / still unknown
+            status:
+              loc.status === 'unknown' && srv.status && srv.status !== 'unknown'
+                ? srv.status
+                : loc.status,
+            lastError: loc.lastError || srv.lastError,
+            syncEnabled: loc.syncEnabled ?? srv.syncEnabled,
             updatedAt: Date.now(),
           }
         }
       }
+      // serverId / healed note must hit vault before a quick refresh
+      if (healed) await flushPersist()
+      await retryPendingCloudWrites()
     } catch (e) {
       // Missing device header or API down — keep previous
       if (!(e instanceof ApiError && e.status === 400)) {
@@ -467,16 +536,16 @@ export const useAccountsStore = defineStore('accounts', () => {
       invalid: opts.invalid ?? 0,
       warnings: [
         ...(opts.warnings || []),
-        ...(skipped ? [`跳过 ${skipped} 个状态正常的已有账号（未覆盖）`] : []),
+        ...(skipped ? [tt('console.importWarnSkipOk', { n: skipped })] : []),
         ...(quotaBlocked
-          ? [
-              `配额限制：未导入 ${quotaBlocked} 个新账号（本机上限 ${maxLocal}，可配置 LICENSE 解除）`,
-            ]
+          ? [tt('console.importWarnQuotaBlocked', { n: quotaBlocked, max: maxLocal })]
           : []),
       ],
       lineMessages: opts.lineMessages,
     }
     lastImport.value = result
+    // Import mutates many rows; durable write (Console awaits flushPersist after)
+    persistInBackground()
     return result
   }
 
@@ -501,7 +570,6 @@ export const useAccountsStore = defineStore('accounts', () => {
       try {
         let clientSealed: string | undefined
         try {
-          const { useVaultStore } = await import('@/stores/vault')
           const vault = useVaultStore()
           if (vault.status === 'unlocked') {
             clientSealed = await vault.sealForCloud({
@@ -541,13 +609,16 @@ export const useAccountsStore = defineStore('accounts', () => {
           { syncEnabled: clientSealed ? false : syncEnabled, clientSealed },
         )
         const row = await createServerAccount(body)
+        // Sealed cloud rows cannot be polled server-side — keep local syncEnabled false
+        const localSyncEnabled = clientSealed ? false : syncEnabled
         // mark local as linked to cloud for UI
         const li = localAccounts.value.findIndex((a) => a.id === id)
         if (li >= 0) {
           localAccounts.value[li] = {
             ...localAccounts.value[li]!,
             serverId: row.id,
-            syncEnabled,
+            clientSealed: Boolean(clientSealed),
+            syncEnabled: localSyncEnabled,
             updatedAt: Date.now(),
           }
         }
@@ -556,7 +627,8 @@ export const useAccountsStore = defineStore('accounts', () => {
           id: `srv_${row.id}`,
           storage: 'server',
           serverId: row.id,
-          syncEnabled,
+          clientSealed: Boolean(clientSealed),
+          syncEnabled: localSyncEnabled,
           updatedAt: Date.now(),
         })
         const si = serverAccounts.value.findIndex(
@@ -576,6 +648,8 @@ export const useAccountsStore = defineStore('accounts', () => {
         errors.push(`${acc.email}: ${msg}`)
       }
     }
+    // serverId link on local rows must survive immediate refresh
+    if (ok) await flushPersist()
     return { ok, fail, errors }
   }
 
@@ -614,7 +688,6 @@ export const useAccountsStore = defineStore('accounts', () => {
       try {
         let clientSealed: string | undefined
         try {
-          const { useVaultStore } = await import('@/stores/vault')
           const vault = useVaultStore()
           if (vault.status === 'unlocked') {
             clientSealed = await vault.sealForCloud({
@@ -729,42 +802,85 @@ export const useAccountsStore = defineStore('accounts', () => {
       updated,
       invalid: errors.length,
       warnings: [
-        ...(skipped ? [`跳过 ${skipped} 个状态正常的已有云端账号`] : []),
-        ...(errors.length ? [`云端失败 ${errors.length} 个`] : []),
+        ...(skipped ? [tt('console.importWarnSkipOkCloud', { n: skipped })] : []),
+        ...(errors.length ? [tt('console.importWarnCloudFailed', { n: errors.length })] : []),
       ],
       errors,
     }
     lastImport.value = result
+    await flushPersist()
     return result
   }
 
   async function removeSelected() {
     const ids = selectedIds.value
     const toRemove = accounts.value.filter((a) => ids.has(a.id))
+    const serverIds = new Set<string>()
     for (const a of toRemove) {
-      if (a.storage === 'server' && a.serverId) {
-        try {
-          await deleteServerAccount(a.serverId)
-        } catch {
-          /* continue */
-        }
+      // Linked local rows also carry serverId — delete cloud twin whenever present
+      if (a.serverId) serverIds.add(a.serverId)
+    }
+    const failedServerIds = new Set<string>()
+    for (const sid of serverIds) {
+      try {
+        await deleteServerAccount(sid)
+      } catch (error) {
+        failedServerIds.add(sid)
+        console.warn('[openmail] cloud delete failed; keeping local mirror', error)
       }
     }
-    localAccounts.value = localAccounts.value.filter((a) => !ids.has(a.id))
-    serverAccounts.value = serverAccounts.value.filter((a) => !ids.has(a.id))
-    if (selectedId.value && ids.has(selectedId.value)) {
+    const removableIds = new Set(
+      toRemove
+        .filter((a) => !a.serverId || !failedServerIds.has(a.serverId))
+        .map((a) => a.id),
+    )
+    const emailsToMaybeDrop = toRemove
+      .filter((a) => removableIds.has(a.id))
+      .map((a) => a.email)
+    localAccounts.value = localAccounts.value.filter((a) => !removableIds.has(a.id))
+    // Drop cloud mirrors by selected id or by deleted serverId
+    serverAccounts.value = serverAccounts.value.filter(
+      (a) =>
+        !removableIds.has(a.id) &&
+        !(a.serverId && serverIds.has(a.serverId) && !failedServerIds.has(a.serverId)),
+    )
+    const still = [
+      ...localAccounts.value.map((a) => a.email),
+      ...serverAccounts.value.map((a) => a.email),
+    ]
+    for (const email of emailsToMaybeDrop) {
+      removeAccountUiMetaIfUnused(email, still)
+    }
+    if (selectedId.value && removableIds.has(selectedId.value)) {
       selectedId.value = null
     }
-    deselectAll()
+    selectedIds.value = new Set(
+      toRemove.filter((a) => a.serverId && failedServerIds.has(a.serverId)).map((a) => a.id),
+    )
+    await flushPersist()
   }
 
   async function removeById(id: string) {
     const acc = findById(id)
-    if (acc?.storage === 'server' && acc.serverId) {
-      await deleteServerAccount(acc.serverId)
+    const email = acc?.email
+    const serverId = acc?.serverId
+    // Always delete cloud when linked (local row with serverId), not only storage==='server'
+    if (serverId) {
+      // Keep the local mirror when remote deletion fails. Otherwise the next
+      // cloud refresh resurrects an account the UI claimed was deleted.
+      await deleteServerAccount(serverId)
+      serverAccounts.value = serverAccounts.value.filter(
+        (a) => a.id !== id && a.serverId !== serverId,
+      )
+    } else if (acc?.storage === 'server') {
       serverAccounts.value = serverAccounts.value.filter((a) => a.id !== id)
-    } else {
-      localAccounts.value = localAccounts.value.filter((a) => a.id !== id)
+    }
+    localAccounts.value = localAccounts.value.filter((a) => a.id !== id)
+    if (email) {
+      removeAccountUiMetaIfUnused(email, [
+        ...localAccounts.value.map((a) => a.email),
+        ...serverAccounts.value.map((a) => a.email),
+      ])
     }
     if (selectedId.value === id) selectedId.value = null
     if (selectedIds.value.has(id)) {
@@ -772,25 +888,66 @@ export const useAccountsStore = defineStore('accounts', () => {
       next.delete(id)
       selectedIds.value = next
     }
+    await flushPersist()
   }
 
-  function moveToGroup(ids: string[], groupId: string) {
+  /**
+   * Batch group move: mutate all rows first, one vault flush, then cloud meta dual-writes.
+   */
+  async function moveToGroup(ids: string[], groupId: string) {
+    const gid = groupId || 'default'
+    const cloudPatches: Array<{ serverId: string; email: string }> = []
     for (const id of ids) {
-      void patchAccount(id, { groupId })
+      const li = localAccounts.value.findIndex((a) => a.id === id)
+      if (li >= 0) {
+        const prev = localAccounts.value[li]!
+        localAccounts.value[li] = {
+          ...prev,
+          groupId: gid,
+          storage: 'local',
+          updatedAt: Date.now(),
+        }
+        patchAccountUiMeta(prev.email, { groupId: gid, starred: prev.starred })
+        if (prev.serverId) cloudPatches.push({ serverId: prev.serverId, email: prev.email })
+        continue
+      }
+      const si = serverAccounts.value.findIndex((a) => a.id === id)
+      if (si >= 0) {
+        const prev = serverAccounts.value[si]!
+        serverAccounts.value[si] = {
+          ...prev,
+          groupId: gid,
+          storage: 'server',
+          updatedAt: Date.now(),
+        }
+        patchAccountUiMeta(prev.email, { groupId: gid, starred: prev.starred })
+      }
     }
+    await flushPersist()
+    // groupId is browser-only — no API column; cloudPatches reserved if we add one later
+    void cloudPatches
   }
 
-  function clearLocal() {
+  /** Clear local vault rows and await durable write so refresh cannot resurrect them. */
+  async function clearLocal(): Promise<void> {
+    const emails = localAccounts.value.map((a) => a.email)
     localAccounts.value = []
+    const still = serverAccounts.value.map((a) => a.email)
+    for (const email of emails) removeAccountUiMetaIfUnused(email, still)
     selectedId.value = null
     deselectAll()
+    await flushPersist()
   }
 
-  function clearAllLocalStorage() {
+  async function clearAllLocalStorage(): Promise<void> {
+    const emails = localAccounts.value.map((a) => a.email)
     localAccounts.value = []
+    const still = serverAccounts.value.map((a) => a.email)
+    for (const email of emails) removeAccountUiMetaIfUnused(email, still)
     selectedId.value = null
     deselectAll()
     lastImport.value = null
+    await flushPersist()
   }
 
   function exportText(format: 'raw' | 'emails' = 'raw'): string {
@@ -801,57 +958,284 @@ export const useAccountsStore = defineStore('accounts', () => {
     return list.map((a) => a.rawLine || a.email).join('\n')
   }
 
+  /**
+   * Safe dual-write fields (API replaces credential_enc wholesale — never send
+   * partial credential blobs). Secrets for linked rows stay vault-only unless
+   * buildFullCredentialBody is used with the merged account snapshot.
+   */
+  function cloudMetaBody(
+    patch: Partial<MailAccount>,
+  ): Parameters<typeof updateServerAccount>[1] | null {
+    const body: Parameters<typeof updateServerAccount>[1] = {}
+    if (patch.note !== undefined) body.note = patch.note ?? ''
+    if (patch.proxy !== undefined) body.proxy = patch.proxy ?? ''
+    if (patch.syncEnabled !== undefined) body.sync_enabled = patch.syncEnabled
+    if (patch.status !== undefined) {
+      body.status =
+        patch.status === 'error' ? 'error' : patch.status === 'ok' ? 'ok' : undefined
+      if (body.status === undefined) delete body.status
+    }
+    if (patch.type !== undefined) body.provider = patch.type
+    return Object.keys(body).length ? body : null
+  }
+
+  function cloudErrorMessage(error: unknown): string {
+    if (error instanceof Error && error.message) return error.message.slice(0, 300)
+    return String(error || 'cloud sync failed').slice(0, 300)
+  }
+
+  function clearPendingCloudState(acc: MailAccount): MailAccount {
+    const {
+      cloudPendingPatch: _patch,
+      cloudSyncPending: _pending,
+      cloudSyncError: _error,
+      ...clean
+    } = acc
+    return clean
+  }
+
+  async function retryPendingCloudWrites(): Promise<void> {
+    let changed = false
+    let anyFail = false
+    let lastErr: string | null = null
+    for (let i = 0; i < localAccounts.value.length; i += 1) {
+      const acc = localAccounts.value[i]!
+      if (!acc.serverId || !acc.cloudSyncPending || !acc.cloudPendingPatch) continue
+      try {
+        const row = await updateServerAccount(
+          acc.serverId,
+          acc.cloudPendingPatch as ServerAccountPatch,
+        )
+        localAccounts.value[i] = clearPendingCloudState({
+          ...acc,
+          updatedAt: Date.now(),
+        })
+        const si = serverAccounts.value.findIndex((a) => a.serverId === acc.serverId)
+        if (si >= 0) {
+          serverAccounts.value[si] = mapServerToLocal(row, serverAccounts.value[si])
+        }
+        changed = true
+      } catch (error) {
+        const msg = cloudErrorMessage(error)
+        lastErr = msg
+        anyFail = true
+        localAccounts.value[i] = {
+          ...acc,
+          cloudSyncPending: true,
+          cloudSyncError: msg,
+        }
+        changed = true
+      }
+    }
+    if (anyFail) lastCloudSyncError.value = lastErr
+    else if (changed) lastCloudSyncError.value = null
+    if (changed) await flushPersist()
+  }
+
+  /** True when patch intends to change server-stored secrets. */
+  function patchTouchesSecrets(patch: Partial<MailAccount>): boolean {
+    return (
+      patch.password !== undefined ||
+      patch.refreshToken !== undefined ||
+      patch.clientId !== undefined ||
+      patch.apiUrl !== undefined ||
+      patch.apiKey !== undefined ||
+      patch.imapHost !== undefined ||
+      patch.imapPort !== undefined ||
+      patch.smtpHost !== undefined ||
+      patch.smtpPort !== undefined ||
+      patch.authCode !== undefined
+    )
+  }
+
+  /**
+   * Full credential replace from merged account state (never partial keys).
+   * Backend replaces entire credential_enc when credential is present.
+   * Returns null when the browser snapshot is too incomplete to safely replace
+   * server secrets (avoids wiping cloud tokens after reload without vault secrets).
+   */
+  function fullCredentialBody(
+    acc: MailAccount,
+  ): Parameters<typeof updateServerAccount>[1] | null {
+    const body: Parameters<typeof updateServerAccount>[1] = {}
+    // Prefer explicit password; for http_api also accept apiKey as password field
+    const password = acc.password || (acc.type === 'http_api' ? acc.apiKey : undefined)
+    if (password) body.password = password
+    const credential: Record<string, unknown> = {}
+    if (acc.refreshToken) credential.refresh_token = acc.refreshToken
+    if (acc.clientId) credential.client_id = acc.clientId
+    if (acc.apiUrl) credential.api_url = acc.apiUrl
+    // http_api: do not drop api_key on full credential replace
+    const apiSecret = acc.apiKey || acc.password
+    if (acc.type === 'http_api' && apiSecret) {
+      credential.api_key = apiSecret
+    }
+    if (acc.apiAuthStyle) credential.api_auth_style = acc.apiAuthStyle
+    if (acc.imapHost) credential.imap_host = acc.imapHost
+    if (acc.imapPort) credential.imap_port = acc.imapPort
+    if (acc.smtpHost) credential.smtp_host = acc.smtpHost
+    if (acc.smtpPort) credential.smtp_port = acc.smtpPort
+    if (acc.authCode) credential.auth_code = acc.authCode
+    // Cookie providers: embed session_meta inside full credential snapshot
+    if (
+      (acc.type === 'cookie' || acc.type === 'unknown') &&
+      acc.sessionMeta &&
+      Object.keys(acc.sessionMeta).length
+    ) {
+      credential.session_meta = acc.sessionMeta
+    }
+    if (Object.keys(credential).length) body.credential = credential
+    // Rolling session cookies live on AccountUpdate.cookies (not only in credential)
+    if (acc.sessionCookies?.length) body.cookies = acc.sessionCookies
+    if (acc.type) body.provider = acc.type
+    // Require a usable secret set for this provider before full replace
+    const t = acc.type
+    const hasUsable =
+      (t === 'oauth' && acc.refreshToken && acc.clientId) ||
+      // http_api: apiUrl required; api_key sent when present (open APIs may omit)
+      (t === 'http_api' && acc.apiUrl) ||
+      (t === 'imap' && (acc.password || acc.authCode)) ||
+      (t === 'cookie' && (acc.password || (acc.sessionCookies && acc.sessionCookies.length))) ||
+      (t === 'unknown' &&
+        (acc.password ||
+          acc.authCode ||
+          (acc.refreshToken && acc.clientId) ||
+          acc.apiUrl ||
+          (acc.sessionCookies && acc.sessionCookies.length)))
+    if (!hasUsable && !body.password && !Object.keys(credential).length) return null
+    if (!hasUsable) return null
+    return body
+  }
+
   async function patchAccount(id: string, patch: Partial<MailAccount>): Promise<void> {
     const li = localAccounts.value.findIndex((a) => a.id === id)
     if (li >= 0) {
-      localAccounts.value[li] = {
-        ...localAccounts.value[li]!,
-        ...patch,
+      const prev = localAccounts.value[li]!
+      // Normalize empty note to '' so intentional clear is distinguishable from "never set"
+      const normalized: Partial<MailAccount> = { ...patch }
+      if (patch.note !== undefined) normalized.note = patch.note ?? ''
+      if (patch.proxy !== undefined) normalized.proxy = patch.proxy ?? ''
+      const merged: MailAccount = {
+        ...prev,
+        ...normalized,
         storage: 'local',
         updatedAt: Date.now(),
       }
+      localAccounts.value[li] = merged
+      // group/star: durable browser map (survives even if vault write races)
+      if (normalized.groupId !== undefined || normalized.starred !== undefined) {
+        patchAccountUiMeta(prev.email, {
+          groupId: merged.groupId,
+          starred: merged.starred,
+        })
+      }
+      // Linked local+cloud: dual-write safe meta; secrets only as full snapshot
+      const serverId = merged.serverId || prev.serverId
+      if (serverId) {
+        const body: Parameters<typeof updateServerAccount>[1] = {
+          ...(merged.cloudPendingPatch as ServerAccountPatch | undefined),
+          ...cloudMetaBody(normalized),
+        }
+        // Client-sealed rows: server cannot use plaintext secrets — skip credential dual-write
+        if (patchTouchesSecrets(normalized) && !merged.clientSealed) {
+          const full = fullCredentialBody(merged)
+          if (full) Object.assign(body, full)
+        }
+        // Rolling session dual-write for non-sealed linked accounts (server poll)
+        if (
+          !merged.clientSealed &&
+          (normalized.sessionCookies !== undefined || normalized.sessionMeta !== undefined) &&
+          merged.sessionCookies?.length
+        ) {
+          body.cookies = merged.sessionCookies
+        }
+        if (Object.keys(body).length) {
+          try {
+            const row = await updateServerAccount(serverId, body)
+            lastCloudSyncError.value = null
+            localAccounts.value[li] = clearPendingCloudState({
+              ...localAccounts.value[li]!,
+              updatedAt: Date.now(),
+            })
+            const si = serverAccounts.value.findIndex(
+              (a) =>
+                a.serverId === serverId ||
+                a.email.toLowerCase() === prev.email.toLowerCase(),
+            )
+            if (si >= 0) {
+              serverAccounts.value[si] = mapServerToLocal(row, {
+                ...serverAccounts.value[si]!,
+                ...normalized,
+                storage: 'server',
+                updatedAt: Date.now(),
+              })
+            }
+          } catch (e) {
+            const msg = cloudErrorMessage(e)
+            lastCloudSyncError.value = msg
+            localAccounts.value[li] = {
+              ...localAccounts.value[li]!,
+              cloudPendingPatch: body as Record<string, unknown>,
+              cloudSyncPending: true,
+              cloudSyncError: msg,
+              updatedAt: Date.now(),
+            }
+            console.warn('[openmail] cloud dual-write queued for retry', e)
+          }
+        }
+      }
+      // Critical: purpose/note/star must hit vault before any refresh
+      await flushPersist()
       return
     }
     const si = serverAccounts.value.findIndex((a) => a.id === id)
     if (si >= 0) {
       const prev = serverAccounts.value[si]!
-      const next = { ...prev, ...patch, storage: 'server' as const, updatedAt: Date.now() }
+      const normalized: Partial<MailAccount> = { ...patch }
+      if (patch.note !== undefined) normalized.note = patch.note ?? ''
+      if (patch.proxy !== undefined) normalized.proxy = patch.proxy ?? ''
+      const next: MailAccount = {
+        ...prev,
+        ...normalized,
+        storage: 'server',
+        updatedAt: Date.now(),
+      }
+      // Cloud-only rows: persist group/star in browser map (API has no columns)
+      if (normalized.groupId !== undefined || normalized.starred !== undefined) {
+        patchAccountUiMeta(prev.email, {
+          groupId: next.groupId,
+          starred: next.starred,
+        })
+      }
       serverAccounts.value[si] = next
       if (prev.serverId) {
-        const body: Parameters<typeof updateServerAccount>[1] = {}
-        if (patch.note !== undefined) body.note = patch.note ?? ''
-        if (patch.proxy !== undefined) body.proxy = patch.proxy ?? ''
-        if (patch.syncEnabled !== undefined) body.sync_enabled = patch.syncEnabled
-        if (patch.password !== undefined) body.password = patch.password
+        const body: Parameters<typeof updateServerAccount>[1] = {
+          ...cloudMetaBody(normalized),
+        }
+        // Cloud-only secret updates: only full usable snapshot (non-sealed)
+        if (patchTouchesSecrets(normalized) && !next.clientSealed) {
+          const full = fullCredentialBody(next)
+          if (full) Object.assign(body, full)
+        }
+        // Rolling session dual-write for non-sealed cloud-only rows
         if (
-          patch.refreshToken !== undefined ||
-          patch.clientId !== undefined ||
-          patch.apiUrl !== undefined ||
-          patch.imapHost !== undefined ||
-          patch.imapPort !== undefined ||
-          patch.smtpHost !== undefined ||
-          patch.smtpPort !== undefined ||
-          patch.authCode !== undefined ||
-          patch.type !== undefined
+          !next.clientSealed &&
+          (normalized.sessionCookies !== undefined || normalized.sessionMeta !== undefined) &&
+          next.sessionCookies?.length
         ) {
-          body.credential = {
-            ...(patch.refreshToken ? { refresh_token: patch.refreshToken } : {}),
-            ...(patch.clientId ? { client_id: patch.clientId } : {}),
-            ...(patch.apiUrl ? { api_url: patch.apiUrl } : {}),
-            ...(patch.imapHost ? { imap_host: patch.imapHost } : {}),
-            ...(patch.imapPort ? { imap_port: patch.imapPort } : {}),
-            ...(patch.smtpHost ? { smtp_host: patch.smtpHost } : {}),
-            ...(patch.smtpPort ? { smtp_port: patch.smtpPort } : {}),
-            ...(patch.authCode ? { auth_code: patch.authCode } : {}),
-          }
-          if (patch.type) body.provider = patch.type
+          body.cookies = next.sessionCookies
         }
         if (Object.keys(body).length) {
           try {
             const row = await updateServerAccount(prev.serverId, body)
+            lastCloudSyncError.value = null
             serverAccounts.value[si] = mapServerToLocal(row, next)
           } catch (e) {
-            console.warn('patch cloud account failed', e)
+            lastCloudSyncError.value = cloudErrorMessage(e)
+            // A cloud-only row has no encrypted local outbox. Roll back the
+            // optimistic update and let the caller surface the failed save.
+            serverAccounts.value[si] = prev
+            throw e
           }
         }
       }
@@ -866,6 +1250,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     localAccounts,
     serverAccounts,
     cloudLoading,
+    lastCloudSyncError,
     accounts,
     accountsFlat,
     selectedId,
@@ -898,8 +1283,10 @@ export const useAccountsStore = defineStore('accounts', () => {
     clearAllLocalStorage,
     exportText,
     patchAccount,
+    retryPendingCloudWrites,
     findById,
     hydrateFromVault,
     clearLocalSecrets,
+    flushPersist,
   }
 })

@@ -1,5 +1,7 @@
 /** Local account groups (folders) for console organization. */
 
+import { i18n } from '@/i18n'
+
 export interface MailGroup {
   id: string
   name: string
@@ -13,7 +15,18 @@ export const ACTIVE_GROUP_KEY = 'openmail.activeGroup'
 export const IMPORT_GROUP_KEY = 'openmail.importGroup'
 
 export function defaultGroups(): MailGroup[] {
-  return [{ id: DEFAULT_GROUP_ID, name: '默认分组', order: 0, color: '#4f46e5' }]
+  // Name is also localized at display time via console.groupDefault
+  const name = String(
+    (i18n.global as { t: (k: string) => unknown }).t('console.groupDefault'),
+  )
+  return [
+    {
+      id: DEFAULT_GROUP_ID,
+      name,
+      order: 0,
+      color: '#4f46e5',
+    },
+  ]
 }
 
 export function loadGroups(): MailGroup[] {

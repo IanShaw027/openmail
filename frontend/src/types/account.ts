@@ -72,6 +72,10 @@ export interface MailAccount {
   lastError?: string
   /** Cloud hourly poll (server SyncWorker) */
   syncEnabled?: boolean
+  /** Encrypted local outbox entry for a failed linked-account cloud write. */
+  cloudPendingPatch?: Record<string, unknown>
+  cloudSyncPending?: boolean
+  cloudSyncError?: string
   /** User-marked priority mailbox; filterable in My Mail */
   starred?: boolean
   rawLine: string

@@ -13,6 +13,8 @@ export interface MailMessage {
   body_html?: string
   folder?: string
   verification_code?: string | null
+  /** IMAP UIDVALIDITY when known — scopes UID uniqueness */
+  uidvalidity?: number | null
 }
 
 export interface FetchResult {
@@ -31,6 +33,8 @@ export interface FetchResult {
   session_restored?: boolean
   /** HttpApi multi-inbox: temp addresses under this api_url */
   mailboxes?: string[] | null
+  /** IMAP folder UIDVALIDITY for this fetch */
+  uidvalidity?: number | null
 }
 
 /** Body for proxy fetch (credentials not stored server-side). */
@@ -66,6 +70,8 @@ export interface ServerAccountOut {
   status?: string
   last_error?: string | null
   latest_verification_code?: string | null
+  latest_code_at?: string | null
+  latest_code_folder?: string | null
   sync_enabled?: boolean
   last_sync_at?: string | null
   last_sync_error?: string | null
@@ -143,11 +149,15 @@ export async function deleteServerAccount(id: string): Promise<void> {
 
 export async function fetchServerAccount(
   id: string,
-  opts: { folder?: string; quick?: boolean } = {},
+  opts: { folder?: string; quick?: boolean; since?: string; before?: string; maxMessages?: number; full?: boolean } = {},
 ): Promise<FetchResult> {
   const q = new URLSearchParams()
   if (opts.folder) q.set('folder', opts.folder)
   if (opts.quick != null) q.set('quick', opts.quick ? 'true' : 'false')
+  if (opts.since) q.set('since', opts.since)
+  if (opts.before) q.set('before', opts.before)
+  if (opts.maxMessages != null) q.set('max_messages', String(opts.maxMessages))
+  if (opts.full != null) q.set('full', opts.full ? 'true' : 'false')
   const qs = q.toString()
   return apiRequest<FetchResult>(
     `/api/accounts/${encodeURIComponent(id)}/fetch${qs ? `?${qs}` : ''}`,

@@ -25,6 +25,11 @@ import {
   unwrapDekFromSession,
 } from '@/utils/cryptoVault'
 import { factoryResetAndReload } from '@/utils/clearLocalEnvironment'
+import { setVaultDeviceIdentity } from '@/utils/device'
+import { apiRequest } from '@/api/client'
+import { useAccountsStore } from '@/stores/accounts'
+import { useTwoFaStore } from '@/stores/twofa'
+import { useMailCacheStore } from '@/stores/mailCache'
 
 const META_KEY = 'openmail.vault.meta.v1'
 const ACCOUNTS_ENC_KEY = 'openmail.accounts.enc.v1'
@@ -171,21 +176,64 @@ export const useVaultStore = defineStore('vault', () => {
     }
   }
 
+  /**
+   * Serialize vault writes so concurrent encrypt+setItem cannot finish out of order
+   * (e.g. accounts flush + mail flush racing, or double flush on pagehide).
+   * Each storage key has its own chain so accounts/mail/2FA can still encrypt in parallel.
+   */
+  const writeChains = new Map<string, Promise<void>>()
+
   async function persistBlob(storageKey: string, value: unknown): Promise<void> {
     if (!vaultKey) throw new VaultCryptoError('locked')
-    const pkg = await encryptJson(vaultKey, value)
-    localStorage.setItem(storageKey, JSON.stringify(pkg))
+    const prev = writeChains.get(storageKey) || Promise.resolve()
+    const next = prev
+      .catch(() => {
+        /* prior write failed; still attempt this one */
+      })
+      .then(async () => {
+        if (!vaultKey) throw new VaultCryptoError('locked')
+        // Snapshot JSON now so a later mutation cannot change mid-encrypt payload
+        const snapshot = JSON.parse(JSON.stringify(value)) as unknown
+        const pkg = await encryptJson(vaultKey, snapshot)
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(pkg))
+        } catch (e) {
+          const name = e instanceof DOMException ? e.name : ''
+          if (name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+            console.warn(
+              '[openmail] vault persist quota exceeded for',
+              storageKey,
+              '— prune mail cache or free site data',
+            )
+          } else {
+            console.warn('[openmail] vault persist failed', storageKey, e)
+          }
+          throw e
+        }
+      })
+    writeChains.set(storageKey, next)
+    await next
   }
 
   async function loadBlob<T>(storageKey: string, fallback: T): Promise<T> {
     if (!vaultKey) return fallback
+    // Wait for any in-flight write to this key so we don't read a half-updated package
+    const pending = writeChains.get(storageKey)
+    if (pending) {
+      try {
+        await pending
+      } catch {
+        /* ignore */
+      }
+    }
     const raw = localStorage.getItem(storageKey)
     if (!raw) return fallback
     try {
       const pkg = JSON.parse(raw) as CipherPackage
       return await decryptJson<T>(vaultKey, pkg)
-    } catch {
-      return fallback
+    } catch (e) {
+      console.error('[openmail] encrypted vault blob is corrupt', storageKey, e)
+      throw new VaultCryptoError('corrupt_data')
     }
   }
 
@@ -212,7 +260,6 @@ export const useVaultStore = defineStore('vault', () => {
     deviceSecret.value = secret
     devicePublicId.value = await devicePublicIdFromSecretB64(secret)
     try {
-      const { setVaultDeviceIdentity } = await import('@/utils/device')
       setVaultDeviceIdentity(devicePublicId.value, secret)
     } catch {
       /* ignore */
@@ -362,7 +409,6 @@ export const useVaultStore = defineStore('vault', () => {
   async function registerDeviceWithServer(): Promise<void> {
     if (!deviceSecret.value || !devicePublicId.value) return
     try {
-      const { apiRequest } = await import('@/api/client')
       const public_id = `vk_${devicePublicId.value.slice(0, 40)}`
       const res = await apiRequest<{ ok?: boolean; public_id?: string }>('/api/device/register', {
         method: 'POST',
@@ -376,32 +422,13 @@ export const useVaultStore = defineStore('vault', () => {
         const hex = res.public_id.slice(3)
         if (hex.length >= 32) {
           devicePublicId.value = hex.length >= 64 ? hex : devicePublicId.value
-          const { setVaultDeviceIdentity } = await import('@/utils/device')
           setVaultDeviceIdentity(devicePublicId.value, deviceSecret.value)
         }
       }
     } catch (e) {
       console.warn('device register failed', e)
-      try {
-        if (!vaultKey) return
-        const secret = generateDeviceSecret()
-        await persistBlob(DEVICE_SECRET_ENC_KEY, secret)
-        deviceSecret.value = secret
-        devicePublicId.value = await devicePublicIdFromSecretB64(secret)
-        const { setVaultDeviceIdentity } = await import('@/utils/device')
-        setVaultDeviceIdentity(devicePublicId.value, secret)
-        const { apiRequest } = await import('@/api/client')
-        await apiRequest('/api/device/register', {
-          method: 'POST',
-          body: {
-            public_id: `vk_${devicePublicId.value.slice(0, 40)}`,
-            secret_b64: secret,
-          },
-          timeoutMs: 15_000,
-        })
-      } catch {
-        /* offline */
-      }
+      // Cloud rows are owned by this identity. A transient registration
+      // failure must never rotate the persisted secret and orphan those rows.
     }
   }
 
@@ -419,6 +446,10 @@ export const useVaultStore = defineStore('vault', () => {
     } catch (e) {
       vaultKey = null
       unlocked.value = false
+      if (e instanceof VaultCryptoError && e.message === 'corrupt_data') {
+        lastError.value = 'corrupt_data'
+        throw e
+      }
       lastError.value = 'bad_password'
       throw new VaultCryptoError('bad_password')
     } finally {
@@ -445,9 +476,13 @@ export const useVaultStore = defineStore('vault', () => {
         await persistBlob(RECOVERY_ENC_KEY, display)
         savedRecoveryKey.value = display
       }
-    } catch {
+    } catch (e) {
       vaultKey = null
       unlocked.value = false
+      if (e instanceof VaultCryptoError && e.message === 'corrupt_data') {
+        lastError.value = 'corrupt_data'
+        throw e
+      }
       lastError.value = 'bad_recovery'
       throw new VaultCryptoError('bad_recovery')
     } finally {
@@ -503,22 +538,14 @@ export const useVaultStore = defineStore('vault', () => {
     savedRecoveryKey.value = null
     clearSessionWrap()
     try {
-      void import('@/utils/device').then(({ setVaultDeviceIdentity }) =>
-        setVaultDeviceIdentity(null, null),
-      )
+      setVaultDeviceIdentity(null, null)
     } catch {
       /* ignore */
     }
     try {
-      void import('@/stores/accounts').then(({ useAccountsStore }) => {
-        useAccountsStore().clearLocalSecrets()
-      })
-      void import('@/stores/twofa').then(({ useTwoFaStore }) => {
-        useTwoFaStore().clearSecrets()
-      })
-      void import('@/stores/mailCache').then(({ useMailCacheStore }) => {
-        useMailCacheStore().clearSecrets()
-      })
+      useAccountsStore().clearLocalSecrets()
+      useTwoFaStore().clearSecrets()
+      useMailCacheStore().clearSecrets()
     } catch {
       /* ignore */
     }
@@ -607,9 +634,7 @@ export const useVaultStore = defineStore('vault', () => {
     savedRecoveryKey.value = null
     meta.value = null
     try {
-      void import('@/utils/device').then(({ setVaultDeviceIdentity }) =>
-        setVaultDeviceIdentity(null, null),
-      )
+      setVaultDeviceIdentity(null, null)
     } catch {
       /* ignore */
     }

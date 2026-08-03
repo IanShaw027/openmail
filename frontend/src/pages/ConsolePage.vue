@@ -11,7 +11,7 @@ import {
   accountCanSend,
   accountHasLocalFetchSecrets,
 } from '@/types/account'
-import { IMPORT_PLACEHOLDER, parseImportText } from '@/utils/importParse'
+import { parseImportText } from '@/utils/importParse'
 import {
   type MailMessage,
   type FetchResult,
@@ -37,6 +37,11 @@ import {
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
 import { useTwoFaStore } from '@/stores/twofa'
 import { mapPool } from '@/utils/mapPool'
+import {
+  providerTimePaging,
+  supportsIncrementalSince,
+  supportsRemoteLoadOlder,
+} from '@/utils/providerCapabilities'
 import {
   brandLabel as brandLabelUtil,
   typeLabel as typeLabelUtil,
@@ -68,10 +73,15 @@ const copiedKey = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 const mailFolder = ref<'inbox' | 'spam' | 'sent'>('inbox')
 const fetchingId = ref<string | null>(null)
+/**
+ * Monotonic token for interactive (non-silent) fetches.
+ * Stale completions must not overwrite the panel after the user switches account.
+ */
+const fetchGeneration = ref(0)
 const batchBusy = ref(false)
 const showImportHelp = ref(false)
 const importCollapsed = ref(localStorage.getItem('openmail.importCollapsed') === '1')
-const importPlaceholderText = IMPORT_PLACEHOLDER
+const importPlaceholderText = computed(() => t('importParse.placeholder'))
 const importPreview = ref<string[]>([])
 const page = ref(1)
 const pageSize = ref(Number(localStorage.getItem('openmail.pageSize') || 5) || 5)
@@ -474,13 +484,18 @@ function errorMessage(e: unknown, fallback: string): string {
   return fallback
 }
 
-async function doCopy(key: string, text: string | undefined | null) {
+async function doCopy(
+  key: string,
+  text: string | undefined | null,
+  opts?: { secret?: boolean },
+) {
   const value = (text ?? '').trim()
   if (!value) return
   const ok = await copyText(value)
   if (ok) {
     copiedKey.value = key
-    flashMsg(t('common.copied'))
+    // Secrets copy full password/token while UI shows masked bullets — make that explicit.
+    flashMsg(opts?.secret ? t('console.copiedSecret') : t('common.copied'))
     window.setTimeout(() => {
       if (copiedKey.value === key) copiedKey.value = ''
     }, 1200)
@@ -501,13 +516,14 @@ function onCopyCell(
   key: string,
   text: string | undefined | null,
   acc?: MailAccount,
+  opts?: { secret?: boolean },
 ) {
   e.stopPropagation()
   if (acc) {
     accounts.select(acc.id)
     if (fetchingId.value !== acc.id) loadMessagesFromCache(acc)
   }
-  void doCopy(key, text)
+  void doCopy(key, text, opts)
 }
 
 function toggleRowActs(acc: MailAccount, e?: Event) {
@@ -851,6 +867,7 @@ async function confirmImportDrafts() {
         syncEnabled: importCloudPoll.value,
         statusByEmail,
       })
+      await accounts.flushPersist()
       await userSettings.loadPublicConfig()
       flashMsg(
         t('console.importResult', {
@@ -877,6 +894,7 @@ async function confirmImportDrafts() {
             ? q.max_local_accounts
             : undefined,
       })
+      await accounts.flushPersist()
       flashMsg(
         t('console.importResult', {
           created: result.created,
@@ -974,11 +992,15 @@ function toggleImportPanel() {
   if (!importCollapsed.value && sideW.value < 16) sideW.value = 22
 }
 
-function onClearLocal() {
+async function onClearLocal() {
   if (!window.confirm(t('console.clearLocalConfirm'))) return
-  accounts.clearAllLocalStorage()
-  messages.value = []
-  flashMsg(t('common.clear'))
+  try {
+    await accounts.clearAllLocalStorage()
+    messages.value = []
+    flashMsg(t('common.clear'))
+  } catch (error) {
+    flashMsg(errorMessage(error, t('console.fetchFailed')), 'danger')
+  }
 }
 
 
@@ -1027,59 +1049,65 @@ function onImportSystemFile(e: Event) {
   if (!file) return
   const reader = new FileReader()
   reader.onload = () => {
-    try {
-      const snap = parseSystemSnapshot(String(reader.result || ''))
-      // restore groups
-      if (snap.groups?.length) {
-        groups.value = snap.groups
-        saveGroups(snap.groups)
-      }
-      if (snap.importGroupId) accounts.importGroupId = snap.importGroupId
-      if (snap.settings) {
-        userSettings.s.retentionDays = snap.settings.retentionDays ?? 90
-        userSettings.s.lookbackDays = snap.settings.lookbackDays ?? 3
-        userSettings.s.firstFullDone = snap.settings.firstFullDone || {}
-        batchConcurrency.value = snap.settings.batchConcurrency || 10
-        codeMasked.value = snap.settings.codeMasked !== false
-        denseCols.value = !!snap.settings.denseCols
-      }
-      if (snap.licenseToken) setLicenseToken(snap.licenseToken)
-      if (snap.mailCache) {
-        mailCache.replaceAll(
-          snap.mailCache as Record<string, never[]>,
-          userSettings.s.retentionDays,
-        )
-      }
-      if (Array.isArray(snap.twofa) && snap.twofa.length) {
-        twofa.replaceAll(snap.twofa as import('@/stores/twofa').TwoFaEntry[])
-      }
-      // restore local accounts wholesale (respect unlicensed local quota when known)
-      const q = userSettings.quota
-      let restored = snap.accounts
-      let truncated = false
-      if (q && !q.licensed && q.max_local_accounts != null && q.max_local_accounts >= 0) {
-        if (restored.length > q.max_local_accounts) {
-          restored = restored.slice(0, q.max_local_accounts)
-          truncated = true
+    void (async () => {
+      try {
+        const snap = parseSystemSnapshot(String(reader.result || ''))
+        // restore groups
+        if (snap.groups?.length) {
+          groups.value = snap.groups
+          saveGroups(snap.groups)
         }
+        if (snap.importGroupId) accounts.importGroupId = snap.importGroupId
+        if (snap.settings) {
+          userSettings.s.retentionDays = snap.settings.retentionDays ?? 90
+          userSettings.s.lookbackDays = snap.settings.lookbackDays ?? 3
+          userSettings.s.firstFullDone = snap.settings.firstFullDone || {}
+          batchConcurrency.value = snap.settings.batchConcurrency || 10
+          codeMasked.value = snap.settings.codeMasked !== false
+          denseCols.value = !!snap.settings.denseCols
+        }
+        if (snap.licenseToken) setLicenseToken(snap.licenseToken)
+        if (snap.mailCache) {
+          mailCache.replaceAll(
+            snap.mailCache as Record<string, never[]>,
+            userSettings.s.retentionDays,
+          )
+        }
+        if (Array.isArray(snap.twofa) && snap.twofa.length) {
+          twofa.replaceAll(snap.twofa as import('@/stores/twofa').TwoFaEntry[])
+        }
+        // restore local accounts wholesale (respect unlicensed local quota when known)
+        const q = userSettings.quota
+        let restored = snap.accounts
+        let truncated = false
+        if (q && !q.licensed && q.max_local_accounts != null && q.max_local_accounts >= 0) {
+          if (restored.length > q.max_local_accounts) {
+            restored = restored.slice(0, q.max_local_accounts)
+            truncated = true
+          }
+        }
+        accounts.localAccounts.splice(0, accounts.localAccounts.length, ...restored)
+        await accounts.flushPersist()
+        await mailCache.flushPersist()
+        await twofa.flushPersist()
+        userSettings.flushPersist()
+        if (truncated) {
+          flashMsg(
+            t('console.quotaLocalExceeded', {
+              max: q!.max_local_accounts,
+              current: 0,
+              adding: snap.accounts.length,
+            }),
+            'danger',
+          )
+        } else {
+          flashMsg(t('console.importSystemDone', { n: restored.length }))
+        }
+      } catch {
+        flashMsg(t('console.importSystemFailed'), 'danger')
       }
-      accounts.localAccounts.splice(0, accounts.localAccounts.length, ...restored)
-      if (truncated) {
-        flashMsg(
-          t('console.quotaLocalExceeded', {
-            max: q!.max_local_accounts,
-            current: 0,
-            adding: snap.accounts.length,
-          }),
-          'danger',
-        )
-      } else {
-        flashMsg(t('console.importSystemDone', { n: restored.length }))
-      }
-    } catch (err) {
-      flashMsg(t('console.importSystemFailed'), 'danger')
-    }
-    input.value = ''
+      input.value = ''
+    })()
   }
   reader.readAsText(file)
 }
@@ -1168,10 +1196,33 @@ function toggleRevealCode(e: Event, id: string, code?: string) {
   void doCopy(`code-${id}`, code)
 }
 
-function applyFetchResult(acc: MailAccount, result: FetchResult) {
+/**
+ * Apply interactive fetch result to account status + mail panel.
+ * Returns false if the UI apply was aborted (stale generation / wrong account).
+ * Cache merge + markFetched still run when ok (so background work is durable),
+ * but panel updates are gated by gen/selectedId.
+ */
+function panelApplyAllowed(
+  opts: { expectedAccountId?: string; generation?: number } = {},
+): boolean {
+  const stillSelected =
+    opts.expectedAccountId == null || accounts.selectedId === opts.expectedAccountId
+  const genFresh =
+    opts.generation == null || opts.generation === fetchGeneration.value
+  return stillSelected && genFresh
+}
+
+async function applyFetchResult(
+  acc: MailAccount,
+  result: FetchResult,
+  opts: { expectedAccountId?: string; generation?: number } = {},
+): Promise<boolean> {
   const code = extractCode(result)
   const msgs = result.messages ?? []
-  lastFetchOk.value = result.ok !== false
+  // Initial gate (re-checked after each await)
+  if (panelApplyAllowed(opts)) {
+    lastFetchOk.value = result.ok !== false
+  }
   const patch: Partial<MailAccount> = {
     latestCode: code ?? acc.latestCode,
     status: result.ok === false ? 'error' : 'ok',
@@ -1194,61 +1245,75 @@ function applyFetchResult(acc: MailAccount, result: FetchResult) {
     patch.isApiSource = acc.isApiSource ?? !acc.parentApiId
     patch.apiMailboxes = mboxes
   }
-  void accounts.patchAccount(acc.id, patch)
+  await accounts.patchAccount(acc.id, patch)
   if (result.ok !== false && mboxes?.length && (acc.isApiSource || (!acc.parentApiId && acc.type === 'http_api'))) {
     accounts.syncApiMailboxes(acc.id, mboxes)
     // Auto-expand so newly discovered temp mailboxes are visible under the source
     if (!expandedApiSources.value.has(acc.id)) {
-      const next = new Set(expandedApiSources.value)
-      next.add(acc.id)
-      expandedApiSources.value = next
-      try {
-        localStorage.setItem('openmail.expandedApiSources', JSON.stringify([...next]))
-      } catch {
-        /* ignore */
-      }
+      setExpandedApiSource(acc.id)
     }
   }
   if (result.ok !== false) {
     try {
       // Tag folder so inbox/spam/sent tabs filter correctly
       const folderTag = mailCache.normalizeFolder(result.folder || mailFolder.value)
+      const uv =
+        result.uidvalidity != null && Number.isFinite(Number(result.uidvalidity))
+          ? Number(result.uidvalidity)
+          : undefined
       const tagged = msgs.map((m) => ({
         ...m,
         folder: mailCache.normalizeFolder(m.folder || folderTag),
+        uidvalidity: m.uidvalidity ?? uv,
       }))
       // Merge into durable local cache, then show full cached list
       // API source row: don't dump all mailboxes' mail into api@host cache unless no filter
       if (!acc.isApiSource || tagged.length) {
         mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+        // Immediate vault write (do not rely on debounce — refresh would lose mail)
+        await mailCache.flushPersist()
       }
-      userSettings.markFetched(
-        acc.email,
-        userSettings.needsFullFetch(acc.email) || tagged.length > 0,
-      )
-      // Preserve expanded list when appending older pages
-      loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
-      lastFetchEmpty.value = messages.value.length === 0
+      // Empty success still marks full for THIS folder (avoid re-full-fetch forever)
+      userSettings.markFetched(acc.email, true, folderTag)
+      userSettings.flushPersist()
+      if (panelApplyAllowed(opts)) {
+        // Preserve expanded list when appending older pages
+        loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
+        lastFetchEmpty.value = messages.value.length === 0
+      }
     } catch {
-      messages.value = msgs
-      selectedMessageId.value = msgs[0]?.id ?? null
-      lastFetchEmpty.value = msgs.length === 0
+      if (panelApplyAllowed(opts)) {
+        messages.value = msgs
+        selectedMessageId.value = msgs[0]?.id ?? null
+        lastFetchEmpty.value = msgs.length === 0
+      }
     }
   }
-  if (code) {
-    flashMsg(t('console.fetchGotCode', { code }))
-  } else if (result.ok === false && result.error) {
-    flashMsg(result.error, 'danger')
-  } else {
-    flashMsg(t('console.fetchDone', { n: msgs.length }))
+  if (panelApplyAllowed(opts)) {
+    if (code) {
+      flashMsg(t('console.fetchGotCode', { code }))
+    } else if (result.ok === false && result.error) {
+      flashMsg(result.error, 'danger')
+    } else {
+      flashMsg(t('console.fetchDone', { n: msgs.length }))
+    }
   }
+  return panelApplyAllowed(opts)
 }
 
-/**
- * Core fetch for one account.
- * When silent=true (batch): do not clobber global selection / message panel.
- * Returns true if fetch succeeded (ok !== false).
- */
+/** Expand API source row in the account list (shared by interactive + silent paths). */
+function setExpandedApiSource(id: string): Set<string> {
+  const next = new Set(expandedApiSources.value)
+  next.add(id)
+  expandedApiSources.value = next
+  try {
+    localStorage.setItem('openmail.expandedApiSources', JSON.stringify([...next]))
+  } catch {
+    /* ignore */
+  }
+  return next
+}
+
 /**
  * Resolve secrets for fetch: cloud list rows often lack password after reload;
  * merge matching local-vault row (same email) so proxy fetch still works.
@@ -1289,13 +1354,23 @@ type FetchOneOpts = {
   forceRecent?: boolean
 }
 
+/**
+ * Core fetch for one account.
+ * When silent=true (batch): do not clobber global selection / message panel.
+ * Returns true if fetch succeeded (ok !== false).
+ */
 async function fetchOne(
   acc: MailAccount,
   quick = true,
   opts: FetchOneOpts = {},
 ): Promise<boolean> {
   const silent = Boolean(opts.silent)
+  // Capture identity at start so a late response cannot clobber another account's panel
+  let gen = 0
+  const expectedAccountId = acc.id
   if (!silent) {
+    fetchGeneration.value += 1
+    gen = fetchGeneration.value
     fetchingId.value = acc.id
     mailLoading.value = true
     accounts.select(acc.id)
@@ -1305,22 +1380,30 @@ async function fetchOne(
     lastFetchOk.value = false
   }
   try {
-    if (opts.clearFirst) {
-      mailCache.clearMailbox(acc.email)
-      messages.value = []
-      selectedMessageId.value = null
-      mailVisibleCount.value = MAIL_FIRST_PAGE
-      mailNoMoreRemote.value = false
-    }
+    // Folder used for this request (silent batch uses inbox default / current tab)
     const folder = mailFolder.value
+    if (opts.clearFirst) {
+      // Only wipe the current folder tab — keep spam/sent/other cache intact
+      mailCache.clearMailboxFolder(acc.email, folder)
+      if (!silent && accounts.selectedId === expectedAccountId && gen === fetchGeneration.value) {
+        messages.value = []
+        selectedMessageId.value = null
+        mailVisibleCount.value = MAIL_FIRST_PAGE
+        mailNoMoreRemote.value = false
+      }
+    }
     // Manual / clear / first-full → recent window (no since).
-    // Silent batch may use since based on newest *mail* date only (see settings.sinceFor).
+    // Silent batch may use since based on newest *folder* mail date only (see settings.sinceFor).
+    // Cookie/HttpApi use local date filter (provider time_paging=local_filter).
     const wantRecent =
       Boolean(opts.forceRecent) ||
       Boolean(opts.clearFirst) ||
-      (!opts.before && userSettings.needsFullFetch(acc.email))
+      (!opts.before && userSettings.needsFullFetch(acc.email, folder))
+    const canSince = supportsIncrementalSince(acc)
     const since =
-      opts.before || wantRecent ? undefined : userSettings.sinceFor(acc.email)
+      opts.before || wantRecent || !canSince
+        ? undefined
+        : userSettings.sinceFor(acc.email, folder)
     const full = wantRecent && !opts.before
     const maxMessages =
       opts.maxMessages ??
@@ -1351,7 +1434,14 @@ async function fetchOne(
       src.serverId &&
       !src.clientSealed
     ) {
-      result = await fetchServerAccount(src.serverId, { folder, quick })
+      result = await fetchServerAccount(src.serverId, {
+        folder,
+        quick,
+        since: full || opts.before ? undefined : since || undefined,
+        before: opts.before || undefined,
+        maxMessages: maxMessages ?? MAIL_FIRST_PAGE,
+        full: Boolean(full),
+      })
     } else if (!hasLocalSecrets && src.clientSealed) {
       result = {
         ok: false,
@@ -1411,7 +1501,7 @@ async function fetchOne(
         Array.isArray((result.session_meta as { mailboxes?: string[] }).mailboxes)
           ? (result.session_meta as { mailboxes: string[] }).mailboxes
           : null)
-      void accounts.patchAccount(acc.id, {
+      await accounts.patchAccount(acc.id, {
         latestCode: code ?? acc.latestCode,
         status: result.ok === false ? 'error' : 'ok',
         lastError: result.ok === false ? result.error || t('console.fetchFailed') : undefined,
@@ -1432,51 +1522,67 @@ async function fetchOne(
       ) {
         accounts.syncApiMailboxes(acc.id, mboxes)
         if (!expandedApiSources.value.has(acc.id)) {
-          const next = new Set(expandedApiSources.value)
-          next.add(acc.id)
-          expandedApiSources.value = next
-          try {
-            localStorage.setItem('openmail.expandedApiSources', JSON.stringify([...next]))
-          } catch {
-            /* ignore */
-          }
+          setExpandedApiSource(acc.id)
         }
       }
-      if (result.ok !== false && msgs.length) {
+      // Empty success still marks full for THIS folder (avoid re-full-fetch forever)
+      if (result.ok !== false) {
         try {
-          const folderTag = mailCache.normalizeFolder(result.folder || mailFolder.value)
-          const tagged = msgs.map((m) => ({
-            ...m,
-            folder: mailCache.normalizeFolder(m.folder || folderTag),
-          }))
-          if (!acc.isApiSource || tagged.length) {
-            mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+          const folderTag = mailCache.normalizeFolder(result.folder || folder)
+          if (msgs.length) {
+            const uv =
+              result.uidvalidity != null && Number.isFinite(Number(result.uidvalidity))
+                ? Number(result.uidvalidity)
+                : undefined
+            const tagged = msgs.map((m) => ({
+              ...m,
+              folder: mailCache.normalizeFolder(m.folder || folderTag),
+              uidvalidity: m.uidvalidity ?? uv,
+            }))
+            if (!acc.isApiSource || tagged.length) {
+              mailCache.merge(acc.email, tagged, userSettings.s.retentionDays)
+              await mailCache.flushPersist()
+            }
           }
-          userSettings.markFetched(acc.email, true)
+          userSettings.markFetched(acc.email, true, folderTag)
+          userSettings.flushPersist()
         } catch {
           /* ignore */
         }
       }
+      // Never overwrite the right-hand mail panel for a different selected account
       return result.ok !== false
     }
 
-    applyFetchResult(acc, result)
+    // Stale interactive fetch: still durable-merge via apply, but panel gated
+    await applyFetchResult(acc, result, {
+      expectedAccountId,
+      generation: gen,
+    })
     return result.ok !== false
   } catch (e) {
-    void accounts.patchAccount(acc.id, {
+    await accounts.patchAccount(acc.id, {
       status: 'error',
       lastError: errorMessage(e, t('console.fetchFailed')),
     })
     if (!silent) {
-      if (!messages.value.length) loadMessagesFromCache(acc)
-      lastFetchOk.value = false
-      flashMsg(errorMessage(e, t('console.fetchFailed')), 'danger')
+      const mayUpdatePanel =
+        accounts.selectedId === expectedAccountId && gen === fetchGeneration.value
+      if (mayUpdatePanel) {
+        if (!messages.value.length) loadMessagesFromCache(acc)
+        lastFetchOk.value = false
+        flashMsg(errorMessage(e, t('console.fetchFailed')), 'danger')
+      }
     }
     return false
   } finally {
     if (!silent) {
-      fetchingId.value = null
-      mailLoading.value = false
+      // Only clear loading UI if this request still owns the interactive slot
+      if (gen === fetchGeneration.value) {
+        fetchingId.value = null
+        mailLoading.value = false
+      }
+      // else: a newer interactive fetch advanced the generation — leave its loading state alone
     }
   }
 }
@@ -1497,6 +1603,12 @@ async function onFetchSelected(quick = true) {
   })
 }
 
+function messageDedupeKey(m: Pick<MailMessage, 'id' | 'folder' | 'uidvalidity'>): string {
+  const f = mailCache.normalizeFolder(m.folder)
+  const uv = m.uidvalidity != null ? `v${m.uidvalidity}` : ''
+  return uv ? `${f}::${uv}::${m.id}` : `${f}::${m.id}`
+}
+
 /** Expand visible list from cache, or fetch older from server. */
 async function onLoadMoreMails() {
   const acc = selected.value
@@ -1514,13 +1626,14 @@ async function onLoadMoreMails() {
   }
   if (mailNoMoreRemote.value || mailLoadingMore.value || mailLoading.value) return
 
-  // 2) Pull older page from server (before oldest cached)
+  // 2) Pull older page: native since_before can use before=; local_filter falls back
+  // to a larger recent window so we do not pretend to have a stable remote cursor.
   const before =
     mailCache.oldestUtcIso(acc.email, mailFolder.value) ||
     messages.value[messages.value.length - 1]?.date ||
     undefined
-  if (!before) {
-    // No date anchor — try a larger recent window instead
+  if (!before || !supportsRemoteLoadOlder(acc)) {
+    // No date anchor or no time support — larger recent window
     mailLoadingMore.value = true
     try {
       const prevCount = messages.value.length
@@ -1529,6 +1642,7 @@ async function onLoadMoreMails() {
         maxMessages: Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE),
         forceRecent: true,
       })
+      if (accounts.selectedId !== acc.id) return
       if (messages.value.length <= prevCount) {
         mailNoMoreRemote.value = true
         flashMsg(t('console.mailNoMore'), 'danger')
@@ -1546,7 +1660,7 @@ async function onLoadMoreMails() {
 
   mailLoadingMore.value = true
   try {
-    const prevIds = new Set(messages.value.map((m) => m.id))
+    const prevKeys = new Set(messages.value.map(messageDedupeKey))
     const prevCount = messages.value.length
     const ok = await fetchOne(acc, true, {
       silent: false,
@@ -1554,8 +1668,30 @@ async function onLoadMoreMails() {
       maxMessages: MAIL_LOAD_MORE,
     })
     if (!ok) return
-    const added = messages.value.filter((m) => !prevIds.has(m.id)).length
+    if (accounts.selectedId !== acc.id) return
+    const added = messages.value.filter((m) => !prevKeys.has(messageDedupeKey(m))).length
     if (added === 0 && messages.value.length <= prevCount) {
+      // local_filter (cookie/http_api): before-filter often returns 0 even when
+      // more mail exists — try one larger forceRecent window before EOF.
+      if (providerTimePaging(acc.type) === 'local_filter') {
+        const growTarget = Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE * 2)
+        await fetchOne(acc, false, {
+          silent: false,
+          maxMessages: growTarget,
+          forceRecent: true,
+        })
+        if (accounts.selectedId !== acc.id) return
+        if (messages.value.length <= prevCount) {
+          mailNoMoreRemote.value = true
+          flashMsg(t('console.mailNoMore'), 'danger')
+        } else {
+          mailVisibleCount.value = Math.min(
+            messages.value.length,
+            mailVisibleCount.value + MAIL_LOAD_MORE,
+          )
+        }
+        return
+      }
       mailNoMoreRemote.value = true
       flashMsg(t('console.mailNoMore'), 'danger')
     } else {
@@ -1564,7 +1700,6 @@ async function onLoadMoreMails() {
         Math.max(mailVisibleCount.value + Math.max(added, MAIL_LOAD_MORE), mailVisibleCount.value + 1),
       )
       if (added === 0) {
-        // Merge may have refreshed same ids — still grow window if cache grew somehow
         mailVisibleCount.value = Math.min(
           messages.value.length,
           mailVisibleCount.value + MAIL_LOAD_MORE,
@@ -1722,7 +1857,10 @@ function persistGroups() {
 }
 
 function groupName(id?: string) {
-  const g = groups.value.find((x) => x.id === (id || DEFAULT_GROUP_ID))
+  const gid = id || DEFAULT_GROUP_ID
+  // Always localize the built-in default group (stored name may be Chinese from older builds)
+  if (gid === DEFAULT_GROUP_ID) return t('console.groupDefault')
+  const g = groups.value.find((x) => x.id === gid)
   return g?.name || t('console.groupDefault')
 }
 
@@ -1779,7 +1917,7 @@ function saveRenameGroup() {
   editingGroupName.value = ''
 }
 
-function removeGroup(id: string) {
+async function removeGroup(id: string) {
   if (id === DEFAULT_GROUP_ID) {
     flashMsg(t('console.groupCannotDeleteDefault'), 'danger')
     return
@@ -1789,9 +1927,8 @@ function removeGroup(id: string) {
   if (!window.confirm(t('console.groupDeleteConfirm', { name: g.name }))) return
   groups.value = groups.value.filter((x) => x.id !== id)
   persistGroups()
-  for (const a of accounts.accounts) {
-    if (a.groupId === id) void accounts.patchAccount(a.id, { groupId: DEFAULT_GROUP_ID })
-  }
+  const moveIds = accounts.accounts.filter((a) => a.groupId === id).map((a) => a.id)
+  if (moveIds.length) await accounts.moveToGroup(moveIds, DEFAULT_GROUP_ID)
   if (accounts.filterGroup === id) accounts.filterGroup = 'all'
   if (accounts.importGroupId === id) accounts.importGroupId = DEFAULT_GROUP_ID
 }
@@ -1826,8 +1963,9 @@ async function saveEdit() {
   const f = editForm.value
   if (!f.id) return
   const patch: Partial<MailAccount> = {
-    note: f.note || undefined,
-    proxy: f.proxy?.trim() || undefined,
+    // Empty string (not undefined) so clear dual-writes and survives refresh
+    note: (f.note || '').trim() ? f.note.trim() : '',
+    proxy: f.proxy?.trim() ? f.proxy.trim() : '',
     groupId: f.groupId || DEFAULT_GROUP_ID,
     status: 'unknown',
     lastError: undefined,
@@ -1891,7 +2029,8 @@ async function deleteOne(acc: MailAccount) {
 }
 
 async function patchAccountNote(acc: MailAccount, note: string) {
-  await accounts.patchAccount(acc.id, { note: note || undefined })
+  // Keep empty string (not undefined) so clear is durable and dual-writes to cloud
+  await accounts.patchAccount(acc.id, { note: note.trim() ? note : '' })
 }
 
 function openSend(acc?: MailAccount | null) {
@@ -1960,9 +2099,9 @@ async function doSend() {
   }
 }
 
-function onMoveGroup() {
+async function onMoveGroup() {
   if (!moveGroupId.value || !accounts.selectedIds.size) return
-  accounts.moveToGroup([...accounts.selectedIds], moveGroupId.value)
+  await accounts.moveToGroup([...accounts.selectedIds], moveGroupId.value)
   flashMsg(t('console.groupMove'))
   moveGroupId.value = ''
 }
@@ -2101,10 +2240,27 @@ watch(
   },
 )
 
+// Surface dual-write failures (local vault kept; cloud lagging)
+watch(
+  () => accounts.lastCloudSyncError,
+  (msg) => {
+    if (!msg) return
+    flashMsg(t('console.cloudSyncFailed', { detail: msg }), 'danger')
+  },
+)
+
 watch(
   () => accounts.selectedId,
   (id) => {
-    if (!id || fetchingId.value) return
+    // Always show the newly selected account's cache immediately — even if a
+    // fetch for another (or previous) account is still in flight. Stale apply
+    // is gated by fetchGeneration / expectedAccountId.
+    if (!id) return
+    // Drop loading chrome for a different account so the new selection is usable
+    if (fetchingId.value && fetchingId.value !== id) {
+      fetchingId.value = null
+      mailLoading.value = false
+    }
     const acc = accounts.findById(id)
     if (acc) loadMessagesFromCache(acc)
   },
@@ -2539,7 +2695,11 @@ onUnmounted(() => {
                         acc.type === 'oauth' && (!acc.refreshToken || !acc.clientId),
                     }"
                     :title="t('console.clickToCopySecret')"
-                    @click="onCopyCell($event, `sec-${acc.id}`, copyableSecret(acc), acc)"
+                    @click="
+                      onCopyCell($event, `sec-${acc.id}`, copyableSecret(acc), acc, {
+                        secret: true,
+                      })
+                    "
                   >
                     {{ secretHint(acc) }}
                   </button>

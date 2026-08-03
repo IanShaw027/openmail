@@ -1,4 +1,4 @@
-/** Device transfer (QR) API — server holds opaque ciphertext only. */
+/** Device transfer API. AES key stays in the QR URL fragment, outside requests. */
 
 import { apiRequest } from '@/api/client'
 

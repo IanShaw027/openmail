@@ -1,6 +1,7 @@
 /** Local-first 2FA (TOTP/HOTP) store. */
 
 import { defineStore } from 'pinia'
+import { useVaultStore } from '@/stores/vault'
 import { computed, ref, watch } from 'vue'
 import {
   type TotpAlgorithm,
@@ -102,19 +103,30 @@ export const useTwoFaStore = defineStore('twofa', () => {
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
   async function persistEncrypted() {
+    const vault = useVaultStore()
+    if (vault.status !== 'unlocked') return
+    await vault.saveTwoFa(entries.value)
     try {
-      const { useVaultStore } = await import('@/stores/vault')
-      const vault = useVaultStore()
-      if (vault.status !== 'unlocked') return
-      await vault.saveTwoFa(entries.value)
-      try {
-        localStorage.removeItem(STORAGE_KEY)
-      } catch {
-        /* ignore */
-      }
+      localStorage.removeItem(STORAGE_KEY)
     } catch {
-      /* locked */
+      /* ignore */
     }
+  }
+
+  function persistInBackground(): void {
+    void flushPersist().catch((error) => {
+      console.warn('[openmail] 2FA vault persist failed', error)
+    })
+  }
+
+  /** Cancel debounce and write vault immediately (pagehide). */
+  async function flushPersist(): Promise<void> {
+    if (persistTimer) {
+      clearTimeout(persistTimer)
+      persistTimer = null
+    }
+    if (!vaultHydrated.value) return
+    await persistEncrypted()
   }
 
   watch(
@@ -123,15 +135,17 @@ export const useTwoFaStore = defineStore('twofa', () => {
       if (!vaultHydrated.value) return
       if (persistTimer) clearTimeout(persistTimer)
       persistTimer = setTimeout(() => {
-        void persistEncrypted()
-      }, 200)
+        persistTimer = null
+        void persistEncrypted().catch((error) => {
+          console.warn('[openmail] 2FA vault persist failed', error)
+        })
+      }, 80)
     },
     { deep: true },
   )
 
   async function hydrateFromVault(): Promise<void> {
     try {
-      const { useVaultStore } = await import('@/stores/vault')
       const vault = useVaultStore()
       if (vault.status !== 'unlocked') {
         entries.value = []
@@ -206,6 +220,7 @@ export const useTwoFaStore = defineStore('twofa', () => {
       sortOrder: extra?.sortOrder ?? nextSortOrder(),
     })
     entries.value = [...entries.value, entry]
+    persistInBackground()
     return entry
   }
 
@@ -258,6 +273,7 @@ export const useTwoFaStore = defineStore('twofa', () => {
         }
       })
       .filter(Boolean) as TwoFaEntry[]
+    persistInBackground()
   }
 
   function addFromUri(uri: string, extra?: Partial<TwoFaEntry>): TwoFaEntry | null {
@@ -278,9 +294,12 @@ export const useTwoFaStore = defineStore('twofa', () => {
         fail += 1
         continue
       }
-      addFromDraft(d)
+      // defer vault write to one flush at end
+      const entry = draftToEntry(d, { sortOrder: nextSortOrder() })
+      entries.value = [...entries.value, entry]
       ok += 1
     }
+    if (ok) persistInBackground()
     return { ok, fail }
   }
 
@@ -292,10 +311,12 @@ export const useTwoFaStore = defineStore('twofa', () => {
     const list = [...entries.value]
     list[i] = next
     entries.value = list
+    persistInBackground()
   }
 
   function remove(id: string) {
     entries.value = entries.value.filter((e) => e.id !== id)
+    persistInBackground()
   }
 
   function bindAccount(id: string, accountId: string | undefined, accountEmail?: string) {
@@ -364,6 +385,7 @@ export const useTwoFaStore = defineStore('twofa', () => {
 
   function replaceAll(list: TwoFaEntry[]) {
     entries.value = normalizeEntries(list)
+    persistInBackground()
   }
 
   return {
@@ -390,5 +412,6 @@ export const useTwoFaStore = defineStore('twofa', () => {
     replaceAll,
     hydrateFromVault,
     clearSecrets,
+    flushPersist,
   }
 })

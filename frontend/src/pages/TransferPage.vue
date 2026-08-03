@@ -51,6 +51,7 @@ const guestHint = ref('')
 const qrDataUrl = ref('')
 const codeInput = ref('')
 const overwriteAck = ref(false)
+const transferKey = ref('')
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let stream: MediaStream | null = null
@@ -101,7 +102,7 @@ async function makeQrPng(text: string): Promise<string> {
   }
 }
 
-async function buildEncryptedBlob(): Promise<string> {
+async function buildEncryptedBlob(): Promise<{ blob: string; key: string }> {
   if (vault.status !== 'unlocked') throw new Error(t('transfer.needUnlock'))
   const snap = buildSystemSnapshot({
     accounts: accounts.accounts.map((a) => ({ ...a })),
@@ -119,15 +120,8 @@ async function buildEncryptedBlob(): Promise<string> {
     mailCache: { ...mailCache.byEmail },
     twofa: twofa.entries.map((e) => ({ ...e })),
   })
-  // Re-encrypt under a one-time transfer passphrase derived from claim-less random
-  // so host vault key is not required on guest. Guest imports as raw JSON after
-  // server delivery — blob is AES-GCM with random key embedded in envelope for
-  // transit only (server never sees key if we use envelope encryption client-side).
-  //
-  // Simpler safe approach for v1: snapshot is already secrets-in-JSON; wrap with
-  // WebCrypto AES-GCM random key + wrap key with transfer password shown once.
-  // Even simpler for UX: encrypt with host vault sealForCloud style random DEK
-  // stored only inside the package header for this transfer.
+  // The server receives only IV + ciphertext. The one-time key travels in the
+  // QR URL fragment, which browsers do not send in HTTP requests.
   const raw = JSON.stringify(snap)
   const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
     'encrypt',
@@ -144,10 +138,12 @@ async function buildEncryptedBlob(): Promise<string> {
     v: 1,
     alg: 'AES-GCM-256',
     iv: b64(iv),
-    key: b64(new Uint8Array(rawKey)),
     ct: b64(new Uint8Array(ct)),
   }
-  return btoa(unescape(encodeURIComponent(JSON.stringify(envelope))))
+  return {
+    blob: btoa(unescape(encodeURIComponent(JSON.stringify(envelope)))),
+    key: b64(new Uint8Array(rawKey)),
+  }
 }
 
 function b64(u8: Uint8Array): string {
@@ -165,17 +161,16 @@ function unb64(s: string): ArrayBuffer {
   return out.buffer
 }
 
-async function decryptBlob(blobB64: string): Promise<SystemSnapshot> {
+async function decryptBlob(blobB64: string, rawKeyB64: string): Promise<SystemSnapshot> {
   const envelope = JSON.parse(decodeURIComponent(escape(atob(blobB64)))) as {
     v: number
     iv: string
-    key: string
     ct: string
   }
-  if (envelope.v !== 1) throw new Error('bad envelope')
+  if (envelope.v !== 1 || !rawKeyB64) throw new Error('missing transfer key')
   const key = await crypto.subtle.importKey(
     'raw',
-    unb64(envelope.key),
+    unb64(rawKeyB64),
     { name: 'AES-GCM' },
     false,
     ['decrypt'],
@@ -208,6 +203,11 @@ async function applySnapshotOverwrite(snap: SystemSnapshot) {
     userSettings.s.lookbackDays = snap.settings.lookbackDays
     userSettings.s.firstFullDone = { ...snap.settings.firstFullDone }
   }
+  // Snapshot overwrite must hit vault before any refresh
+  await accounts.flushPersist()
+  await twofa.flushPersist()
+  await mailCache.flushPersist()
+  userSettings.flushPersist()
 }
 
 async function startAsHost(dir: TransferDirection) {
@@ -216,9 +216,10 @@ async function startAsHost(dir: TransferDirection) {
   mode.value = 'host'
   direction.value = dir
   try {
-    const blob = await buildEncryptedBlob()
+    const encrypted = await buildEncryptedBlob()
+    transferKey.value = encrypted.key
     const out = await transferCreate({
-      blob,
+      blob: encrypted.blob,
       host_device_id: getDeviceId(),
       direction: dir,
       label: dir === 'to_guest' ? t('transfer.labelToMobile') : t('transfer.labelToPc'),
@@ -227,7 +228,7 @@ async function startAsHost(dir: TransferDirection) {
     claimToken.value = out.claim_token
     expiresAt.value = out.expires_at
     status.value = 'pending'
-    const url = `${window.location.origin}${out.qr_path}&role=guest`
+    const url = `${window.location.origin}${out.qr_path}&role=guest#key=${encodeURIComponent(encrypted.key)}`
     qrDataUrl.value = await makeQrPng(url)
     stopPoll()
     pollTimer = setInterval(() => void pollHost(), 2000)
@@ -286,6 +287,16 @@ async function hostApprove(ok: boolean) {
 
 async function startAsGuest(inputCode?: string) {
   err.value = ''
+  const rawInput = (inputCode || codeInput.value || code.value).trim()
+  if (!inputCode && rawInput.includes('://')) {
+    try {
+      const link = new URL(rawInput)
+      transferKey.value = new URLSearchParams(link.hash.slice(1)).get('key') || ''
+      codeInput.value = link.searchParams.get('code') || ''
+    } catch {
+      /* validation below reports the invalid value */
+    }
+  }
   const c = (inputCode || codeInput.value || code.value).trim().toUpperCase()
   if (c.length < 6) {
     err.value = t('transfer.needCode')
@@ -293,6 +304,10 @@ async function startAsGuest(inputCode?: string) {
   }
   if (!overwriteAck.value) {
     err.value = t('transfer.needOverwriteAck')
+    return
+  }
+  if (!transferKey.value) {
+    err.value = t('transfer.missingKey')
     return
   }
   busy.value = true
@@ -336,7 +351,7 @@ async function finishGuestDownload() {
   err.value = ''
   try {
     const dl = await transferDownload({ code: code.value, guest_device_id: getDeviceId() })
-    const snap = await decryptBlob(dl.blob)
+    const snap = await decryptBlob(dl.blob, transferKey.value)
     await applySnapshotOverwrite(snap)
     status.value = 'consumed'
     flashMsg(t('transfer.importDone'))
@@ -391,6 +406,12 @@ function scanLoop() {
       if (codeHit?.data) {
         const m = codeHit.data.match(/code=([A-Z0-9]{6,16})/i)
         if (m) {
+          try {
+            const scanned = new URL(codeHit.data)
+            transferKey.value = new URLSearchParams(scanned.hash.slice(1)).get('key') || ''
+          } catch {
+            transferKey.value = ''
+          }
           codeInput.value = m[1]!.toUpperCase()
           stopCamera()
           void startAsGuest(m[1])
@@ -403,6 +424,7 @@ function scanLoop() {
 }
 
 onMounted(() => {
+  transferKey.value = new URLSearchParams(window.location.hash.slice(1)).get('key') || ''
   const q = String(route.query.code || '').trim().toUpperCase()
   if (q) {
     codeInput.value = q
@@ -494,7 +516,6 @@ onUnmounted(() => {
         v-model="codeInput"
         class="input"
         type="text"
-        maxlength="16"
         :placeholder="t('transfer.codePh')"
         autocomplete="off"
       />

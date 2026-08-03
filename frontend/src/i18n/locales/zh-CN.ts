@@ -71,6 +71,7 @@ export default {
     errEmptyRecovery: '请输入恢复密钥',
     errBadPassword: '密码错误',
     errBadRecovery: '恢复密钥无效',
+    errCorruptData: '加密保险库数据已损坏。请从可靠备份恢复，或重置本地数据。',
     errCreate: '创建失败，请重试',
     lockMinutes: '闲置自动锁定（分钟，0=不自动锁）',
     lockNow: '立即锁定（下次需重新输入密码）',
@@ -184,7 +185,8 @@ export default {
     scanQr: '摄像头扫码',
     stopCamera: '关闭摄像头',
     cameraDenied: '无法使用摄像头',
-    codePh: '输入 8 位配对码',
+    codePh: '粘贴完整的安全迁移链接',
+    missingKey: '缺少一次性加密密钥，请扫描或粘贴完整的安全迁移链接。',
     importDone: '数据已覆盖导入',
     labelToMobile: 'PC → 手机',
     labelToPc: '手机 → PC',
@@ -302,7 +304,8 @@ export default {
     codeBanner: '验证码：{code}',
     clickToCopy: '点击复制',
     clickToCopyTip: '单元格可点复制',
-    clickToCopySecret: '点击复制完整导入行',
+    clickToCopySecret: '点击将复制完整密钥/导入行（界面为掩码）',
+    copiedSecret: '已复制密钥（完整内容）',
     importHintShort: '粘贴账号行 → 导入 · 点单元格复制 · 点「取件」拉信',
     colHost: '主机 / API',
     colSecret: '凭证',
@@ -462,6 +465,12 @@ export default {
     importTxt: '导入 TXT',
     clearInput: '清空输入',
     importResult: '新建 {created} · 更新 {updated} · 无效 {invalid}',
+    importWarnSkipOk: '跳过 {n} 个状态正常的已有账号（未覆盖）',
+    importWarnQuotaBlocked:
+      '配额限制：未导入 {n} 个新账号（本机上限 {max}，可配置 LICENSE 解除）',
+    importWarnSkipOkCloud: '跳过 {n} 个状态正常的已有云端账号',
+    importWarnCloudFailed: '云端失败 {n} 个',
+    apiTempMailboxNote: '临时邮箱',
     filterTitle: '筛选',
     filterSearch: '搜索邮箱 / 验证码 / 备注 / 错误…',
     filterTag: '标签',
@@ -629,6 +638,49 @@ export default {
     quotaLocalExceeded:
       '本机账号配额已满：当前 {current} 个，本次拟新增 {adding} 个（上限 {max}）。请在设置中填写授权令牌，或提高 QUOTA_MAX_LOCAL_ACCOUNTS。',
   },
+  importParse: {
+    httpApiSourceNoKey: 'HttpApi 源 · {host} · 无密钥',
+    httpApiSourceExpand: 'HttpApi 源 · {host}{secret}（取件后展开临时邮箱）',
+    httpApiMailbox: 'HttpApi · {email}{secret}',
+    secretSuffix: ' · 密钥',
+    noKeySuffix: ' · 无密钥',
+    withKeySuffix: ' · 已带密钥',
+    noteCfTemp: 'CF 临时邮箱 · {host}',
+    noteCfApi: 'CF/API · {host}',
+    noteWithKey: 'CF/API · {host} · 密钥',
+    noteCfTempWithKey: 'CF 临时邮箱 · {host} · 密钥',
+    noteApiKeySaved: 'API 密钥已保存',
+    cfTempLabel: 'CF 临时邮箱',
+    httpApiSourceLabel: 'HttpApi 源',
+    emptyOrComment: '空行或注释',
+    invalidImapEmail: 'IMAP 行邮箱格式无效',
+    noEmail: '未识别到邮箱地址',
+    msOauthOk: '微软 OAuth · {email} · client_id 与 refresh_token 已自动识别',
+    msOauthOrder:
+      '已识别顺序为 password----client_id----refresh_token（兼容 mail-public 对调）',
+    msMissingTokens:
+      '微软邮箱缺少 refresh_token / client_id，仅密码无法 Graph 取信；若用 IMAP 请写明主机 outlook.office365.com',
+    imapSmtp:
+      'IMAP+SMTP · {email} · 收 {imapHost}:993 · 发 {smtpHost}:{smtpPort}',
+    imapSmtpWarn:
+      '已同时保存 IMAP（取信）与 SMTP（发信）。非常规域名请核对主机名；Gmail 请用应用专用密码。',
+    gmailAppPass: 'Gmail 应用专用密码 · IMAP imap.gmail.com · SMTP smtp.gmail.com',
+    mailcomCookie: 'mail.com Cookie 会话 · {email}',
+    mailcomCookieWarn:
+      '首次取信将使用密码登录并缓存 cookies；站点改版可能导致失败。',
+    msNeedOauth:
+      '{domain} 需要微软 OAuth（client_id + refresh_token），仅密码无法 Graph 取信',
+    imapWithSmtp: 'IMAP · {email} · {host}:993 · SMTP {smtpHost}:{smtpPort}',
+    imapOnly: 'IMAP · {email} · {host}:993',
+    imapHost: 'IMAP · {email} · {host}',
+    cookieWebmail:
+      'Cookie/网页邮 · {email}（未匹配默认 IMAP，将按 cookie 处理）',
+    cookieUnknownWarn:
+      '未知域名：若为 QQ/163 请用授权码；若为 Gmail 请用应用专用密码。',
+    unrecognized: '无法识别格式，请查看导入说明中的示例',
+    placeholder:
+      '粘贴账号，一行一个…\n\nuser@outlook.com----密码----client_id----M.refresh_token\nuser@gmail.com----应用专用密码\nname@mail.com----password\n# CF Worker 无密钥\nhttps://mail-api.example.workers.dev\n# CF Worker 有密钥\nhttps://mail-api.example.workers.dev----你的admin密钥\n',
+  },
   settings: {
     title: '设置',
     subtitle: '取件策略、保留与设备授权（无用户登录）',
@@ -714,6 +766,7 @@ export default {
       '按账号开启同步后，OpenMail 会定期索引邮件，供「我的邮件」搜索。也可随时手动触发一次同步。',
     syncTriggered: '已开始同步',
     syncFailed: '同步失败',
+    cloudSyncFailed: '云端同步失败（本机已保存）：{detail}',
     syncUnavailable: '本实例暂未提供同步接口',
     syncEnabled: '已开启同步',
     syncDisabled: '已关闭同步',

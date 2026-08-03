@@ -85,10 +85,13 @@ async function onUnlock() {
     }
     await hydrateStores()
   } catch (e) {
-    error.value =
-      e instanceof VaultCryptoError && e.message === 'bad_recovery'
-        ? t('vault.errBadRecovery')
-        : t('vault.errBadPassword')
+    if (e instanceof VaultCryptoError && e.message === 'corrupt_data') {
+      error.value = t('vault.errCorruptData')
+    } else if (e instanceof VaultCryptoError && e.message === 'bad_recovery') {
+      error.value = t('vault.errBadRecovery')
+    } else {
+      error.value = t('vault.errBadPassword')
+    }
   }
 }
 

@@ -74,6 +74,7 @@ export default {
     errEmptyRecovery: 'Enter your recovery key',
     errBadPassword: 'Wrong password',
     errBadRecovery: 'Invalid recovery key',
+    errCorruptData: 'Encrypted vault data is damaged. Restore from a known-good backup or reset local data.',
     errCreate: 'Could not create vault',
     lockMinutes: 'Idle auto-lock (minutes, 0 = never)',
     lockNow: 'Lock now (password required next time)',
@@ -187,7 +188,8 @@ export default {
     scanQr: 'Scan with camera',
     stopCamera: 'Stop camera',
     cameraDenied: 'Camera unavailable',
-    codePh: '8-character code',
+    codePh: 'Paste the secure transfer link',
+    missingKey: 'The one-time encryption key is missing. Scan or paste the secure transfer link.',
     importDone: 'Data imported (overwrite)',
     labelToMobile: 'PC → phone',
     labelToPc: 'Phone → PC',
@@ -305,7 +307,8 @@ export default {
     codeBanner: 'Code: {code}',
     clickToCopy: 'Click to copy',
     clickToCopyTip: 'Click any cell to copy',
-    clickToCopySecret: 'Click to copy full import line',
+    clickToCopySecret: 'Click copies the full secret / import line (UI shows masked)',
+    copiedSecret: 'Copied full secret',
     importHintShort: 'Paste lines → import · click cells to copy · Fetch to load mail',
     colHost: 'Host / API',
     colSecret: 'Secret',
@@ -465,6 +468,12 @@ export default {
     importTxt: 'Import TXT',
     clearInput: 'Clear input',
     importResult: 'Created {created} · Updated {updated} · Invalid {invalid}',
+    importWarnSkipOk: 'Skipped {n} healthy existing account(s) (not overwritten)',
+    importWarnQuotaBlocked:
+      'Quota: {n} new account(s) not imported (local max {max}; set LICENSE to unlock)',
+    importWarnSkipOkCloud: 'Skipped {n} healthy existing cloud account(s)',
+    importWarnCloudFailed: 'Cloud failed for {n} account(s)',
+    apiTempMailboxNote: 'Temp mailbox',
     filterTitle: 'Filters',
     filterSearch: 'Search email / code / note / error…',
     filterTag: 'Tag',
@@ -633,6 +642,49 @@ export default {
     quotaLocalExceeded:
       'Local account quota exceeded: {current} stored, trying to add {adding} new (max {max}). Set a license token in Settings or raise QUOTA_MAX_LOCAL_ACCOUNTS.',
   },
+  importParse: {
+    httpApiSourceNoKey: 'HttpApi source · {host} · no secret',
+    httpApiSourceExpand: 'HttpApi source · {host}{secret} (expand temp mailboxes after fetch)',
+    httpApiMailbox: 'HttpApi · {email}{secret}',
+    secretSuffix: ' · secret',
+    noKeySuffix: ' · no secret',
+    withKeySuffix: ' · with secret',
+    noteCfTemp: 'CF temp mail · {host}',
+    noteCfApi: 'CF/API · {host}',
+    noteWithKey: 'CF/API · {host} · key',
+    noteCfTempWithKey: 'CF temp mail · {host} · key',
+    noteApiKeySaved: 'API key saved',
+    cfTempLabel: 'CF temp mail',
+    httpApiSourceLabel: 'HttpApi source',
+    emptyOrComment: 'Empty line or comment',
+    invalidImapEmail: 'Invalid email on IMAP line',
+    noEmail: 'No email address recognized',
+    msOauthOk: 'Microsoft OAuth · {email} · client_id and refresh_token detected',
+    msOauthOrder:
+      'Detected order password----client_id----refresh_token (mail-public swap compatible)',
+    msMissingTokens:
+      'Microsoft mailbox missing refresh_token / client_id; password alone cannot Graph-fetch. For IMAP set host outlook.office365.com',
+    imapSmtp:
+      'IMAP+SMTP · {email} · in {imapHost}:993 · out {smtpHost}:{smtpPort}',
+    imapSmtpWarn:
+      'Saved both IMAP (receive) and SMTP (send). Check hostnames for custom domains; Gmail needs an app password.',
+    gmailAppPass: 'Gmail app password · IMAP imap.gmail.com · SMTP smtp.gmail.com',
+    mailcomCookie: 'mail.com cookie session · {email}',
+    mailcomCookieWarn:
+      'First fetch logs in with password and caches cookies; site changes may break this.',
+    msNeedOauth:
+      '{domain} requires Microsoft OAuth (client_id + refresh_token); password alone cannot Graph-fetch',
+    imapWithSmtp: 'IMAP · {email} · {host}:993 · SMTP {smtpHost}:{smtpPort}',
+    imapOnly: 'IMAP · {email} · {host}:993',
+    imapHost: 'IMAP · {email} · {host}',
+    cookieWebmail:
+      'Cookie/webmail · {email} (no default IMAP; treating as cookie)',
+    cookieUnknownWarn:
+      'Unknown domain: use authorization code for QQ/163; app password for Gmail.',
+    unrecognized: 'Unrecognized format — see import help examples',
+    placeholder:
+      'Paste one account per line…\n\nuser@outlook.com----password----client_id----M.refresh_token\nuser@gmail.com----app-password\nname@mail.com----password\n# CF Worker no secret\nhttps://mail-api.example.workers.dev\n# CF Worker with secret\nhttps://mail-api.example.workers.dev----your-admin-secret\n',
+  },
   settings: {
     title: 'Settings',
     subtitle: 'Fetch policy, retention, device license (no user login)',
@@ -719,6 +771,7 @@ export default {
       'Enable sync per account so OpenMail periodically indexes mail for My Mail search. You can also trigger a sync now.',
     syncTriggered: 'Sync started',
     syncFailed: 'Sync failed',
+    cloudSyncFailed: 'Cloud sync failed (saved locally): {detail}',
     syncUnavailable: 'Sync endpoint is not available on this instance yet',
     syncEnabled: 'Sync enabled',
     syncDisabled: 'Sync disabled',

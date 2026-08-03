@@ -77,16 +77,108 @@ const ALLOWED_ATTRS = new Set([
   'dir',
 ])
 
-/** Strip dangerous CSS from style attribute. */
+/** Allowlisted CSS properties for email inline styles. */
+const ALLOWED_STYLE_PROPS = new Set([
+  'color',
+  'background-color',
+  'font-size',
+  'font-weight',
+  'font-style',
+  'font-family',
+  'text-align',
+  'text-decoration',
+  'margin',
+  'margin-top',
+  'margin-right',
+  'margin-bottom',
+  'margin-left',
+  'padding',
+  'padding-top',
+  'padding-right',
+  'padding-bottom',
+  'padding-left',
+  'border',
+  'border-top',
+  'border-right',
+  'border-bottom',
+  'border-left',
+  'border-color',
+  'border-width',
+  'border-style',
+  'border-radius',
+  'width',
+  'height',
+  'max-width',
+  'max-height',
+  'min-width',
+  'min-height',
+  'line-height',
+  'display',
+  'vertical-align',
+  'white-space',
+  'word-break',
+  'overflow-wrap',
+  'letter-spacing',
+  'text-indent',
+  'opacity',
+])
+
+const ALLOWED_DISPLAY = new Set(['block', 'inline', 'inline-block'])
+
+/**
+ * Strip dangerous CSS from style attribute.
+ * Allowlist properties; block url(), expression, position, and script schemes.
+ */
 function sanitizeStyle(style: string): string {
-  let s = style
-  // expression(), url(javascript:), -moz-binding, behavior
-  s = s.replace(/expression\s*\(/gi, '')
-  s = s.replace(/url\s*\(\s*['"]?\s*javascript\s*:/gi, 'url(')
-  s = s.replace(/-moz-binding/gi, '')
-  s = s.replace(/behavior\s*:/gi, '')
-  s = s.replace(/@import/gi, '')
-  return s
+  if (!style || typeof style !== 'string') return ''
+
+  // Collapse CSS escape sequences that hide keywords (e.g. expr\ession, \75rl)
+  let s = style.replace(/\\[0-9a-fA-F]{1,6}\s?/g, '').replace(/\\./g, '')
+
+  // Strip high-risk tokens; remaining declarations go through the property allowlist
+  s = s.replace(/expression\s*\([^)]*\)?/gi, '')
+  s = s.replace(/url\s*\([^)]*\)?/gi, '')
+  s = s.replace(/@import[^;]*/gi, '')
+  s = s.replace(/-moz-binding\s*:[^;]*/gi, '')
+  s = s.replace(/behavior\s*:[^;]*/gi, '')
+  s = s.replace(/javascript\s*:/gi, '')
+  s = s.replace(/vbscript\s*:/gi, '')
+  s = s.replace(/data\s*:/gi, '')
+  // Drop positioning (overlay / clickjack risk in email HTML)
+  s = s.replace(/position\s*:[^;]*/gi, '')
+
+  const kept: string[] = []
+  for (const part of s.split(';')) {
+    const decl = part.trim()
+    if (!decl) continue
+    const colon = decl.indexOf(':')
+    if (colon <= 0) continue
+    const prop = decl.slice(0, colon).trim().toLowerCase()
+    let val = decl.slice(colon + 1).trim()
+    if (!prop || !val) continue
+    if (!ALLOWED_STYLE_PROPS.has(prop)) continue
+    // Re-check value for smuggled vectors
+    const valLower = val.toLowerCase()
+    if (
+      valLower.includes('expression') ||
+      valLower.includes('url(') ||
+      valLower.includes('javascript:') ||
+      valLower.includes('vbscript:') ||
+      valLower.includes('data:') ||
+      valLower.includes('@import') ||
+      valLower.includes('behavior') ||
+      valLower.includes('-moz-binding')
+    ) {
+      continue
+    }
+    if (prop === 'display') {
+      const d = valLower.replace(/\s+/g, ' ').trim()
+      if (!ALLOWED_DISPLAY.has(d)) continue
+      val = d
+    }
+    kept.push(`${prop}: ${val}`)
+  }
+  return kept.join('; ')
 }
 
 function isSafeUrl(raw: string): boolean {
@@ -182,6 +274,7 @@ function walk(node: Node, out: DocumentFragment, doc: Document) {
     }
     if (name === 'style') {
       val = sanitizeStyle(val)
+      if (!val) continue
     }
     if (name === 'id' || name === 'class') {
       // strip characters that break out of attributes oddly

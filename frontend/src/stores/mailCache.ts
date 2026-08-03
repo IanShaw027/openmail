@@ -3,6 +3,7 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import type { MailMessage } from '@/api/accounts'
+import { useVaultStore } from '@/stores/vault'
 
 const KEY = 'openmail.mailCache.v1'
 const PER_MAILBOX_CAP = 200
@@ -51,23 +52,34 @@ export const useMailCacheStore = defineStore('mailCache', () => {
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
   async function persistEncrypted() {
-    try {
-      const { useVaultStore } = await import('@/stores/vault')
-      const vault = useVaultStore()
-      if (vault.status !== 'unlocked') return
-      const out: CacheMap = {}
-      for (const [k, list] of Object.entries(byEmail.value)) {
-        out[k] = list.slice(0, PER_MAILBOX_CAP)
-      }
-      await vault.saveMailCache(out as Record<string, unknown>)
-      try {
-        localStorage.removeItem(KEY)
-      } catch {
-        /* ignore */
-      }
-    } catch {
-      /* locked */
+    const vault = useVaultStore()
+    if (vault.status !== 'unlocked') return
+    const out: CacheMap = {}
+    for (const [k, list] of Object.entries(byEmail.value)) {
+      out[k] = list.slice(0, PER_MAILBOX_CAP)
     }
+    await vault.saveMailCache(out as Record<string, unknown>)
+    try {
+      localStorage.removeItem(KEY)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function persistInBackground(): void {
+    void flushPersist().catch((error) => {
+      console.warn('[openmail] mail cache persist failed', error)
+    })
+  }
+
+  /** Cancel debounce and write vault immediately (pagehide / after fetch). */
+  async function flushPersist(): Promise<void> {
+    if (persistTimer) {
+      clearTimeout(persistTimer)
+      persistTimer = null
+    }
+    if (!vaultHydrated.value) return
+    await persistEncrypted()
   }
 
   watch(
@@ -75,16 +87,19 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     () => {
       if (!vaultHydrated.value) return
       if (persistTimer) clearTimeout(persistTimer)
+      // Short debounce; pagehide also flushes so refresh cannot lose mail
       persistTimer = setTimeout(() => {
-        void persistEncrypted()
-      }, 400)
+        persistTimer = null
+        void persistEncrypted().catch((error) => {
+          console.warn('[openmail] mail cache persist failed', error)
+        })
+      }, 80)
     },
     { deep: true },
   )
 
   async function hydrateFromVault(): Promise<void> {
     try {
-      const { useVaultStore } = await import('@/stores/vault')
       const vault = useVaultStore()
       if (vault.status !== 'unlocked') {
         byEmail.value = {}
@@ -131,28 +146,85 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     return 'inbox'
   }
 
+  /**
+   * Dedup key: IMAP UIDs are only unique within (mailbox, UIDVALIDITY).
+   * Always scope by normalized folder; include uidvalidity when present so a
+   * rebuilt mailbox does not merge new UIDs into old cached rows.
+   */
+  function messageCacheKey(
+    m: Pick<MailMessage, 'id' | 'folder' | 'uidvalidity'>,
+  ): string {
+    const id = String(m.id || '').trim()
+    if (!id) return ''
+    const f = normalizeFolder(m.folder)
+    const uv =
+      m.uidvalidity != null && Number.isFinite(Number(m.uidvalidity))
+        ? String(Number(m.uidvalidity))
+        : ''
+    return uv ? `${f}::v${uv}::${id}` : `${f}::${id}`
+  }
+
   function merge(email: string, messages: MailMessage[], retentionDays?: number) {
     const key = email.toLowerCase()
     const prev = byEmail.value[key] || []
     const map = new Map<string, MailMessage>()
-    for (const m of prev) map.set(m.id, m)
+    for (const m of prev) {
+      const k = messageCacheKey(m)
+      if (k) map.set(k, m)
+    }
+    // Folders for which this merge batch carries UIDVALIDITY — drop legacy
+    // folder::id keys that lack uv so upgraded IMAP caches do not duplicate.
+    const foldersWithUv = new Set<string>()
+    for (const m of messages) {
+      if (
+        m?.id &&
+        m.uidvalidity != null &&
+        Number.isFinite(Number(m.uidvalidity))
+      ) {
+        foldersWithUv.add(normalizeFolder(m.folder || 'inbox'))
+      }
+    }
+    if (foldersWithUv.size > 0) {
+      for (const [k, m] of [...map.entries()]) {
+        const f = normalizeFolder(m.folder)
+        if (!foldersWithUv.has(f)) continue
+        const hasUv =
+          m.uidvalidity != null && Number.isFinite(Number(m.uidvalidity))
+        if (!hasUv) map.delete(k)
+      }
+    }
     for (const m of messages) {
       if (!m?.id) continue
       // Prefer richer body when merging; keep folder tag for inbox/spam/sent tabs
-      const old = map.get(m.id)
-      const folder = normalizeFolder(m.folder || old?.folder || 'inbox')
+      const folder = normalizeFolder(m.folder || 'inbox')
+      const uidvalidity =
+        m.uidvalidity != null && Number.isFinite(Number(m.uidvalidity))
+          ? Number(m.uidvalidity)
+          : undefined
+      const withFolder = {
+        ...m,
+        folder,
+        ...(uidvalidity != null ? { uidvalidity } : {}),
+      }
+      const k = messageCacheKey(withFolder)
+      if (!k) continue
+      // Also absorb a legacy same-folder same-id entry when re-keying with uv
+      const legacyKey = `${folder}::${String(m.id).trim()}`
+      const old = map.get(k) || (uidvalidity != null ? map.get(legacyKey) : undefined)
+      if (old && legacyKey !== k) map.delete(legacyKey)
       if (old) {
-        map.set(m.id, {
+        map.set(k, {
           ...old,
-          ...m,
+          ...withFolder,
           folder,
+          uidvalidity: withFolder.uidvalidity ?? old.uidvalidity,
           body_html: m.body_html || old.body_html,
           body_text: m.body_text || old.body_text,
           body_preview: m.body_preview || old.body_preview,
           verification_code: m.verification_code || old.verification_code,
         })
       } else {
-        map.set(m.id, { ...m, folder })
+        map.set(k, withFolder)
       }
     }
     let merged = [...map.values()].sort((a, b) => {
@@ -166,9 +238,13 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     byEmail.value = { ...byEmail.value, [key]: merged.slice(0, PER_MAILBOX_CAP) }
   }
 
-  /** Newest cached message date as UTC ISO, for incremental fetch. */
-  function newestUtcIso(email: string): string | undefined {
-    const list = listFor(email)
+  /**
+   * Newest cached message date as UTC ISO, for incremental fetch.
+   * When `folder` is set, only that folder is considered (prevents sent dates
+   * from advancing the inbox since cursor).
+   */
+  function newestUtcIso(email: string, folder?: string): string | undefined {
+    const list = listFor(email, folder)
     let best: number | null = null
     for (const m of list) {
       const t = parseMessageDateMs(m.date)
@@ -190,13 +266,35 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     return best == null ? undefined : new Date(best).toISOString()
   }
 
-  /** Replace mailbox cache (used by clear + refetch). */
+  /** Replace mailbox cache (used by full wipe). */
   function clearMailbox(email: string) {
     const key = email.toLowerCase()
     if (!byEmail.value[key]?.length) return
     const next = { ...byEmail.value }
     delete next[key]
     byEmail.value = next
+    persistInBackground()
+  }
+
+  /**
+   * Clear one folder only (inbox | spam | sent). Other folders stay cached.
+   * Used by Clear & refetch so switching tabs still has history.
+   */
+  function clearMailboxFolder(email: string, folder: string) {
+    const key = email.toLowerCase()
+    const list = byEmail.value[key]
+    if (!list?.length) return
+    const f = normalizeFolder(folder)
+    const kept = list.filter((m) => normalizeFolder(m.folder || 'inbox') !== f)
+    if (kept.length === list.length) return
+    if (!kept.length) {
+      const next = { ...byEmail.value }
+      delete next[key]
+      byEmail.value = next
+    } else {
+      byEmail.value = { ...byEmail.value, [key]: kept }
+    }
+    persistInBackground()
   }
 
   /** Prune all mailboxes to retention window (call on settings load / change). */
@@ -285,10 +383,12 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     newestUtcIso,
     oldestUtcIso,
     clearMailbox,
+    clearMailboxFolder,
     pruneAll,
     search,
     replaceAll,
     hydrateFromVault,
     clearSecrets,
+    flushPersist,
   }
 })

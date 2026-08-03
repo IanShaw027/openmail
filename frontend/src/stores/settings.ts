@@ -12,7 +12,11 @@ export interface UserSettings {
   retentionDays: number
   /** After first full fetch, only pull last N days */
   lookbackDays: number
-  /** email -> has completed first full fetch */
+  /**
+   * email or email::folder -> has completed first full fetch for that scope.
+   * Folder-scoped keys prevent inbox completion from suppressing spam/sent full pulls,
+   * and keep since cursors from crossing folders.
+   */
   firstFullDone: Record<string, boolean>
   /**
    * @deprecated Not used by sinceFor anymore; kept briefly for migration then pruned.
@@ -23,6 +27,21 @@ export interface UserSettings {
   licenseToken: string
   /** When true, import modal probes mailboxes; when false, format-only check */
   importPrecheck: boolean
+}
+
+/** Normalize folder to inbox|spam|sent for fetch-map keys. */
+export function fetchMapFolder(folder?: string | null): string {
+  const f = (folder || 'inbox').toLowerCase()
+  if (f === 'junk' || f === 'spam' || f === 'junkemail') return 'spam'
+  if (f === 'sent' || f === 'sentitems' || f === 'sent mail' || f === '已发送') return 'sent'
+  return 'inbox'
+}
+
+/** Composite key: email::folder (email-only legacy keys still recognized as inbox). */
+export function fetchMapKey(email: string, folder?: string | null): string {
+  const e = email.toLowerCase().trim()
+  if (!e) return ''
+  return `${e}::${fetchMapFolder(folder)}`
 }
 
 /** Subset of /api/config/public used for client-side quota gates. */
@@ -188,7 +207,16 @@ export const useSettingsStore = defineStore('settings', () => {
     persistTimer = setTimeout(() => {
       persistTimer = null
       persistNow()
-    }, 300)
+    }, 80)
+  }
+
+  /** Cancel debounce and write settings immediately (pagehide). */
+  function flushPersist() {
+    if (persistTimer) {
+      clearTimeout(persistTimer)
+      persistTimer = null
+    }
+    persistNow()
   }
 
   watch(s, () => schedulePersist(), { deep: true })
@@ -205,22 +233,25 @@ export const useSettingsStore = defineStore('settings', () => {
     },
   )
 
-  function markFetched(email: string, full: boolean) {
-    const e = email.toLowerCase().trim()
-    if (!e) return
+  function markFetched(email: string, full: boolean, folder?: string | null) {
+    const k = fetchMapKey(email, folder)
+    if (!k) return
     // lastFetchAt intentionally not stored (unused by sinceFor; bloat risk)
     if (full) {
-      // Touch key so capRecord keeps recently used emails
+      // Touch key so capRecord keeps recently used scopes
       const next = { ...s.value.firstFullDone }
-      delete next[e]
-      next[e] = true
+      delete next[k]
+      next[k] = true
+      // Drop legacy email-only key for this mailbox so it does not shadow folder scopes
+      const e = email.toLowerCase().trim()
+      if (e && e in next) delete next[e]
       s.value.firstFullDone = capRecord(next)
     }
   }
 
   /**
-   * Drop firstFullDone / lastFetchAt keys not in the given email set.
-   * Call after account list loads to shrink storage.
+   * Drop firstFullDone keys not belonging to known emails.
+   * Keys are email or email::folder.
    */
   function pruneFetchMaps(knownEmails: string[]) {
     const allow = new Set(knownEmails.map((e) => e.toLowerCase().trim()).filter(Boolean))
@@ -231,32 +262,40 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     const next: Record<string, boolean> = {}
     for (const [k, v] of Object.entries(s.value.firstFullDone || {})) {
-      if (allow.has(k) && v) next[k] = true
+      if (!v) continue
+      const emailPart = k.includes('::') ? k.split('::')[0]! : k
+      if (allow.has(emailPart)) next[k] = true
     }
     s.value.firstFullDone = capRecord(next)
     if (s.value.lastFetchAt) delete s.value.lastFetchAt
   }
 
-  function needsFullFetch(email: string): boolean {
-    return !s.value.firstFullDone[email.toLowerCase()]
+  function needsFullFetch(email: string, folder?: string | null): boolean {
+    const map = s.value.firstFullDone || {}
+    const k = fetchMapKey(email, folder)
+    if (k && map[k]) return false
+    // Legacy: email-only key only counts for inbox (old clients marked whole mailbox done)
+    const e = email.toLowerCase().trim()
+    if (fetchMapFolder(folder) === 'inbox' && map[e]) return false
+    return true
   }
 
   /**
    * Incremental since (UTC ISO) for silent/background poll.
    *
-   * Prefer **newest cached message date only**. Never use lastFetchAt (wall-clock
-   * "now" after a successful fetch) — that made subsequent pulls use since≈now-60s,
-   * so providers returned empty while Clear&Refetch (full recent window) still worked.
+   * Prefer **newest cached message date in this folder only**. Never use
+   * lastFetchAt (wall-clock) or cross-folder newest (sent would skip inbox).
    *
    * Falls back to lookbackDays when cache has no parseable dates.
    * Full first fetch returns undefined (caller should use forceRecent / full).
    */
-  function sinceFor(email: string): string | undefined {
-    if (needsFullFetch(email)) return undefined
+  function sinceFor(email: string, folder?: string | null): string | undefined {
+    if (needsFullFetch(email, folder)) return undefined
     const e = email.toLowerCase()
+    const f = fetchMapFolder(folder)
     let mailMs: number | null = null
     try {
-      const cachedIso = useMailCacheStore().newestUtcIso(e)
+      const cachedIso = useMailCacheStore().newestUtcIso(e, f)
       if (cachedIso) {
         const t = Date.parse(cachedIso)
         if (Number.isFinite(t)) mailMs = t
@@ -353,5 +392,6 @@ export const useSettingsStore = defineStore('settings', () => {
     remainingLocalSlots,
     remainingCloudSlots,
     persistNow,
+    flushPersist,
   }
 })

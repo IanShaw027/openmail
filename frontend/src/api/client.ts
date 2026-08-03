@@ -74,15 +74,18 @@ export async function apiRequest<T = unknown>(
   const { body, headers: extraHeaders, timeoutMs, signal: userSignal, ...rest } = options
   const headers = new Headers(extraHeaders)
 
+  const bodyText = body === undefined ? undefined : JSON.stringify(body)
+
   // Device / license (+ optional HMAC proof when vault unlocked)
   try {
     const method = String(rest.method || 'GET').toUpperCase()
     const pathForSign = path.startsWith('http')
-      ? new URL(path).pathname
+      ? `${new URL(path).pathname}${new URL(path).search}`
       : path.startsWith('/')
         ? path
         : `/${path}`
-    const dh = await deviceHeadersAsync(method, pathForSign)
+    // Same wire string as fetch body so SHA-256 matches server-side hash
+    const dh = await deviceHeadersAsync(method, pathForSign, bodyText ?? '')
     for (const [k, v] of Object.entries(dh)) {
       if (!headers.has(k)) headers.set(k, v)
     }
@@ -119,7 +122,7 @@ export async function apiRequest<T = unknown>(
       signal,
       headers,
       credentials: 'include',
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: bodyText,
     })
 
     const text = await res.text()

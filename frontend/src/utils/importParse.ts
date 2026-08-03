@@ -1,5 +1,11 @@
 import type { MailAccount } from '@/types/account'
+import { i18n } from '@/i18n'
 import { resolveAccountBrand, resolveDomainProfile } from '@/utils/domainBrand'
+
+function tt(key: string, params?: Record<string, unknown>): string {
+  // vue-i18n Composer typings are strict about message keys; runtime keys are fine.
+  return String((i18n.global as { t: (k: string, p?: Record<string, unknown>) => unknown }).t(key, params))
+}
 
 function uid(): string {
   return `acc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`
@@ -46,19 +52,22 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
   if (looksLikeUrl(text) && !text.includes('----') && !/\s/.test(text)) {
     const apiUrl = normalizeWorkerApiUrl(text)
     const host = hostFromUrl(apiUrl)
+    const isCf = host.endsWith('workers.dev')
     return {
       ok: true,
       kind: 'http_api',
       raw,
-      message: `HttpApi 源 · ${host} · 无密钥`,
+      message: tt('importParse.httpApiSourceNoKey', { host }),
       account: {
         email: `api@${host}`,
         type: 'http_api',
         apiUrl,
         isApiSource: true,
-        brand: host.endsWith('workers.dev') ? 'cf_temp' : 'http_api',
+        brand: isCf ? 'cf_temp' : 'http_api',
         rawLine: raw,
-        note: host.endsWith('workers.dev') ? `CF 临时邮箱 · ${host}` : `CF/API · ${host}`,
+        note: isCf
+          ? tt('importParse.noteCfTemp', { host })
+          : tt('importParse.noteCfApi', { host }),
       },
     }
   }
@@ -75,13 +84,16 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
     const apiUrl = normalizeWorkerApiUrl(urlPart)
     const host = hostFromUrl(apiUrl)
     const isCf = host.endsWith('workers.dev')
+    const label = isCf
+      ? tt('importParse.cfTempLabel')
+      : tt('importParse.httpApiSourceLabel')
     return {
       ok: true,
       kind: 'http_api',
       raw,
       message: secret
-        ? `${isCf ? 'CF 临时邮箱' : 'HttpApi 源'} · ${host} · 已带密钥`
-        : `${isCf ? 'CF 临时邮箱' : 'HttpApi 源'} · ${host} · 无密钥`,
+        ? `${label} · ${host}${tt('importParse.withKeySuffix')}`
+        : `${label} · ${host}${tt('importParse.noKeySuffix')}`,
       account: {
         email: `api@${host}`,
         type: 'http_api',
@@ -92,8 +104,12 @@ function parseBareApiUrl(raw: string): ParsedLine | null {
         brand: isCf ? 'cf_temp' : 'http_api',
         rawLine: raw,
         note: secret
-          ? `${isCf ? 'CF 临时邮箱' : 'CF/API'} · ${host} · 密钥`
-          : `${isCf ? 'CF 临时邮箱' : 'CF/API'} · ${host}`,
+          ? isCf
+            ? tt('importParse.noteCfTempWithKey', { host })
+            : tt('importParse.noteWithKey', { host })
+          : isCf
+            ? tt('importParse.noteCfTemp', { host })
+            : tt('importParse.noteCfApi', { host }),
       },
     }
   }
@@ -201,8 +217,7 @@ function enrichAccount(
     account.type !== 'imap' &&
     (!account.refreshToken || !account.clientId)
   ) {
-    const warn =
-      '微软邮箱缺少 refresh_token / client_id，仅密码无法 Graph 取信；若用 IMAP 请写明主机 outlook.office365.com'
+    const warn = tt('importParse.msMissingTokens')
     if (line) {
       line.warnings = [...(line.warnings || []), warn]
     }
@@ -212,7 +227,8 @@ function enrichAccount(
 
 export function parseAccountLine(line: string): ParsedLine {
   const raw = line.trim()
-  if (!raw || raw.startsWith('#')) return { ok: false, kind: 'invalid', raw, message: '空行或注释' }
+  if (!raw || raw.startsWith('#'))
+    return { ok: false, kind: 'invalid', raw, message: tt('importParse.emptyOrComment') }
 
   // Bare CF Worker / HttpApi URL as a single list row (source, not a mailbox)
   const bare = parseBareApiUrl(raw)
@@ -234,14 +250,19 @@ export function parseAccountLine(line: string): ParsedLine {
   if (parts[0]?.toLowerCase() === 'imap' && parts.length >= 4) {
     const email = parts[1] ?? ''
     if (!looksLikeEmail(email)) {
-      return { ok: false, kind: 'invalid', raw, message: 'IMAP 行邮箱格式无效' }
+      return {
+        ok: false,
+        kind: 'invalid',
+        raw,
+        message: tt('importParse.invalidImapEmail'),
+      }
     }
     const port = parts[4] ? Number(parts[4]) || 993 : 993
     return {
       ok: true,
       kind: 'imap',
       raw,
-      message: `IMAP · ${email} · ${parts[3]}:${port}`,
+      message: tt('importParse.imapHost', { email, host: `${parts[3]}:${port}` }),
       account: {
         email,
         type: 'imap',
@@ -257,7 +278,7 @@ export function parseAccountLine(line: string): ParsedLine {
   // Find email position (first email-like token)
   let emailIdx = parts.findIndex((p) => looksLikeEmail(p))
   if (emailIdx < 0) {
-    return { ok: false, kind: 'invalid', raw, message: '未识别到邮箱地址' }
+    return { ok: false, kind: 'invalid', raw, message: tt('importParse.noEmail') }
   }
   const email = parts[emailIdx]!.toLowerCase()
   const rest = [...parts.slice(0, emailIdx), ...parts.slice(emailIdx + 1)]
@@ -282,13 +303,20 @@ export function parseAccountLine(line: string): ParsedLine {
           p.toLowerCase() !== email.toLowerCase() &&
           p.length >= 1,
       ) || undefined
+    const isCf = host.endsWith('workers.dev')
     return {
       ok: true,
       kind: 'http_api',
       raw,
       message: isPlaceholder
-        ? `HttpApi 源 · ${host}${secret ? ' · 已带密钥' : ' · 无密钥'}（取件后展开临时邮箱）`
-        : `HttpApi · ${email}${secret ? ' · 密钥' : ''}`,
+        ? tt('importParse.httpApiSourceExpand', {
+            host,
+            secret: secret ? tt('importParse.withKeySuffix') : tt('importParse.noKeySuffix'),
+          })
+        : tt('importParse.httpApiMailbox', {
+            email,
+            secret: secret ? tt('importParse.secretSuffix') : '',
+          }),
       account: {
         email: sourceEmail,
         type: 'http_api',
@@ -296,14 +324,18 @@ export function parseAccountLine(line: string): ParsedLine {
         apiKey: secret,
         password: secret,
         isApiSource: isPlaceholder || true,
-        brand: host.endsWith('workers.dev') ? 'cf_temp' : 'http_api',
+        brand: isCf ? 'cf_temp' : 'http_api',
         rawLine: raw,
         note: isPlaceholder
           ? secret
-            ? `${host.endsWith('workers.dev') ? 'CF 临时邮箱' : 'CF/API'} · ${host} · 密钥`
-            : `${host.endsWith('workers.dev') ? 'CF 临时邮箱' : 'CF/API'} · ${host}`
+            ? isCf
+              ? tt('importParse.noteCfTempWithKey', { host })
+              : tt('importParse.noteWithKey', { host })
+            : isCf
+              ? tt('importParse.noteCfTemp', { host })
+              : tt('importParse.noteCfApi', { host })
           : secret
-            ? 'API 密钥已保存'
+            ? tt('importParse.noteApiKeySaved')
             : undefined,
       },
     }
@@ -325,10 +357,10 @@ export function parseAccountLine(line: string): ParsedLine {
       ok: true,
       kind: 'oauth',
       raw,
-      message: `微软 OAuth · ${email} · client_id 与 refresh_token 已自动识别`,
+      message: tt('importParse.msOauthOk', { email }),
       warnings:
         rest.indexOf(uuidField) < rest.indexOf(refreshField)
-          ? ['已识别顺序为 password----client_id----refresh_token（兼容 mail-public 对调）']
+          ? [tt('importParse.msOauthOrder')]
           : undefined,
       account: {
         email,
@@ -373,10 +405,13 @@ export function parseAccountLine(line: string): ParsedLine {
         ok: true,
         kind: 'imap',
         raw,
-        message: `IMAP+SMTP · ${email} · 收 ${imapHost}:993 · 发 ${smtpHost}:${smtpPort}`,
-        warnings: [
-          '已同时保存 IMAP（取信）与 SMTP（发信）。非常规域名请核对主机名；Gmail 请用应用专用密码。',
-        ],
+        message: tt('importParse.imapSmtp', {
+          email,
+          imapHost,
+          smtpHost,
+          smtpPort,
+        }),
+        warnings: [tt('importParse.imapSmtpWarn')],
         account: {
           email,
           type: 'imap',
@@ -401,7 +436,7 @@ export function parseAccountLine(line: string): ParsedLine {
       ok: true,
       kind: 'imap',
       raw,
-      message: `Gmail 应用专用密码 · IMAP imap.gmail.com · SMTP smtp.gmail.com`,
+      message: tt('importParse.gmailAppPass'),
       account: {
         email,
         type: 'imap',
@@ -439,8 +474,8 @@ export function parseAccountLine(line: string): ParsedLine {
         ok: true,
         kind: 'cookie',
         raw,
-        message: `mail.com Cookie 会话 · ${email}`,
-        warnings: ['首次取信将使用密码登录并缓存 cookies；站点改版可能导致失败。'],
+        message: tt('importParse.mailcomCookie', { email }),
+        warnings: [tt('importParse.mailcomCookieWarn')],
         account: {
           email,
           type: 'cookie',
@@ -456,7 +491,7 @@ export function parseAccountLine(line: string): ParsedLine {
         ok: false,
         kind: 'invalid',
         raw,
-        message: `${domain} 需要微软 OAuth（client_id + refresh_token），仅密码无法 Graph 取信`,
+        message: tt('importParse.msNeedOauth', { domain }),
       }
     }
 
@@ -473,8 +508,13 @@ export function parseAccountLine(line: string): ParsedLine {
         kind: 'imap',
         raw,
         message: smtp
-          ? `IMAP · ${email} · ${defaultHost}:993 · SMTP ${smtp.host}:${smtp.port}`
-          : `IMAP · ${email} · ${defaultHost}:993`,
+          ? tt('importParse.imapWithSmtp', {
+              email,
+              host: defaultHost,
+              smtpHost: smtp.host,
+              smtpPort: smtp.port,
+            })
+          : tt('importParse.imapOnly', { email, host: defaultHost }),
         account: {
           email,
           type: 'imap',
@@ -494,8 +534,8 @@ export function parseAccountLine(line: string): ParsedLine {
         ok: true,
         kind: 'cookie',
         raw,
-        message: `Cookie/网页邮 · ${email}（未匹配默认 IMAP，将按 cookie 处理）`,
-        warnings: ['未知域名：若为 QQ/163 请用授权码；若为 Gmail 请用应用专用密码。'],
+        message: tt('importParse.cookieWebmail', { email }),
+        warnings: [tt('importParse.cookieUnknownWarn')],
         account: {
           email,
           type: 'cookie',
@@ -515,7 +555,7 @@ export function parseAccountLine(line: string): ParsedLine {
         ok: true,
         kind: 'imap',
         raw,
-        message: `IMAP · ${email} · ${host}`,
+        message: tt('importParse.imapHost', { email, host }),
         account: {
           email,
           type: 'imap',
@@ -533,7 +573,7 @@ export function parseAccountLine(line: string): ParsedLine {
     ok: false,
     kind: 'invalid',
     raw,
-    message: '无法识别格式，请查看导入说明中的示例',
+    message: tt('importParse.unrecognized'),
   }
 }
 
@@ -591,13 +631,18 @@ export function createAccountFromParsed(
 }
 
 /** Short placeholder — full examples live in import help modal */
-export const IMPORT_PLACEHOLDER = `粘贴账号，一行一个…
+export function importPlaceholder(): string {
+  return tt('importParse.placeholder')
+}
 
-user@outlook.com----密码----client_id----M.refresh_token
-user@gmail.com----应用专用密码
+/** @deprecated Prefer importPlaceholder() for locale-aware text */
+export const IMPORT_PLACEHOLDER = `Paste one account per line…
+
+user@outlook.com----password----client_id----M.refresh_token
+user@gmail.com----app-password
 name@mail.com----password
-# CF Worker 无密钥
+# CF Worker no secret
 https://mail-api.example.workers.dev
-# CF Worker 有密钥
-https://mail-api.example.workers.dev----你的admin密钥
+# CF Worker with secret
+https://mail-api.example.workers.dev----your-admin-secret
 `

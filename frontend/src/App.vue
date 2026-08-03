@@ -8,11 +8,13 @@ import { useVaultStore } from '@/stores/vault'
 import { useAccountsStore } from '@/stores/accounts'
 import { useTwoFaStore } from '@/stores/twofa'
 import { useMailCacheStore } from '@/stores/mailCache'
+import { useSettingsStore } from '@/stores/settings'
 
 const vault = useVaultStore()
 const accounts = useAccountsStore()
 const twofa = useTwoFaStore()
 const mailCache = useMailCacheStore()
+const settings = useSettingsStore()
 
 const bootReady = ref(false)
 
@@ -42,13 +44,54 @@ function onActivity() {
 }
 
 function onVisibility() {
-  if (document.visibilityState === 'visible' && vault.unlocked) vault.touch()
+  if (document.visibilityState === 'visible' && vault.unlocked) {
+    vault.touch()
+  } else if (document.visibilityState === 'hidden') {
+    // Mobile Safari / backgrounding: flush while the page can still run async crypto
+    flushAllStores()
+  }
+}
+
+/**
+ * Best-effort durable flush before the tab goes away.
+ * Debounced vault writes (accounts / mail / 2FA) used to lose data when the
+ * user refreshed within the debounce window — weimail-style tools write
+ * localStorage synchronously; we mirror that with an immediate flush.
+ */
+function flushAllStores() {
+  if (!vault.unlocked) {
+    try {
+      settings.flushPersist()
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+  try {
+    settings.flushPersist()
+  } catch {
+    /* ignore */
+  }
+  // Fire without await — pagehide cannot wait; critical paths (note/fetch)
+  // already await flushPersist so the common cases are durable.
+  void accounts.flushPersist().catch((error) => console.warn('[openmail] account flush failed', error))
+  void twofa.flushPersist().catch((error) => console.warn('[openmail] 2FA flush failed', error))
+  void mailCache
+    .flushPersist()
+    .catch((error) => console.warn('[openmail] mail cache flush failed', error))
+}
+
+function onPageHide() {
+  flushAllStores()
 }
 
 onMounted(() => {
   window.addEventListener('pointerdown', onActivity, { passive: true })
   window.addEventListener('keydown', onActivity, { passive: true })
   document.addEventListener('visibilitychange', onVisibility)
+  // pagehide covers refresh / close / bfcache; beforeunload as extra for older WebKit
+  window.addEventListener('pagehide', onPageHide)
+  window.addEventListener('beforeunload', onPageHide)
 
   void (async () => {
     try {
@@ -64,6 +107,8 @@ onUnmounted(() => {
   window.removeEventListener('pointerdown', onActivity)
   window.removeEventListener('keydown', onActivity)
   document.removeEventListener('visibilitychange', onVisibility)
+  window.removeEventListener('pagehide', onPageHide)
+  window.removeEventListener('beforeunload', onPageHide)
 })
 </script>
 
