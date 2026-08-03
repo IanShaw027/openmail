@@ -4,6 +4,8 @@ import { apiRequest } from '@/api/client'
 import { useMailCacheStore } from '@/stores/mailCache'
 
 const KEY = 'openmail.userSettings'
+/** Cap map keys so CF temp churn cannot blow localStorage (origin ~5MB shared). */
+const MAP_CAP = 400
 
 export interface UserSettings {
   /** Days to keep local mail history */
@@ -12,8 +14,11 @@ export interface UserSettings {
   lookbackDays: number
   /** email -> has completed first full fetch */
   firstFullDone: Record<string, boolean>
-  /** email -> last successful fetch ISO time */
-  lastFetchAt: Record<string, string>
+  /**
+   * @deprecated Not used by sinceFor anymore; kept briefly for migration then pruned.
+   * Do not grow this map.
+   */
+  lastFetchAt?: Record<string, string>
   batchConcurrency: number
   licenseToken: string
   /** When true, import modal probes mailboxes; when false, format-only check */
@@ -31,25 +36,134 @@ export interface PublicQuota {
   mail_retention_days?: number
 }
 
-function load(): UserSettings {
-  try {
-    const raw = localStorage.getItem(KEY)
-    if (raw) return { ...defaults(), ...JSON.parse(raw) }
-  } catch {
-    /* ignore */
-  }
-  return defaults()
-}
-
 function defaults(): UserSettings {
   return {
     retentionDays: 90,
     lookbackDays: 3,
     firstFullDone: {},
-    lastFetchAt: {},
     batchConcurrency: 10,
     licenseToken: '',
     importPrecheck: true,
+  }
+}
+
+/** Keep only the most recently touched keys (insertion order in modern engines ≈ write order). */
+function capRecord<T>(map: Record<string, T> | undefined | null, cap = MAP_CAP): Record<string, T> {
+  if (!map || typeof map !== 'object') return {}
+  const keys = Object.keys(map)
+  if (keys.length <= cap) return { ...map }
+  const keep = keys.slice(-cap)
+  const out: Record<string, T> = {}
+  for (const k of keep) out[k] = map[k]!
+  return out
+}
+
+function sanitize(raw: Partial<UserSettings> | null | undefined): UserSettings {
+  const d = defaults()
+  if (!raw || typeof raw !== 'object') return d
+  return {
+    retentionDays: Math.max(1, Number(raw.retentionDays) || d.retentionDays),
+    lookbackDays: Math.max(1, Number(raw.lookbackDays) || d.lookbackDays),
+    firstFullDone: capRecord(raw.firstFullDone || {}),
+    // Drop lastFetchAt from disk — no longer needed and was the main bloat vector
+    batchConcurrency: Math.max(1, Math.min(50, Number(raw.batchConcurrency) || d.batchConcurrency)),
+    licenseToken: typeof raw.licenseToken === 'string' ? raw.licenseToken : '',
+    importPrecheck: raw.importPrecheck !== false,
+  }
+}
+
+function load(): UserSettings {
+  try {
+    const raw = localStorage.getItem(KEY)
+    if (raw) return sanitize(JSON.parse(raw) as Partial<UserSettings>)
+  } catch {
+    /* ignore corrupt / private mode */
+  }
+  return defaults()
+}
+
+/** Payload actually written to localStorage (minimal). */
+function persistPayload(v: UserSettings): string {
+  const clean = sanitize(v)
+  return JSON.stringify({
+    retentionDays: clean.retentionDays,
+    lookbackDays: clean.lookbackDays,
+    firstFullDone: clean.firstFullDone,
+    batchConcurrency: clean.batchConcurrency,
+    licenseToken: clean.licenseToken,
+    importPrecheck: clean.importPrecheck,
+  })
+}
+
+/**
+ * Best-effort localStorage write. On quota failure: drop maps, clear other
+ * non-critical openmail keys, then retry once with minimal payload.
+ */
+function safeSetItem(key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value)
+    return true
+  } catch (e) {
+    const name = e instanceof DOMException ? e.name : ''
+    const quota =
+      name === 'QuotaExceededError' ||
+      name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+      (e as { code?: number })?.code === 22
+    if (!quota) {
+      console.warn('[openmail] settings persist failed', e)
+      return false
+    }
+  }
+
+  // 1) Retry with empty firstFullDone
+  try {
+    const minimal = JSON.parse(value) as UserSettings
+    minimal.firstFullDone = {}
+    localStorage.setItem(key, JSON.stringify(minimal))
+    console.warn('[openmail] settings: pruned firstFullDone after storage quota')
+    return true
+  } catch {
+    /* continue */
+  }
+
+  // 2) Free space: drop legacy plaintext caches (vault holds secrets now)
+  try {
+    const drop = [
+      'openmail.mailCache.v1',
+      'openmail.localAccounts',
+      'openmail.twofa',
+      'openmail.noteTemplates',
+    ]
+    for (const k of drop) {
+      try {
+        localStorage.removeItem(k)
+      } catch {
+        /* ignore */
+      }
+    }
+    const minimal = {
+      retentionDays: 90,
+      lookbackDays: 3,
+      firstFullDone: {},
+      batchConcurrency: 10,
+      licenseToken: '',
+      importPrecheck: true,
+    }
+    // preserve license if present in original payload
+    try {
+      const parsed = JSON.parse(value) as { licenseToken?: string; retentionDays?: number; lookbackDays?: number }
+      if (parsed.licenseToken) minimal.licenseToken = parsed.licenseToken
+      if (parsed.retentionDays) minimal.retentionDays = parsed.retentionDays
+      if (parsed.lookbackDays) minimal.lookbackDays = parsed.lookbackDays
+    } catch {
+      /* ignore */
+    }
+    localStorage.setItem(key, JSON.stringify(minimal))
+    console.warn('[openmail] settings: cleared legacy caches after storage quota')
+    return true
+  } catch (e2) {
+    console.warn('[openmail] settings: could not recover storage quota', e2)
+    return false
   }
 }
 
@@ -57,14 +171,27 @@ export const useSettingsStore = defineStore('settings', () => {
   const s = ref<UserSettings>(load())
   const quota = ref<PublicQuota | null>(null)
   const publicConfigLoaded = ref(false)
+  let persistTimer: ReturnType<typeof setTimeout> | null = null
 
-  watch(
-    s,
-    (v) => {
-      localStorage.setItem(KEY, JSON.stringify(v))
-    },
-    { deep: true },
-  )
+  function persistNow() {
+    // Keep in-memory maps capped so markFetched cannot grow forever
+    s.value.firstFullDone = capRecord(s.value.firstFullDone)
+    if (s.value.lastFetchAt) {
+      // Strip deprecated field from live state after first sanitize
+      delete s.value.lastFetchAt
+    }
+    safeSetItem(KEY, persistPayload(s.value))
+  }
+
+  function schedulePersist() {
+    if (persistTimer) clearTimeout(persistTimer)
+    persistTimer = setTimeout(() => {
+      persistTimer = null
+      persistNow()
+    }, 300)
+  }
+
+  watch(s, () => schedulePersist(), { deep: true })
 
   // Prune local mail cache when retention window changes
   watch(
@@ -79,10 +206,35 @@ export const useSettingsStore = defineStore('settings', () => {
   )
 
   function markFetched(email: string, full: boolean) {
-    const e = email.toLowerCase()
-    // Always store UTC ISO
-    s.value.lastFetchAt[e] = new Date().toISOString()
-    if (full) s.value.firstFullDone[e] = true
+    const e = email.toLowerCase().trim()
+    if (!e) return
+    // lastFetchAt intentionally not stored (unused by sinceFor; bloat risk)
+    if (full) {
+      // Touch key so capRecord keeps recently used emails
+      const next = { ...s.value.firstFullDone }
+      delete next[e]
+      next[e] = true
+      s.value.firstFullDone = capRecord(next)
+    }
+  }
+
+  /**
+   * Drop firstFullDone / lastFetchAt keys not in the given email set.
+   * Call after account list loads to shrink storage.
+   */
+  function pruneFetchMaps(knownEmails: string[]) {
+    const allow = new Set(knownEmails.map((e) => e.toLowerCase().trim()).filter(Boolean))
+    if (!allow.size) {
+      // Still cap if empty list (don't wipe everything on empty store init)
+      s.value.firstFullDone = capRecord(s.value.firstFullDone)
+      return
+    }
+    const next: Record<string, boolean> = {}
+    for (const [k, v] of Object.entries(s.value.firstFullDone || {})) {
+      if (allow.has(k) && v) next[k] = true
+    }
+    s.value.firstFullDone = capRecord(next)
+    if (s.value.lastFetchAt) delete s.value.lastFetchAt
   }
 
   function needsFullFetch(email: string): boolean {
@@ -114,12 +266,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     const days = Math.max(1, s.value.lookbackDays || 3)
     const lookbackMs = Date.now() - days * 86_400_000
-    // Floor: do not ask for more than lookback window even if cache is older
     let sinceMs: number
     if (mailMs != null) {
-      // Overlap 2 minutes so the boundary message is not missed; never go past "now"
       sinceMs = Math.min(mailMs - 120_000, Date.now())
-      // If newest mail is very old, still only re-pull lookback (avoid huge IMAP SINCE)
       if (sinceMs < lookbackMs) sinceMs = lookbackMs
     } else {
       sinceMs = lookbackMs
@@ -188,16 +337,21 @@ export const useSettingsStore = defineStore('settings', () => {
     return Math.max(0, max - currentCloudCount)
   }
 
+  // One-shot sanitize of any bloated legacy payload already in memory
+  persistNow()
+
   return {
     s,
     quota,
     publicConfigLoaded,
     markFetched,
+    pruneFetchMaps,
     needsFullFetch,
     sinceFor,
     applyRetentionNow,
     loadPublicConfig,
     remainingLocalSlots,
     remainingCloudSlots,
+    persistNow,
   }
 })

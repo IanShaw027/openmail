@@ -2059,13 +2059,27 @@ onMounted(() => {
   void userSettings.loadPublicConfig().then(() => {
     userSettings.applyRetentionNow()
   })
-  void accounts.loadServerAccounts().then(() => userSettings.loadPublicConfig())
+  void accounts.loadServerAccounts().then(() => {
+    userSettings.loadPublicConfig()
+    // Drop firstFullDone keys for deleted / temp churn emails → free localStorage
+    userSettings.pruneFetchMaps(accounts.accounts.map((a) => a.email))
+  })
+  // Also prune against current local list immediately (vault already hydrated)
+  userSettings.pruneFetchMaps(accounts.accounts.map((a) => a.email))
   // Restore mail panel from durable local cache after refresh
   const sel = accounts.selected
   if (sel) loadMessagesFromCache(sel)
   // 未检测账号自动轮询检测（5s）
   startAutoDetect()
 })
+
+// When account set shrinks (delete / CF re-sync), keep settings maps tight
+watch(
+  () => accounts.accounts.length,
+  () => {
+    userSettings.pruneFetchMaps(accounts.accounts.map((a) => a.email))
+  },
+)
 
 watch(
   () => accounts.selectedId,
