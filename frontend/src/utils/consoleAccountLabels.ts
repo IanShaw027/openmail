@@ -1,4 +1,5 @@
 import type { MailAccount } from '@/types/account'
+import { formatInUserTz } from '@/utils/datetime'
 
 /** i18n-aware label helpers for console account columns. */
 export type TranslateFn = (key: string, values?: Record<string, unknown>) => string
@@ -63,18 +64,13 @@ export function formatRelativeTime(
 ): string {
   if (!ts) return '—'
   try {
-    const d = new Date(ts)
     const now = Date.now()
     const diff = now - ts
     if (diff < 60_000) return t('console.timeJustNow')
     if (diff < 3600_000) return t('console.timeMinsAgo', { n: Math.floor(diff / 60_000) })
     if (diff < 86400_000) return t('console.timeHoursAgo', { n: Math.floor(diff / 3600_000) })
-    return d.toLocaleString(locale === 'zh-CN' ? 'zh-CN' : undefined, {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
+    // Absolute clock in the browser timezone (not UTC wall-clock)
+    return formatInUserTz(ts, { locale, kind: 'short' })
   } catch {
     return '—'
   }

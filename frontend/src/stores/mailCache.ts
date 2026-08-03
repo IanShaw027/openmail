@@ -189,9 +189,11 @@ export const useMailCacheStore = defineStore('mailCache', () => {
 
   function listFor(email: string, folder?: string): MailMessage[] {
     const all = byEmail.value[email.toLowerCase()] || []
-    if (!folder) return all
-    const f = normalizeFolder(folder)
-    return all.filter((m) => normalizeFolder(m.folder || 'inbox') === f)
+    const scoped = !folder
+      ? all
+      : all.filter((m) => normalizeFolder(m.folder || 'inbox') === normalizeFolder(folder))
+    // Always return deduped + newest-first so UI never shows duplicates
+    return dedupeAndSortMessages(scoped)
   }
 
   /** Normalize provider folder labels to inbox | spam | sent. */
@@ -218,6 +220,111 @@ export const useMailCacheStore = defineStore('mailCache', () => {
         ? String(Number(m.uidvalidity))
         : ''
     return uv ? `${f}::v${uv}::${id}` : `${f}::${id}`
+  }
+
+  /**
+   * Soft content fingerprint: same subject+from+date within a folder often means
+   * the same mail under different provider ids (e.g. graph vs imap, or list/detail).
+   */
+  function contentFingerprint(
+    m: Pick<MailMessage, 'subject' | 'from' | 'from_address' | 'date' | 'folder'>,
+  ): string {
+    const f = normalizeFolder(m.folder)
+    const subj = String(m.subject || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+    const from = String(m.from_address || m.from || '')
+      .trim()
+      .toLowerCase()
+    const dayMs = parseMessageDateMs(m.date)
+    // Bucket to minute so minor timezone formatting diffs still collapse
+    const bucket = dayMs != null ? String(Math.floor(dayMs / 60_000)) : String(m.date || '')
+    return `${f}|${subj}|${from}|${bucket}`
+  }
+
+  function messageRichness(m: MailMessage): number {
+    return (
+      (m.body_html?.length || 0) +
+      (m.body_text?.length || 0) +
+      (m.body_preview?.length || 0) +
+      (m.verification_code ? 50 : 0)
+    )
+  }
+
+  /**
+   * Collapse duplicates by cache key and content fingerprint; newest-first sort.
+   * Prefer richer body / verification when merging two representations of one mail.
+   */
+  function dedupeAndSortMessages(list: MailMessage[]): MailMessage[] {
+    const byKey = new Map<string, MailMessage>()
+    for (const m of list) {
+      if (!m?.id) continue
+      const folder = normalizeFolder(m.folder || 'inbox')
+      const withFolder: MailMessage = { ...m, folder }
+      const k = messageCacheKey(withFolder)
+      if (!k) continue
+      const prev = byKey.get(k)
+      if (!prev) {
+        byKey.set(k, withFolder)
+        continue
+      }
+      byKey.set(k, preferRicherMessage(prev, withFolder))
+    }
+
+    // Second pass: content fingerprint within folder (different ids, same mail)
+    const byFp = new Map<string, MailMessage>()
+    for (const m of byKey.values()) {
+      const fp = contentFingerprint(m)
+      const prev = byFp.get(fp)
+      if (!prev) {
+        byFp.set(fp, m)
+        continue
+      }
+      // Same fingerprint: keep richer; if equal richness prefer keyed with uv
+      byFp.set(fp, preferRicherMessage(prev, m))
+    }
+
+    return [...byFp.values()].sort((a, b) => {
+      const da = parseMessageDateMs(a.date) ?? 0
+      const db = parseMessageDateMs(b.date) ?? 0
+      if (db !== da) return db - da
+      // stable tie-break
+      return String(a.id).localeCompare(String(b.id))
+    })
+  }
+
+  function preferRicherMessage(a: MailMessage, b: MailMessage): MailMessage {
+    const pickNew = messageRichness(b) >= messageRichness(a)
+    const base = pickNew ? b : a
+    const other = pickNew ? a : b
+    const body_html = base.body_html || other.body_html
+    const body_text = base.body_text || other.body_text
+    const body_preview = base.body_preview || other.body_preview
+    let verification_code: string | null | undefined
+    if (Object.prototype.hasOwnProperty.call(base, 'verification_code')) {
+      const incoming = base.verification_code
+      if (incoming != null && String(incoming).trim() !== '') verification_code = incoming
+      else if (Object.prototype.hasOwnProperty.call(other, 'verification_code')) {
+        const o = other.verification_code
+        verification_code =
+          o != null && String(o).trim() !== '' ? o : null
+      } else {
+        verification_code = null
+      }
+    } else {
+      verification_code = other.verification_code
+    }
+    return {
+      ...other,
+      ...base,
+      folder: normalizeFolder(base.folder || other.folder || 'inbox'),
+      uidvalidity: base.uidvalidity ?? other.uidvalidity,
+      body_html,
+      body_text,
+      body_preview,
+      verification_code,
+    }
   }
 
   function merge(email: string, messages: MailMessage[], retentionDays?: number) {
@@ -269,46 +376,12 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       const old = map.get(k) || (uidvalidity != null ? map.get(legacyKey) : undefined)
       if (old && legacyKey !== k) map.delete(legacyKey)
       if (old) {
-        // Body: keep richer content when the new fetch is a thin list row.
-        const body_html = m.body_html || old.body_html
-        const body_text = m.body_text || old.body_text
-        const body_preview = m.body_preview || old.body_preview
-        // Verification code: prefer the new parse when present. If the new
-        // message explicitly has no code (null/undefined/''), drop the sticky
-        // old value so fixed parsers (and false positives) can clear cache.
-        // Only fall back to old when the incoming object omits the field entirely
-        // AND we did not re-fetch a full row (thin merge without re-annotate).
-        let verification_code: string | null | undefined
-        if (Object.prototype.hasOwnProperty.call(m, 'verification_code')) {
-          const incoming = m.verification_code
-          if (incoming != null && String(incoming).trim() !== '') {
-            verification_code = incoming
-          } else {
-            // Explicit empty/null from server → clear stale false positives
-            verification_code = null
-          }
-        } else {
-          verification_code = old.verification_code
-        }
-        map.set(k, {
-          ...old,
-          ...withFolder,
-          folder,
-          uidvalidity: withFolder.uidvalidity ?? old.uidvalidity,
-          body_html,
-          body_text,
-          body_preview,
-          verification_code,
-        })
+        map.set(k, preferRicherMessage(old, withFolder))
       } else {
         map.set(k, withFolder)
       }
     }
-    let merged = [...map.values()].sort((a, b) => {
-      const da = parseMessageDateMs(a.date) ?? 0
-      const db = parseMessageDateMs(b.date) ?? 0
-      return db - da
-    })
+    let merged = dedupeAndSortMessages([...map.values()])
     if (retentionDays != null && retentionDays > 0) {
       merged = pruneByRetention(merged, retentionDays)
     }
@@ -449,13 +522,11 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       }
       const k = messageCacheKey(withFolder)
       if (!k) continue
-      map.set(k, withFolder)
+      const prevM = map.get(k)
+      map.set(k, prevM ? preferRicherMessage(prevM, withFolder) : withFolder)
     }
-    let nextList = [...kept, ...map.values()].sort((a, b) => {
-      const da = parseMessageDateMs(a.date) ?? 0
-      const db = parseMessageDateMs(b.date) ?? 0
-      return db - da
-    })
+    // Dedupe + newest-first for the whole mailbox (kept other folders + new page)
+    let nextList = dedupeAndSortMessages([...kept, ...map.values()])
     if (retentionDays != null && retentionDays > 0) {
       nextList = pruneByRetention(nextList, retentionDays)
     }
@@ -530,10 +601,25 @@ export const useMailCacheStore = defineStore('mailCache', () => {
         out.push({ ...m, accountEmail: email })
       }
     }
-    return out.sort((a, b) => {
+    // Dedupe within each accountEmail then global newest-first
+    const byAccount = new Map<string, MailMessage[]>()
+    for (const m of out) {
+      const e = m.accountEmail
+      const list = byAccount.get(e) || []
+      list.push(m)
+      byAccount.set(e, list)
+    }
+    const flat: Array<MailMessage & { accountEmail: string }> = []
+    for (const [email, list] of byAccount) {
+      for (const m of dedupeAndSortMessages(list)) {
+        flat.push({ ...m, accountEmail: email })
+      }
+    }
+    return flat.sort((a, b) => {
       const da = parseMessageDateMs(a.date) ?? 0
       const db = parseMessageDateMs(b.date) ?? 0
-      return db - da
+      if (db !== da) return db - da
+      return String(a.id).localeCompare(String(b.id))
     })
   }
 

@@ -48,6 +48,7 @@ import {
   supportsIncrementalSince,
   supportsRemoteLoadOlder,
 } from '@/utils/providerCapabilities'
+import { formatInUserTz, formatInUserTzTitle } from '@/utils/datetime'
 import {
   brandLabel as brandLabelUtil,
   typeLabel as typeLabelUtil,
@@ -1256,6 +1257,15 @@ function hostLabel(acc: MailAccount): string {
 function formatTime(ts?: number) {
   return formatRelativeTime(t, locale.value, ts)
 }
+
+/** Mail message date: YYYY-MM-DD HH:mm in the browser timezone. */
+function formatMailDate(date?: string | null): string {
+  return formatInUserTz(date, { locale: locale.value, kind: 'mail' })
+}
+
+function formatMailDateTitle(date?: string | null): string {
+  return formatInUserTzTitle(date, locale.value)
+}
 function displayCode(code: string | undefined, id: string): string {
   return displayCodeUtil(code, id, codeMasked.value, revealedCodes.value)
 }
@@ -1371,6 +1381,11 @@ async function applyFetchResult(
       userSettings.markFetched(acc.email, true, folderTag)
       userSettings.flushPersist()
       if (panelApplyAllowed(opts)) {
+        if (opts.clearFirst) {
+          // Cancel prior load-more expansion: only show the new first page
+          mailLoadingMore.value = false
+          mailNoMoreRemote.value = false
+        }
         // clearFirst → reset visible window; load-more / refresh → preserve scroll window
         loadMessagesFromCache(acc, {
           preserveVisible: !opts.clearFirst,
@@ -1378,7 +1393,14 @@ async function applyFetchResult(
           resetRemoteFlag: false,
         })
         if (opts.clearFirst) {
+          // Explicit cap after replace (loadMessagesFromCache already resets when !preserveVisible)
           mailVisibleCount.value = Math.min(MAIL_FIRST_PAGE, messages.value.length)
+          if (
+            selectedMessageId.value &&
+            !messages.value.some((m) => m.id === selectedMessageId.value)
+          ) {
+            selectedMessageId.value = messages.value[0]?.id ?? null
+          }
         }
         // Short page (e.g. 7 < 20) ⇒ no older remote mail — stop pull-to-load
         const requested = opts.requestedMax ?? MAIL_FIRST_PAGE
@@ -2136,7 +2158,9 @@ async function onClearAndRefetch() {
     return
   }
   if (!window.confirm(t('console.mailClearConfirm'))) return
-  // Will be re-set from short-page rule after success; open until then
+  // Cancel any prior load-more state immediately (window + remote EOF + in-flight older fetch)
+  mailLoadingMore.value = false
+  mailVisibleCount.value = MAIL_FIRST_PAGE
   mailNoMoreRemote.value = false
   await fetchOne(acc, true, {
     silent: false,
@@ -3256,7 +3280,7 @@ onUnmounted(() => {
                 <td v-if="!effectiveDense">
                   <span
                     class="muted time"
-                    :title="acc.updatedAt ? new Date(acc.updatedAt).toLocaleString() : ''"
+                    :title="acc.updatedAt ? formatInUserTzTitle(acc.updatedAt, locale) : ''"
                   >
                     {{ formatTime(acc.updatedAt) }}
                   </span>
@@ -3523,8 +3547,9 @@ onUnmounted(() => {
                   <div class="mail-sub">
                     {{ m.subject || t('console.mailNoSubject') }}
                   </div>
-                  <div v-if="messageTo(m)" class="mail-to muted">
-                    → {{ messageTo(m) }}
+                  <div class="mail-to muted">
+                    <template v-if="messageTo(m)">→ {{ messageTo(m) }} · </template>
+                    <span :title="formatMailDateTitle(m.date)">{{ formatMailDate(m.date) }}</span>
                   </div>
                 </button>
                 <div ref="mailLoadMoreSentinel" class="mail-load-more-sentinel" aria-hidden="true" />
@@ -3592,7 +3617,10 @@ onUnmounted(() => {
                   </span>
                 </template>
                 <span class="dot">·</span>
-                <span class="meta-part">{{ selectedMessage.date || '—' }}</span>
+                <span
+                  class="meta-part"
+                  :title="formatMailDateTitle(selectedMessage.date)"
+                >{{ formatMailDate(selectedMessage.date) }}</span>
               </div>
               <div class="detail-body-scroll">
                 <div
@@ -4123,7 +4151,9 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
             </span>
           </template>
           <span class="dot">·</span>
-          <span>{{ selectedMessage.date || '—' }}</span>
+          <span :title="formatMailDateTitle(selectedMessage.date)">{{
+            formatMailDate(selectedMessage.date)
+          }}</span>
         </div>
         <div class="modal-body body-modal-content">
           <div

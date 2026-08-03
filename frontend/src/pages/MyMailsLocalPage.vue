@@ -7,12 +7,20 @@ import { copyText } from '@/utils/clipboard'
 import { useToast } from '@/composables/useToast'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
 import { formatLinkPreview, onEmailHtmlClick } from '@/utils/emailLinks'
+import { formatInUserTz, formatInUserTzTitle } from '@/utils/datetime'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const mailCache = useMailCacheStore()
 const accounts = useAccountsStore()
 const { flashMsg } = useToast()
+
+function formatMailDate(date?: string | null): string {
+  return formatInUserTz(date, { locale: locale.value, kind: 'mail' })
+}
+function formatMailDateTitle(date?: string | null): string {
+  return formatInUserTzTitle(date, locale.value)
+}
 
 type FolderTab = 'inbox' | 'spam' | 'sent'
 
@@ -237,7 +245,8 @@ async function copyCode(code?: string | null) {
                 <div class="meta">
                   {{ m.from || m.from_address }}
                   <template v-if="m.to"> · → {{ m.to }}</template>
-                  · {{ m.date }}
+                  ·
+                  <span :title="formatMailDateTitle(m.date)">{{ formatMailDate(m.date) }}</span>
                 </div>
               </button>
             </template>
@@ -279,7 +288,10 @@ async function copyCode(code?: string | null) {
               {{ selected.accountEmail }}
               · {{ selected.from }}
               <template v-if="selected.to"> · → {{ selected.to }}</template>
-              · {{ selected.date }}
+              ·
+              <span :title="formatMailDateTitle(selected.date)">{{
+                formatMailDate(selected.date)
+              }}</span>
             </p>
             <button
               v-if="selected.verification_code"
