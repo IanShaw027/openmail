@@ -755,6 +755,9 @@ export default {
     filterStarred: '仅重点邮箱',
     filterStarredHint: '只显示在操作台标记为「重点」的邮箱的邮件',
     filterStarredEmpty: '尚未标记重点邮箱。请到操作台点邮箱前的 ★ 标记。',
+    cacheTotal: '本机缓存 {n} 封',
+    showingFiltered: '当前筛选 {n} 封',
+    sameAsConsole: '与操作台共用本机缓存：操作台取件后此处会实时更新（按文件夹分栏）',
     reset: '重置',
     // Results
     noMails: '未找到邮件',

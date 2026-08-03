@@ -760,6 +760,10 @@ export default {
     filterStarred: 'Priority only',
     filterStarredHint: 'Only mail from mailboxes starred on the console',
     filterStarredEmpty: 'No priority mailboxes yet. Star a mailbox on the console (★).',
+    cacheTotal: '{n} in local cache',
+    showingFiltered: '{n} match filters',
+    sameAsConsole:
+      'Shares the console local cache — fetch on the console updates this list live (per folder tab)',
     reset: 'Reset',
     // Results
     noMails: 'No mail found',

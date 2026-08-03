@@ -35,8 +35,8 @@ const folder = ref<FolderTab>(
 )
 const selectedKey = ref<string | null>(null)
 const page = ref(1)
-const pageSize = ref(Number(localStorage.getItem('openmail.myMailsPageSize') || 20) || 20)
-const pageSizeOptions = [10, 20, 50]
+const pageSize = ref(Number(localStorage.getItem('openmail.myMailsPageSize') || 50) || 50)
+const pageSizeOptions = [20, 50, 100, 200]
 /** For enter/leave animation direction */
 const folderAnim = ref<'left' | 'right'>('right')
 
@@ -76,6 +76,9 @@ const results = computed(() =>
     folder: folder.value,
   }),
 )
+
+/** Raw cache size (all folders) — same store the console writes to. */
+const cacheTotal = computed(() => mailCache.totalCount())
 
 const folderCounts = computed(() => {
   const base = {
@@ -167,6 +170,13 @@ async function copyCode(code?: string | null) {
 
 <template>
   <div class="mails-page">
+    <p class="cache-hint muted">
+      {{ t('me.sameAsConsole') }}
+      · {{ t('me.cacheTotal', { n: cacheTotal }) }}
+      <template v-if="results.length !== cacheTotal">
+        · {{ t('me.showingFiltered', { n: results.length }) }}
+      </template>
+    </p>
     <div class="filters card-solid">
       <input v-model="q" class="input" type="search" :placeholder="t('me.filterKeywordPh')" />
       <input v-model="from" class="input" type="search" :placeholder="t('me.filterFromPh')" />
@@ -324,6 +334,11 @@ async function copyCode(code?: string | null) {
   flex-direction: column;
   gap: 12px;
   box-sizing: border-box;
+}
+.cache-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
 }
 .filters {
   display: flex;

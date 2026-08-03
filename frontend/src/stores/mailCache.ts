@@ -62,7 +62,14 @@ export function extractCodeFromMessage(m: Pick<
 }
 
 const KEY = 'openmail.mailCache.v1'
-const PER_MAILBOX_CAP = 200
+/**
+ * Max messages kept **per folder** (inbox | spam | sent) for one mailbox.
+ * Previously a single 200-cap across all folders meant load-more on inbox
+ * could push out spam/sent (and My Mails looked almost empty).
+ */
+const PER_FOLDER_CAP = 800
+/** Absolute safety cap per mailbox address (sum of folders). */
+const PER_MAILBOX_CAP = 2400
 
 type CacheMap = Record<string, MailMessage[]>
 
@@ -107,12 +114,44 @@ export const useMailCacheStore = defineStore('mailCache', () => {
   const vaultHydrated = ref(false)
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
+  /**
+   * Cap each folder to PER_FOLDER_CAP (newest first), then whole mailbox to
+   * PER_MAILBOX_CAP. Prevents one folder's load-more from wiping others.
+   */
+  function capMailboxList(list: MailMessage[]): MailMessage[] {
+    const byFolder = new Map<string, MailMessage[]>()
+    for (const m of list) {
+      const f = normalizeFolder(m.folder || 'inbox')
+      const arr = byFolder.get(f) || []
+      arr.push(m)
+      byFolder.set(f, arr)
+    }
+    const out: MailMessage[] = []
+    for (const [, arr] of byFolder) {
+      const sorted = [...arr].sort((a, b) => {
+        const da = parseMessageDateMs(a.date) ?? 0
+        const db = parseMessageDateMs(b.date) ?? 0
+        if (db !== da) return db - da
+        return String(a.id).localeCompare(String(b.id))
+      })
+      out.push(...sorted.slice(0, PER_FOLDER_CAP))
+    }
+    return out
+      .sort((a, b) => {
+        const da = parseMessageDateMs(a.date) ?? 0
+        const db = parseMessageDateMs(b.date) ?? 0
+        if (db !== da) return db - da
+        return String(a.id).localeCompare(String(b.id))
+      })
+      .slice(0, PER_MAILBOX_CAP)
+  }
+
   async function persistEncrypted() {
     const vault = useVaultStore()
     if (vault.status !== 'unlocked') return
     const out: CacheMap = {}
     for (const [k, list] of Object.entries(byEmail.value)) {
-      out[k] = list.slice(0, PER_MAILBOX_CAP)
+      out[k] = capMailboxList(list)
     }
     await vault.saveMailCache(out as Record<string, unknown>)
     try {
@@ -222,27 +261,6 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     return uv ? `${f}::v${uv}::${id}` : `${f}::${id}`
   }
 
-  /**
-   * Soft content fingerprint: same subject+from+date within a folder often means
-   * the same mail under different provider ids (e.g. graph vs imap, or list/detail).
-   */
-  function contentFingerprint(
-    m: Pick<MailMessage, 'subject' | 'from' | 'from_address' | 'date' | 'folder'>,
-  ): string {
-    const f = normalizeFolder(m.folder)
-    const subj = String(m.subject || '')
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-    const from = String(m.from_address || m.from || '')
-      .trim()
-      .toLowerCase()
-    const dayMs = parseMessageDateMs(m.date)
-    // Bucket to minute so minor timezone formatting diffs still collapse
-    const bucket = dayMs != null ? String(Math.floor(dayMs / 60_000)) : String(m.date || '')
-    return `${f}|${subj}|${from}|${bucket}`
-  }
-
   function messageRichness(m: MailMessage): number {
     return (
       (m.body_html?.length || 0) +
@@ -253,8 +271,33 @@ export const useMailCacheStore = defineStore('mailCache', () => {
   }
 
   /**
-   * Collapse duplicates by cache key and content fingerprint; newest-first sort.
-   * Prefer richer body / verification when merging two representations of one mail.
+   * Soft content fingerprint — only for clearly-identical list/detail pairs.
+   * Requires non-empty subject (≥3 chars) + from + same second. Empty subjects
+   * or bulk same-minute newsletters must NOT collapse (that emptied My Mails).
+   */
+  function contentFingerprint(
+    m: Pick<MailMessage, 'id' | 'subject' | 'from' | 'from_address' | 'date' | 'folder'>,
+  ): string | null {
+    const subj = String(m.subject || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+    if (subj.length < 3) return null
+    const from = String(m.from_address || m.from || '')
+      .trim()
+      .toLowerCase()
+    if (!from) return null
+    const dayMs = parseMessageDateMs(m.date)
+    if (dayMs == null) return null
+    // Same second — tighter than minute to avoid merging real different mails
+    const bucket = String(Math.floor(dayMs / 1000))
+    const f = normalizeFolder(m.folder)
+    return `${f}|${subj}|${from}|${bucket}`
+  }
+
+  /**
+   * Collapse duplicates by cache key; optional soft fingerprint for same-second
+   * re-fetches with different ids. Newest-first sort.
    */
   function dedupeAndSortMessages(list: MailMessage[]): MailMessage[] {
     const byKey = new Map<string, MailMessage>()
@@ -264,6 +307,14 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       const withFolder: MailMessage = { ...m, folder }
       const k = messageCacheKey(withFolder)
       if (!k) continue
+      // Also absorb legacy folder::id when uv-keyed entry arrives
+      const legacyKey = `${folder}::${String(m.id).trim()}`
+      if (legacyKey !== k && byKey.has(legacyKey) && !byKey.has(k)) {
+        const old = byKey.get(legacyKey)!
+        byKey.delete(legacyKey)
+        byKey.set(k, preferRicherMessage(old, withFolder))
+        continue
+      }
       const prev = byKey.get(k)
       if (!prev) {
         byKey.set(k, withFolder)
@@ -272,24 +323,27 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       byKey.set(k, preferRicherMessage(prev, withFolder))
     }
 
-    // Second pass: content fingerprint within folder (different ids, same mail)
+    // Soft pass: only merge when fingerprint is strong (non-null)
     const byFp = new Map<string, MailMessage>()
+    const noFp: MailMessage[] = []
     for (const m of byKey.values()) {
       const fp = contentFingerprint(m)
+      if (!fp) {
+        noFp.push(m)
+        continue
+      }
       const prev = byFp.get(fp)
       if (!prev) {
         byFp.set(fp, m)
         continue
       }
-      // Same fingerprint: keep richer; if equal richness prefer keyed with uv
       byFp.set(fp, preferRicherMessage(prev, m))
     }
 
-    return [...byFp.values()].sort((a, b) => {
+    return [...byFp.values(), ...noFp].sort((a, b) => {
       const da = parseMessageDateMs(a.date) ?? 0
       const db = parseMessageDateMs(b.date) ?? 0
       if (db !== da) return db - da
-      // stable tie-break
       return String(a.id).localeCompare(String(b.id))
     })
   }
@@ -385,7 +439,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     if (retentionDays != null && retentionDays > 0) {
       merged = pruneByRetention(merged, retentionDays)
     }
-    byEmail.value = { ...byEmail.value, [key]: merged.slice(0, PER_MAILBOX_CAP) }
+    byEmail.value = { ...byEmail.value, [key]: capMailboxList(merged) }
   }
 
   /**
@@ -537,7 +591,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     } else {
       byEmail.value = {
         ...byEmail.value,
-        [key]: nextList.slice(0, PER_MAILBOX_CAP),
+        [key]: capMailboxList(nextList),
       }
     }
     persistInBackground()
@@ -550,11 +604,26 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     const next: CacheMap = {}
     let changed = false
     for (const [k, list] of Object.entries(byEmail.value)) {
-      const pruned = pruneByRetention(list, days).slice(0, PER_MAILBOX_CAP)
+      const pruned = capMailboxList(pruneByRetention(list, days))
       next[k] = pruned
       if (pruned.length !== list.length) changed = true
     }
     if (changed) byEmail.value = next
+  }
+
+  /** Total cached messages (optional folder / email filter). For UI counts. */
+  function totalCount(opts?: { email?: string; folder?: string }): number {
+    let n = 0
+    const emailKey = opts?.email?.toLowerCase()
+    const f = opts?.folder ? normalizeFolder(opts.folder) : null
+    for (const [email, list] of Object.entries(byEmail.value)) {
+      if (emailKey && email !== emailKey) continue
+      for (const m of list) {
+        if (f && normalizeFolder(m.folder || 'inbox') !== f) continue
+        n += 1
+      }
+    }
+    return n
   }
 
   function search(opts: {
@@ -624,15 +693,15 @@ export const useMailCacheStore = defineStore('mailCache', () => {
   }
 
   function replaceAll(map: CacheMap, retentionDays?: number) {
-    if (retentionDays != null && retentionDays > 0) {
-      const next: CacheMap = {}
-      for (const [k, list] of Object.entries(map)) {
-        next[k] = pruneByRetention(list, retentionDays).slice(0, PER_MAILBOX_CAP)
+    const next: CacheMap = {}
+    for (const [k, list] of Object.entries(map)) {
+      let rows = list as MailMessage[]
+      if (retentionDays != null && retentionDays > 0) {
+        rows = pruneByRetention(rows, retentionDays)
       }
-      byEmail.value = next
-      return
+      next[k] = capMailboxList(dedupeAndSortMessages(rows))
     }
-    byEmail.value = map
+    byEmail.value = next
   }
 
   return {
@@ -648,6 +717,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     clearMailboxFolder,
     replaceFolder,
     pruneAll,
+    totalCount,
     search,
     replaceAll,
     hydrateFromVault,
