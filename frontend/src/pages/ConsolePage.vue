@@ -447,13 +447,20 @@ const panelCode = computed(() => {
 
 const mailEmptyKind = computed(() => {
   if (!selected.value) return 'no_account' as const
-  if (mailLoading.value) return 'loading' as const
+  // Keep showing existing list while refreshing; only full-screen loading when empty
+  if (mailLoading.value && !messages.value.length) return 'loading' as const
   if (messages.value.length) return 'has_mail' as const
+  if (mailLoading.value) return 'loading' as const
   if (lastFetchOk.value && lastFetchEmpty.value) return 'empty_inbox' as const
   if (selected.value.status === 'error' && selected.value.lastError) return 'error' as const
   if (panelCode.value) return 'cached_code' as const
   return 'need_fetch' as const
 })
+
+/** Show pull-up load-more hint when more cache or remote may exist */
+const showLoadMoreHint = computed(
+  () => hasMoreCached.value || !mailNoMoreRemote.value,
+)
 
 /**
  * Load messages for account from local cache (filtered by current folder tab).
@@ -1254,7 +1261,12 @@ function panelApplyAllowed(
 async function applyFetchResult(
   acc: MailAccount,
   result: FetchResult,
-  opts: { expectedAccountId?: string; generation?: number } = {},
+  opts: {
+    expectedAccountId?: string
+    generation?: number
+    /** Wipe folder cache only after this successful result */
+    clearFirst?: boolean
+  } = {},
 ): Promise<boolean> {
   const code = extractCode(result)
   const msgs = result.messages ?? []
@@ -1296,6 +1308,10 @@ async function applyFetchResult(
     try {
       // Tag folder so inbox/spam/sent tabs filter correctly
       const folderTag = mailCache.normalizeFolder(result.folder || mailFolder.value)
+      // clearFirst (清空重拉): only wipe after success, then replace with new page
+      if (opts.clearFirst) {
+        mailCache.clearMailboxFolder(acc.email, folderTag)
+      }
       const uv =
         result.uidvalidity != null && Number.isFinite(Number(result.uidvalidity))
           ? Number(result.uidvalidity)
@@ -1318,15 +1334,25 @@ async function applyFetchResult(
       userSettings.markFetched(acc.email, true, folderTag)
       userSettings.flushPersist()
       if (panelApplyAllowed(opts)) {
-        // Preserve expanded list when appending older pages
-        loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
+        // clearFirst → reset visible window; load-more / refresh → preserve scroll window
+        loadMessagesFromCache(acc, {
+          preserveVisible: !opts.clearFirst,
+          resetRemoteFlag: Boolean(opts.clearFirst),
+        })
+        if (opts.clearFirst) {
+          mailVisibleCount.value = Math.min(MAIL_FIRST_PAGE, messages.value.length)
+          mailNoMoreRemote.value = false
+        }
         lastFetchEmpty.value = messages.value.length === 0
       }
     } catch {
       if (panelApplyAllowed(opts)) {
-        messages.value = msgs
-        selectedMessageId.value = msgs[0]?.id ?? null
-        lastFetchEmpty.value = msgs.length === 0
+        // Do not wipe existing list on apply failure
+        if (!messages.value.length) {
+          messages.value = msgs
+          selectedMessageId.value = msgs[0]?.id ?? null
+        }
+        lastFetchEmpty.value = messages.value.length === 0
       }
     }
   }
@@ -1455,24 +1481,16 @@ async function fetchOne(
     fetchingId.value = acc.id
     mailLoading.value = true
     accounts.select(acc.id)
-    // Keep showing cache while fetching
-    if (!messages.value.length && !opts.clearFirst) loadMessagesFromCache(acc)
+    // Always keep showing existing list while request is in flight
+    if (!messages.value.length) loadMessagesFromCache(acc)
     lastFetchEmpty.value = false
     lastFetchOk.value = false
   }
   try {
     // Prefer explicit folder (multi-folder / load-more); else current tab
     const folder = mailCache.normalizeFolder(opts.folder || mailFolder.value)
-    if (opts.clearFirst) {
-      // Only wipe the current folder tab — keep spam/sent/other cache intact
-      mailCache.clearMailboxFolder(acc.email, folder)
-      if (manageUi && accounts.selectedId === expectedAccountId && gen === fetchGeneration.value) {
-        messages.value = []
-        selectedMessageId.value = null
-        mailVisibleCount.value = MAIL_FIRST_PAGE
-        mailNoMoreRemote.value = false
-      }
-    }
+    // clearFirst: only wipe after a successful response (see apply path below).
+    // Keep local UI list intact during the request.
     // Manual / clear / first-full → recent window (no since).
     // Catch-up passes opts.since from newest cached mail in that folder.
     // Cookie/HttpApi use local date filter (provider time_paging=local_filter).
@@ -1624,6 +1642,10 @@ async function fetchOne(
       if (result.ok !== false) {
         try {
           const folderTag = mailCache.normalizeFolder(result.folder || folder)
+          // clearFirst only after success (keep UI list until then)
+          if (opts.clearFirst) {
+            mailCache.clearMailboxFolder(acc.email, folderTag)
+          }
           if (msgs.length) {
             const uv =
               result.uidvalidity != null && Number.isFinite(Number(result.uidvalidity))
@@ -1662,6 +1684,7 @@ async function fetchOne(
     await applyFetchResult(acc, result, {
       expectedAccountId,
       generation: gen,
+      clearFirst: Boolean(opts.clearFirst),
     })
     return { ok: result.ok !== false, count: (result.messages ?? []).length }
   } catch (e) {
@@ -1849,13 +1872,14 @@ function messageDedupeKey(m: Pick<MailMessage, 'id' | 'folder' | 'uidvalidity'>)
   return uv ? `${f}::${uv}::${m.id}` : `${f}::${m.id}`
 }
 
-/** Expand visible list from cache, or fetch older from server (current tab only). */
+/**
+ * Expand visible list from cache, or fetch older from server (current tab only).
+ * Never clears the existing list; only appends after a successful response.
+ * Loading indicator is shown at the bottom (mailLoadingMore).
+ */
 async function onLoadMoreMails() {
   const acc = selected.value
-  if (!acc) {
-    flashMsg(t('console.needSelectAccount'), 'danger')
-    return
-  }
+  if (!acc) return
   // 1) Still more in local cache → just grow the window
   if (messages.value.length > mailVisibleCount.value) {
     mailVisibleCount.value = Math.min(
@@ -1868,31 +1892,38 @@ async function onLoadMoreMails() {
   if (accountFetchLocks.has(acc.id)) return
 
   const folder = mailFolder.value
-  // 2) Pull older page: native since_before can use before=; local_filter falls back
-  // to a larger recent window so we do not pretend to have a stable remote cursor.
   const before =
     mailCache.oldestUtcIso(acc.email, folder) ||
     messages.value[messages.value.length - 1]?.date ||
     undefined
+  // Load-more uses silent fetch so it does not flip top-of-list refresh chrome
+  const loadMoreFetch = {
+    silent: true as const,
+    nested: true as const,
+    manageUi: false as const,
+    folder,
+  }
+
   if (!before || !supportsRemoteLoadOlder(acc)) {
-    // No date anchor or no time support — larger recent window
+    // No date anchor or no time support — larger recent window (merge, don't wipe)
     mailLoadingMore.value = true
     try {
       const prevCount = messages.value.length
+      const prevKeys = new Set(messages.value.map(messageDedupeKey))
       const r = await fetchOne(acc, false, {
-        silent: false,
-        folder,
+        ...loadMoreFetch,
         maxMessages: Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE),
         forceRecent: true,
       })
       if (accounts.selectedId !== acc.id) return
-      if (!r.ok || messages.value.length <= prevCount) {
+      loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
+      const added = messages.value.filter((m) => !prevKeys.has(messageDedupeKey(m))).length
+      if (!r.ok || added === 0) {
         mailNoMoreRemote.value = true
-        if (r.ok) flashMsg(t('console.mailNoMore'), 'info')
       } else {
         mailVisibleCount.value = Math.min(
           messages.value.length,
-          mailVisibleCount.value + MAIL_LOAD_MORE,
+          mailVisibleCount.value + Math.max(added, MAIL_LOAD_MORE),
         )
       }
     } finally {
@@ -1906,50 +1937,47 @@ async function onLoadMoreMails() {
     const prevKeys = new Set(messages.value.map(messageDedupeKey))
     const prevCount = messages.value.length
     const r = await fetchOne(acc, true, {
-      silent: false,
-      folder,
+      ...loadMoreFetch,
       before: String(before),
       maxMessages: MAIL_LOAD_MORE,
     })
-    if (!r.ok) return
     if (accounts.selectedId !== acc.id) return
+    if (!r.ok) {
+      // Keep existing list; do not mark EOF on network failure
+      return
+    }
+    loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
     const added = messages.value.filter((m) => !prevKeys.has(messageDedupeKey(m))).length
     if (added === 0 && messages.value.length <= prevCount) {
-      // local_filter (cookie/http_api): before-filter often returns 0 even when
-      // more mail exists — try one larger forceRecent window before EOF.
       if (providerTimePaging(acc.type) === 'local_filter') {
         const growTarget = Math.max(MAIL_FIRST_PAGE, prevCount + MAIL_LOAD_MORE * 2)
         const r2 = await fetchOne(acc, false, {
-          silent: false,
-          folder,
+          ...loadMoreFetch,
           maxMessages: growTarget,
           forceRecent: true,
         })
         if (accounts.selectedId !== acc.id) return
-        if (!r2.ok || messages.value.length <= prevCount) {
+        loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
+        const added2 = messages.value.filter((m) => !prevKeys.has(messageDedupeKey(m))).length
+        if (!r2.ok || added2 === 0) {
           mailNoMoreRemote.value = true
-          flashMsg(t('console.mailNoMore'), 'info')
         } else {
           mailVisibleCount.value = Math.min(
             messages.value.length,
-            mailVisibleCount.value + MAIL_LOAD_MORE,
+            mailVisibleCount.value + Math.max(added2, MAIL_LOAD_MORE),
           )
         }
         return
       }
       mailNoMoreRemote.value = true
-      flashMsg(t('console.mailNoMore'), 'info')
     } else {
       mailVisibleCount.value = Math.min(
         messages.value.length,
-        Math.max(mailVisibleCount.value + Math.max(added, MAIL_LOAD_MORE), mailVisibleCount.value + 1),
+        Math.max(
+          mailVisibleCount.value + Math.max(added, MAIL_LOAD_MORE),
+          mailVisibleCount.value + 1,
+        ),
       )
-      if (added === 0) {
-        mailVisibleCount.value = Math.min(
-          messages.value.length,
-          mailVisibleCount.value + MAIL_LOAD_MORE,
-        )
-      }
     }
   } finally {
     mailLoadingMore.value = false
@@ -3321,6 +3349,10 @@ onUnmounted(() => {
             </div>
             <template v-else>
               <div ref="mailListScrollEl" class="mail-list-scroll">
+                <!-- Top: refresh indicator (keep list below while loading) -->
+                <div v-if="mailLoading" class="mail-list-status mail-list-status-top">
+                  {{ t('console.mailRefreshing') }}
+                </div>
                 <button
                   v-for="m in visibleMessages"
                   :key="m.id"
@@ -3351,26 +3383,25 @@ onUnmounted(() => {
                   </div>
                 </button>
                 <div ref="mailLoadMoreSentinel" class="mail-load-more-sentinel" aria-hidden="true" />
+                <!-- Bottom: infinite-scroll status (no button) -->
                 <div class="mail-load-more">
                   <span class="muted mail-count">
                     {{ t('console.mailShowing', { n: visibleMessages.length, total: messages.length }) }}
                   </span>
-                  <button
-                    v-if="hasMoreCached || !mailNoMoreRemote"
-                    type="button"
-                    class="btn btn-outline btn-sm"
-                    :disabled="mailLoading || mailLoadingMore"
-                    @click="onLoadMoreMails"
+                  <p v-if="mailLoadingMore" class="mail-list-status">
+                    {{ t('console.mailLoadingOlder') }}
+                  </p>
+                  <p
+                    v-else-if="showLoadMoreHint"
+                    class="muted mail-pull-hint"
                   >
                     {{
-                      mailLoadingMore
-                        ? t('common.loading')
-                        : hasMoreCached
-                          ? t('console.mailLoadMoreCache')
-                          : t('console.mailLoadMore')
+                      hasMoreCached
+                        ? t('console.mailPullMoreCache')
+                        : t('console.mailPullMore')
                     }}
-                  </button>
-                  <p v-if="mailNoMoreRemote && !hasMoreCached" class="muted mail-no-more">
+                  </p>
+                  <p v-else-if="mailNoMoreRemote" class="muted mail-no-more">
                     {{ t('console.mailNoMore') }}
                   </p>
                 </div>
@@ -4479,12 +4510,32 @@ th.col-act.sticky-act {
   width: 100%;
   pointer-events: none;
 }
+.mail-list-status {
+  margin: 0;
+  padding: 10px 12px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.mail-list-status-top {
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
 .mail-load-more {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 12px 10px 16px;
+  gap: 6px;
+  padding: 12px 10px 20px;
+}
+.mail-pull-hint {
+  margin: 0;
+  font-size: 12px;
+  text-align: center;
 }
 .mail-count {
   font-size: 11px;

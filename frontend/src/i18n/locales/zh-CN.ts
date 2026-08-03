@@ -627,11 +627,15 @@ export default {
     collapseActions: '收起操作',
     mailLoadMore: '加载更多（更早 20 封）',
     mailLoadMoreCache: '显示更多',
+    mailPullMore: '上拉加载更早邮件',
+    mailPullMoreCache: '上拉显示更多',
+    mailRefreshing: '正在刷新…',
+    mailLoadingOlder: '正在加载更早邮件…',
     mailNoMore: '没有更早的邮件了',
     mailShowing: '显示 {n} / {total}',
     mailClearRefetch: '清空重拉',
-    mailClearHint: '清空当前文件夹本地缓存后重新拉取最近 20 封',
-    mailClearConfirm: '清空当前文件夹本地邮件缓存，并重新拉取最近 20 封？',
+    mailClearHint: '成功后清空当前文件夹缓存并重新拉取最近 20 封（请求中保留原列表）',
+    mailClearConfirm: '成功取件后将清空当前文件夹本地缓存，并写入最新 20 封。确定继续？',
 
     clientSealedNeedLocal:
       '该账号凭证仅保存在本机保险库（服务端无法解密）。请先解锁保险库；若换了浏览器/清了数据，请重新导入账号密码后再取信。',

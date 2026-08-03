@@ -630,11 +630,15 @@ export default {
     collapseActions: 'Hide actions',
     mailLoadMore: 'Load more (20 older)',
     mailLoadMoreCache: 'Show more',
+    mailPullMore: 'Pull up for older mail',
+    mailPullMoreCache: 'Pull up to show more',
+    mailRefreshing: 'Refreshing…',
+    mailLoadingOlder: 'Loading older mail…',
     mailNoMore: 'No older messages',
     mailShowing: 'Showing {n} / {total}',
     mailClearRefetch: 'Clear & refetch',
-    mailClearHint: 'Clear local cache for the current folder, then fetch the latest 20',
-    mailClearConfirm: 'Clear local cache for the current folder and fetch the latest 20?',
+    mailClearHint: 'After success, clear this folder cache and fetch the latest 20 (list kept while loading)',
+    mailClearConfirm: 'On success, clear this folder’s local cache and write the latest 20. Continue?',
 
     clientSealedNeedLocal:
       'Credentials for this account are sealed in your browser vault (server cannot decrypt). Unlock the vault; if this is a new browser or data was cleared, re-import the account with password, then fetch.',
