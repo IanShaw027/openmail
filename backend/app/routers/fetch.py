@@ -18,20 +18,25 @@ from app.schemas import (
 )
 from app.services.fetch_service import fetch_account, fetch_proxy
 from app.services.license import check_poll_quota
+from app.services.mail_slim import slim_message_fields
 from app.services.send_service import send_mail
 
 router = APIRouter(tags=["fetch"])
 
 
 def _messages_out(messages: list[Any]) -> list[FetchMessageOut]:
+    """Serialize messages for the client with server-side body slimming.
+
+    Large marketing HTML (base64 images, scripts) blows browser vault
+    localStorage when encrypted — strip bloat here before JSON leaves the API.
+    """
     out: list[FetchMessageOut] = []
     for m in messages:
-        body_html = getattr(m, "body_html", None) or None
-        body_text = getattr(m, "body_text", None) or None
-        if isinstance(body_html, str) and len(body_html) > 500_000:
-            body_html = body_html[:500_000]
-        if isinstance(body_text, str) and len(body_text) > 200_000:
-            body_text = body_text[:200_000]
+        body_html, body_text, body_preview = slim_message_fields(
+            body_html=getattr(m, "body_html", None) or None,
+            body_text=getattr(m, "body_text", None) or None,
+            body_preview=getattr(m, "body_preview", None) or None,
+        )
         uv = getattr(m, "uidvalidity", None)
         try:
             uv_out = int(uv) if uv is not None else None
@@ -45,7 +50,7 @@ def _messages_out(messages: list[Any]) -> list[FetchMessageOut]:
                 from_address=getattr(m, "from_address", None) or None,
                 to=getattr(m, "to", None) or None,
                 date=getattr(m, "date", None),
-                body_preview=getattr(m, "body_preview", None) or None,
+                body_preview=body_preview,
                 body_text=body_text,
                 body_html=body_html,
                 verification_code=getattr(m, "verification_code", None),

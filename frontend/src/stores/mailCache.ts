@@ -4,6 +4,7 @@ import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import type { MailMessage } from '@/api/accounts'
 import { useVaultStore } from '@/stores/vault'
+import { useSettingsStore } from '@/stores/settings'
 
 /**
  * Lightweight client-side OTP re-parse (aligned with backend heuristics).
@@ -67,11 +68,90 @@ const KEY = 'openmail.mailCache.v1'
  * Previously a single 200-cap across all folders meant load-more on inbox
  * could push out spam/sent (and My Mails looked almost empty).
  */
-const PER_FOLDER_CAP = 800
+/** Per-folder cap: enough history without blowing ~5MB vault localStorage. */
+const PER_FOLDER_CAP = 300
 /** Absolute safety cap per mailbox address (sum of folders). */
-const PER_MAILBOX_CAP = 2400
+const PER_MAILBOX_CAP = 900
+
+/**
+ * Persist-time body limits (chars). Server also slims on fetch; this covers
+ * already-cached fat marketing HTML so vault localStorage does not quota-blow.
+ */
+const PERSIST_HTML_SOFT = 12_000
+const PERSIST_HTML_HARD = 48_000
+const PERSIST_TEXT_HARD = 16_000
+const PERSIST_PREVIEW_HARD = 280
 
 type CacheMap = Record<string, MailMessage[]>
+
+function stripHtmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Client-side body slim aligned with server mail_slim (for legacy fat cache). */
+export function slimMessageForPersist(m: MailMessage, aggressive = false): MailMessage {
+  let html = m.body_html || ''
+  let text = m.body_text || ''
+  let preview = m.body_preview || ''
+
+  if (html) {
+    html = html
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<svg[\s\S]*?<\/svg>/gi, '')
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
+      // data: URIs (base64 images) — main quota killer
+      .replace(
+        /(?:src|href|background|data-src|poster)\s*=\s*(['"])\s*data:[^'"]{200,}\1/gi,
+        'src="about:blank"',
+      )
+      .replace(/url\(\s*['"]?data:[^)]{200,}\)/gi, 'none')
+      .replace(/<img\b[^>]*(?:width\s*=\s*['"]?1['"]?|height\s*=\s*['"]?1['"]?)[^>]*\/?>/gi, '')
+
+    if (html.length > PERSIST_HTML_SOFT || aggressive) {
+      html = html
+        .replace(/\sstyle\s*=\s*(['"]).*?\1/gi, '')
+        .replace(/\s(?:class|id)\s*=\s*(['"]).*?\1/gi, '')
+        .replace(/(?:src|href)\s*=\s*(['"])[^'"]{800,}\1/gi, 'href="#"')
+    }
+    if (html.length > PERSIST_HTML_HARD) {
+      html = html.slice(0, PERSIST_HTML_HARD) + '\n<!-- openmail:truncated -->'
+    }
+  }
+
+  if (aggressive) {
+    // Drop HTML entirely; keep plain text only
+    if (!text && html) text = stripHtmlToText(html)
+    html = ''
+  }
+
+  if (text.length > PERSIST_TEXT_HARD) {
+    text = text.slice(0, PERSIST_TEXT_HARD) + '…'
+  }
+  if (!text && html) {
+    text = stripHtmlToText(html).slice(0, PERSIST_TEXT_HARD)
+  }
+  if (!preview) {
+    preview = (text || stripHtmlToText(html || '')).replace(/\s+/g, ' ').trim()
+  }
+  if (preview.length > PERSIST_PREVIEW_HARD) {
+    preview = preview.slice(0, PERSIST_PREVIEW_HARD - 1) + '…'
+  }
+
+  return {
+    ...m,
+    body_html: html || undefined,
+    body_text: text || undefined,
+    body_preview: preview || undefined,
+  }
+}
 
 function load(): CacheMap {
   try {
@@ -109,16 +189,58 @@ export function pruneByRetention(
   })
 }
 
+/**
+ * Sort helper: newer first. Undated messages sort as oldest so they drop first
+ * when trimming by date under quota pressure.
+ */
+function compareMailDateDesc(a: MailMessage, b: MailMessage): number {
+  const da = parseMessageDateMs(a.date)
+  const db = parseMessageDateMs(b.date)
+  // null date → treat as very old
+  const va = da ?? Number.NEGATIVE_INFINITY
+  const vb = db ?? Number.NEGATIVE_INFINITY
+  if (vb !== va) return vb - va
+  return String(a.id).localeCompare(String(b.id))
+}
+
+/**
+ * Keep only the newest `keepCount` messages (by date). Used under storage quota:
+ * drop a little of the oldest mail instead of wiping random rows.
+ */
+export function keepNewestByDate(list: MailMessage[], keepCount: number): MailMessage[] {
+  const n = Math.max(0, Math.floor(keepCount))
+  if (n <= 0) return []
+  if (list.length <= n) return list
+  return [...list].sort(compareMailDateDesc).slice(0, n)
+}
+
+/** Best-effort read of user retention days (settings store). */
+function readRetentionDays(): number {
+  try {
+    const d = Number(useSettingsStore().s?.retentionDays)
+    if (Number.isFinite(d) && d > 0) return Math.min(365, Math.max(1, d))
+  } catch {
+    /* pinia not ready */
+  }
+  return 90
+}
+
 export const useMailCacheStore = defineStore('mailCache', () => {
   const byEmail = ref<CacheMap>({})
   const vaultHydrated = ref(false)
   let persistTimer: ReturnType<typeof setTimeout> | null = null
+  /** Skip watch→persist while we rewrite memory after a quota slim. */
+  let suppressPersistWatch = false
 
   /**
-   * Cap each folder to PER_FOLDER_CAP (newest first), then whole mailbox to
-   * PER_MAILBOX_CAP. Prevents one folder's load-more from wiping others.
+   * Cap each folder to folderCap (newest first by date), then whole mailbox.
+   * Always date-ordered: older mail is what gets cut when over cap.
    */
-  function capMailboxList(list: MailMessage[]): MailMessage[] {
+  function capMailboxList(
+    list: MailMessage[],
+    folderCap = PER_FOLDER_CAP,
+    mailboxCap = PER_MAILBOX_CAP,
+  ): MailMessage[] {
     const byFolder = new Map<string, MailMessage[]>()
     for (const m of list) {
       const f = normalizeFolder(m.folder || 'inbox')
@@ -128,41 +250,170 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     }
     const out: MailMessage[] = []
     for (const [, arr] of byFolder) {
-      const sorted = [...arr].sort((a, b) => {
-        const da = parseMessageDateMs(a.date) ?? 0
-        const db = parseMessageDateMs(b.date) ?? 0
-        if (db !== da) return db - da
-        return String(a.id).localeCompare(String(b.id))
-      })
-      out.push(...sorted.slice(0, PER_FOLDER_CAP))
+      out.push(...[...arr].sort(compareMailDateDesc).slice(0, folderCap))
+    }
+    return out.sort(compareMailDateDesc).slice(0, mailboxCap)
+  }
+
+  /**
+   * Prepare one mailbox list for persist:
+   * 1) drop older than maxAgeDays (date-based retention)
+   * 2) per-folder / mailbox count caps (newest kept)
+   * 3) optional body slim
+   */
+  function prepareListForPersist(
+    list: MailMessage[],
+    opts: {
+      aggressive?: boolean
+      folderCap?: number
+      mailboxCap?: number
+      /** Soft age window in days; null = use settings retention */
+      maxAgeDays?: number | null
+    } = {},
+  ): MailMessage[] {
+    const retention =
+      opts.maxAgeDays === null
+        ? 0
+        : opts.maxAgeDays != null && opts.maxAgeDays > 0
+          ? opts.maxAgeDays
+          : readRetentionDays()
+    let rows = list
+    if (retention > 0) {
+      rows = pruneByRetention(rows, retention)
+    }
+    rows = capMailboxList(
+      rows,
+      opts.folderCap ?? PER_FOLDER_CAP,
+      opts.mailboxCap ?? PER_MAILBOX_CAP,
+    )
+    return rows.map((m) => slimMessageForPersist(m, Boolean(opts.aggressive)))
+  }
+
+  function buildPersistMap(opts: {
+    aggressive?: boolean
+    folderCap?: number
+    mailboxCap?: number
+    maxAgeDays?: number | null
+  } = {}): CacheMap {
+    const out: CacheMap = {}
+    for (const [k, list] of Object.entries(byEmail.value)) {
+      out[k] = prepareListForPersist(list, opts)
     }
     return out
-      .sort((a, b) => {
-        const da = parseMessageDateMs(a.date) ?? 0
-        const db = parseMessageDateMs(b.date) ?? 0
-        if (db !== da) return db - da
-        return String(a.id).localeCompare(String(b.id))
-      })
-      .slice(0, PER_MAILBOX_CAP)
+  }
+
+  function isQuotaError(e: unknown): boolean {
+    if (!e || typeof e !== 'object') return false
+    const name = (e as { name?: string }).name || ''
+    return name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED'
   }
 
   async function persistEncrypted() {
     const vault = useVaultStore()
     if (vault.status !== 'unlocked') return
-    const out: CacheMap = {}
-    for (const [k, list] of Object.entries(byEmail.value)) {
-      out[k] = capMailboxList(list)
+    const baseDays = readRetentionDays()
+    /**
+     * Tiered writes under quota (always prefer deleting **older by date**):
+     * 1) retention + body slim
+     * 2) drop HTML
+     * 3) shorten retention window (keep recent N days only)
+     * 4) fewer rows per folder (still newest-first)
+     */
+    const tiers: Array<{
+      aggressive: boolean
+      folderCap: number
+      mailboxCap: number
+      maxAgeDays: number | null
+    }> = [
+      {
+        aggressive: false,
+        folderCap: PER_FOLDER_CAP,
+        mailboxCap: PER_MAILBOX_CAP,
+        maxAgeDays: baseDays,
+      },
+      {
+        aggressive: true,
+        folderCap: PER_FOLDER_CAP,
+        mailboxCap: PER_MAILBOX_CAP,
+        maxAgeDays: baseDays,
+      },
+      // Keep only last 30 / 14 / 7 days of mail (date-based), then shrink counts
+      {
+        aggressive: true,
+        folderCap: PER_FOLDER_CAP,
+        mailboxCap: PER_MAILBOX_CAP,
+        maxAgeDays: Math.min(baseDays, 30),
+      },
+      {
+        aggressive: true,
+        folderCap: 120,
+        mailboxCap: 360,
+        maxAgeDays: Math.min(baseDays, 14),
+      },
+      {
+        aggressive: true,
+        folderCap: 50,
+        mailboxCap: 150,
+        maxAgeDays: Math.min(baseDays, 7),
+      },
+      {
+        aggressive: true,
+        folderCap: 25,
+        mailboxCap: 75,
+        maxAgeDays: Math.min(baseDays, 3),
+      },
+    ]
+    let lastErr: unknown
+    for (const tier of tiers) {
+      try {
+        const out = buildPersistMap(tier)
+        await vault.saveMailCache(out as Record<string, unknown>)
+        try {
+          localStorage.removeItem(KEY)
+        } catch {
+          /* ignore */
+        }
+        // After a degraded write, apply same date/body policy to memory
+        const degraded =
+          tier.aggressive ||
+          tier.folderCap < PER_FOLDER_CAP ||
+          (tier.maxAgeDays != null && tier.maxAgeDays < baseDays)
+        if (degraded) {
+          suppressPersistWatch = true
+          try {
+            const next: CacheMap = {}
+            for (const [k, list] of Object.entries(byEmail.value)) {
+              next[k] = prepareListForPersist(list, tier)
+            }
+            byEmail.value = next
+          } finally {
+            queueMicrotask(() => {
+              suppressPersistWatch = false
+            })
+          }
+        }
+        return
+      } catch (e) {
+        lastErr = e
+        if (!isQuotaError(e)) throw e
+        console.warn('[openmail] mail cache quota; drop older mail / slim bodies', {
+          maxAgeDays: tier.maxAgeDays,
+          folderCap: tier.folderCap,
+          aggressive: tier.aggressive,
+        })
+      }
     }
-    await vault.saveMailCache(out as Record<string, unknown>)
-    try {
-      localStorage.removeItem(KEY)
-    } catch {
-      /* ignore */
-    }
+    throw lastErr
   }
 
   function persistInBackground(): void {
     void flushPersist().catch((error) => {
+      if (isQuotaError(error)) {
+        console.warn(
+          '[openmail] mail cache still exceeds storage after slimming — free site data or reduce retention',
+        )
+        return
+      }
       console.warn('[openmail] mail cache persist failed', error)
     })
   }
@@ -180,12 +431,18 @@ export const useMailCacheStore = defineStore('mailCache', () => {
   watch(
     byEmail,
     () => {
-      if (!vaultHydrated.value) return
+      if (!vaultHydrated.value || suppressPersistWatch) return
       if (persistTimer) clearTimeout(persistTimer)
       // Short debounce; pagehide also flushes so refresh cannot lose mail
       persistTimer = setTimeout(() => {
         persistTimer = null
         void persistEncrypted().catch((error) => {
+          if (isQuotaError(error)) {
+            console.warn(
+              '[openmail] mail cache still exceeds storage after slimming — free site data or reduce retention',
+            )
+            return
+          }
           console.warn('[openmail] mail cache persist failed', error)
         })
       }, 80)
