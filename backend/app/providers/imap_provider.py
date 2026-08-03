@@ -40,6 +40,17 @@ SENT_CANDIDATES = (
     "已发邮件",
 )
 
+# NetEase Coremail (126/163/yeah) rejects SELECT with "Unsafe Login" unless the
+# client sends IMAP ID (RFC 2971) after LOGIN. CAPABILITY advertises "ID".
+_NETEASE_IMAP_HOST_MARKERS = (
+    "imap.126.com",
+    "imap.163.com",
+    "imap.yeah.net",
+    "126.com",
+    "163.com",
+    "yeah.net",
+)
+
 
 def _imap_utf7_encode(name: str) -> str:
     """RFC 3501 modified UTF-7 for mailbox names (non-ASCII → &...-)."""
@@ -462,9 +473,16 @@ class ImapProvider:
             if conn is None:
                 return FetchResult(ok=False, folder=folder, error="IMAP 登录失败")
 
-            selected = self._select_folder(conn, folder)
+            selected, select_err = self._select_folder(conn, folder)
             if selected is None:
-                return FetchResult(ok=False, folder=folder, error=f"无法打开文件夹 {folder}")
+                detail = select_err or f"无法打开文件夹 {folder}"
+                if "unsafe login" in detail.lower():
+                    detail = (
+                        "网易邮箱拒绝取信（Unsafe Login）：请确认已用客户端授权码，"
+                        "且 OpenMail 已发送 IMAP ID。若仍失败请稍后重试 / "
+                        "NetEase Unsafe Login — use app password; IMAP ID required"
+                    )
+                return FetchResult(ok=False, folder=folder, error=detail)
 
             uidvalidity = self._read_uidvalidity(conn)
 
@@ -611,6 +629,8 @@ class ImapProvider:
                 conn = self._connect(host, port, use_ssl, server_hostname=host)
                 typ, _ = conn.login(user, password)
                 if typ == "OK":
+                    # NetEase and other ID-capable servers: identify client after login
+                    self._send_client_id(conn, host=host)
                     return conn
                 try:
                     conn.logout()
@@ -633,6 +653,75 @@ class ImapProvider:
         if last_err:
             raise last_err
         return None
+
+    def _send_client_id(self, conn: imaplib.IMAP4, *, host: str = "") -> None:
+        """Send IMAP ID (RFC 2971) after LOGIN when the server expects it.
+
+        NetEase (126/163/yeah Coremail) returns SELECT NO
+        ``EXAMINE Unsafe Login. Please contact kefu@188.com`` if ID is missing.
+        Harmless no-op on servers that ignore ID.
+        """
+        host_l = (host or "").strip().lower()
+        force = any(m in host_l for m in _NETEASE_IMAP_HOST_MARKERS)
+        cap_has_id = False
+        try:
+            # Prefer already-cached capabilities from greeting/login
+            caps = getattr(conn, "capabilities", ()) or ()
+            cap_blob = " ".join(
+                c.decode(errors="replace") if isinstance(c, (bytes, bytearray)) else str(c)
+                for c in (caps if not isinstance(caps, (str, bytes, bytearray)) else [caps])
+            ).upper()
+            if "ID" in cap_blob.split() or " ID " in f" {cap_blob} ":
+                cap_has_id = True
+            if not cap_has_id:
+                typ, data = conn.capability()
+                if typ == "OK" and data:
+                    for item in data:
+                        s = item.decode(errors="replace") if isinstance(item, (bytes, bytearray)) else str(item)
+                        if "ID" in s.upper().split():
+                            cap_has_id = True
+                            break
+        except Exception:
+            cap_has_id = force
+
+        if not force and not cap_has_id:
+            return
+
+        # imaplib does not register ID by default
+        try:
+            imaplib.Commands.setdefault("ID", ("AUTH", "SELECTED"))
+        except Exception:
+            pass
+
+        # Quoted string list: ("name" "OpenMail" "version" "1.0" ...)
+        id_args = (
+            '("name" "OpenMail" "version" "1.0" '
+            '"vendor" "OpenMail" "support-email" "support@openmail.local")'
+        )
+        try:
+            typ, _ = conn._simple_command("ID", id_args)  # type: ignore[attr-defined]
+            if typ != "OK" and force:
+                # Fallback raw send (some imaplib builds are picky about args)
+                tag = conn._new_tag()  # type: ignore[attr-defined]
+                conn.send(tag + b" ID " + id_args.encode("ascii") + b"\r\n")  # type: ignore[attr-defined]
+                while True:
+                    line = conn.readline()  # type: ignore[attr-defined]
+                    if not line or line.startswith(tag) or line.startswith(b"* BYE"):
+                        break
+        except Exception:
+            if not force:
+                return
+            try:
+                tag = conn._new_tag()  # type: ignore[attr-defined]
+                conn.send(  # type: ignore[attr-defined]
+                    tag + b' ID ("name" "OpenMail" "version" "1.0" "vendor" "OpenMail")\r\n'
+                )
+                while True:
+                    line = conn.readline()  # type: ignore[attr-defined]
+                    if not line or line.startswith(tag) or line.startswith(b"* BYE"):
+                        break
+            except Exception:
+                pass
 
     def _read_uidvalidity(self, conn: imaplib.IMAP4) -> int | None:
         """Parse UIDVALIDITY from untagged SELECT response (or STATUS)."""
@@ -710,7 +799,8 @@ class ImapProvider:
             out.append(token)
         return out
 
-    def _select_folder(self, conn: imaplib.IMAP4, folder: str) -> str | None:
+    def _select_folder(self, conn: imaplib.IMAP4, folder: str) -> tuple[str | None, str | None]:
+        """Return (selected_name, error_detail). error_detail set when all SELECT fail."""
         folder_l = (folder or "inbox").lower()
         candidates: list[str]
         if folder_l in ("inbox", "in", "收件箱"):
@@ -745,21 +835,37 @@ class ImapProvider:
         # Prefer pure-ASCII candidates first so Gmail/Outlook never hit 已发送 raw
         candidates.sort(key=lambda n: (0 if all(ord(c) < 128 for c in n) else 1, n))
 
+        last_no: str | None = None
         for name in candidates:
             for variant in _mailbox_select_variants(name):
                 try:
-                    typ, _ = conn.select(variant, readonly=True)
+                    typ, data = conn.select(variant, readonly=True)
                     if typ == "OK":
                         try:
                             conn._current_folder = variant  # type: ignore[attr-defined]
                         except Exception:
                             pass
-                        return variant
-                except (imaplib.IMAP4.error, UnicodeEncodeError, UnicodeDecodeError):
+                        return variant, None
+                    # Preserve server NO text (e.g. NetEase Unsafe Login)
+                    if data:
+                        blob = data[0] if isinstance(data, (list, tuple)) and data else data
+                        if isinstance(blob, (bytes, bytearray)):
+                            last_no = blob.decode("utf-8", errors="replace")
+                        else:
+                            last_no = str(blob)
+                except imaplib.IMAP4.error as exc:
+                    last_no = str(exc)
+                    continue
+                except (UnicodeEncodeError, UnicodeDecodeError):
                     continue
                 except Exception:
                     continue
-        return None
+        err = last_no or f"无法打开文件夹 {folder}"
+        if last_no and "无法打开" not in last_no and "Unsafe" not in last_no:
+            err = f"无法打开文件夹 {folder}: {last_no}"
+        elif last_no and "Unsafe" in last_no:
+            err = last_no
+        return None, err
 
     def _list_mailbox_names(self, conn: imaplib.IMAP4) -> list[str]:
         names: list[str] = []

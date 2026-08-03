@@ -198,6 +198,8 @@ def test_fetch_with_mocked_imap() -> None:
     mock_conn = MagicMock()
     mock_conn.login.return_value = ("OK", [b"Logged in"])
     mock_conn.select.return_value = ("OK", [b"2"])
+    mock_conn.capabilities = ("IMAP4rev1", "ID")
+    mock_conn._simple_command.return_value = ("OK", [b"ID completed"])
     mock_conn.uid.side_effect = [
         ("OK", [b"10 11"]),  # search
         ("OK", [(b"11 (RFC822 {n})", raw)]),  # fetch first (newest reversed)
@@ -221,6 +223,46 @@ def test_fetch_with_mocked_imap() -> None:
     assert result.messages[0].verification_code == "555666"
     mock_conn.login.assert_called_once()
     mock_conn.logout.assert_called()
+    # Client ID sent after login when CAPABILITY includes ID
+    mock_conn._simple_command.assert_called()
+    id_calls = [c for c in mock_conn._simple_command.call_args_list if c.args and c.args[0] == "ID"]
+    assert id_calls, "expected IMAP ID after login"
+
+
+def test_netease_select_requires_client_id() -> None:
+    """NetEase returns SELECT NO Unsafe Login without ID — surface clear error."""
+    mock_conn = MagicMock()
+    mock_conn.login.return_value = ("OK", [b"Logged in"])
+    mock_conn.capabilities = ("IMAP4rev1", "ID")
+    mock_conn._simple_command.return_value = ("OK", [b"ID completed"])
+    mock_conn.select.return_value = (
+        "NO",
+        [b"EXAMINE Unsafe Login. Please contact kefu@188.com for help"],
+    )
+    mock_conn.list.return_value = ("OK", [b'() "/" "INBOX"'])
+    mock_conn.logout.return_value = ("BYE", [])
+
+    provider = ImapProvider(timeout=5)
+    with patch.object(provider, "_connect", return_value=mock_conn):
+        result = provider.fetch(
+            SimpleNamespace(provider="imap", email="u@126.com"),
+            folder="inbox",
+            quick=True,
+            credentials={"password": "auth-code", "imap_host": "imap.126.com"},
+        )
+    assert result.ok is False
+    assert "Unsafe" in (result.error or "") or "网易" in (result.error or "")
+
+
+def test_send_client_id_forced_for_netease_host() -> None:
+    provider = ImapProvider(timeout=5)
+    conn = MagicMock()
+    conn.capabilities = ()  # empty
+    conn.capability.return_value = ("OK", [b"IMAP4rev1"])
+    conn._simple_command.return_value = ("OK", [b"ID completed"])
+    provider._send_client_id(conn, host="imap.126.com")
+    conn._simple_command.assert_called()
+    assert conn._simple_command.call_args.args[0] == "ID"
 
 
 def test_before_paging_filters_exact_time_within_same_day() -> None:
