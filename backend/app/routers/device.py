@@ -30,4 +30,6 @@ def register_device(body: DeviceRegisterBody) -> DeviceRegisterOut:
         pid = register_device_secret(body.public_id, body.secret_b64)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)) from e
     return DeviceRegisterOut(ok=True, public_id=pid)

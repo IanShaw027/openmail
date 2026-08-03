@@ -32,6 +32,11 @@ def _messages_out(messages: list[Any]) -> list[FetchMessageOut]:
             body_html = body_html[:500_000]
         if isinstance(body_text, str) and len(body_text) > 200_000:
             body_text = body_text[:200_000]
+        uv = getattr(m, "uidvalidity", None)
+        try:
+            uv_out = int(uv) if uv is not None else None
+        except (TypeError, ValueError):
+            uv_out = None
         out.append(
             FetchMessageOut(
                 id=getattr(m, "id", "") or "",
@@ -45,12 +50,18 @@ def _messages_out(messages: list[Any]) -> list[FetchMessageOut]:
                 body_html=body_html,
                 verification_code=getattr(m, "verification_code", None),
                 folder=getattr(m, "folder", None) or None,
+                uidvalidity=uv_out,
             )
         )
     return out
 
 
 def _to_response(result: Any) -> FetchResponse:
+    uv = getattr(result, "uidvalidity", None)
+    try:
+        uv_out = int(uv) if uv is not None else None
+    except (TypeError, ValueError):
+        uv_out = None
     return FetchResponse(
         ok=result.ok,
         messages=_messages_out(result.messages or []),
@@ -70,6 +81,7 @@ def _to_response(result: Any) -> FetchResponse:
         session_meta=getattr(result, "session_meta", None),
         session_restored=bool(getattr(result, "session_restored", False)),
         mailboxes=getattr(result, "mailboxes", None),
+        uidvalidity=uv_out,
     )
 
 
@@ -86,6 +98,10 @@ def fetch_stored_account(
     x_license_token: str | None = Header(default=None, alias="X-License-Token"),
     folder: str = "inbox",
     quick: bool = True,
+    since: str | None = None,
+    before: str | None = None,
+    max_messages: int | None = None,
+    full: bool = False,
 ) -> FetchResponse:
     ok_q, qerr = check_poll_quota(
         device_id, license_token=x_license_token, settings=settings
@@ -101,6 +117,10 @@ def fetch_stored_account(
         folder=folder or "inbox",
         quick=bool(quick),
         settings=settings,
+        since=since,
+        before=before,
+        max_messages=max_messages,
+        full=bool(full),
     )
     db.commit()
     return _to_response(result)
@@ -179,6 +199,7 @@ def proxy_send(
         subject=body.subject or "",
         body_text=body.body_text or "",
         body_html=body.body_html,
+        proxy=body.proxy,
     )
     return SendMailResponse(ok=result.ok, error=result.error, detail=result.detail)
 

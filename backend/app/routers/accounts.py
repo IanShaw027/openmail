@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.crypto import encrypt_json, encrypt_str, master_key_configured
@@ -22,7 +23,12 @@ from app.services.credentials import (
     normalize_oauth_credential_fields,
     save_client_sealed,
 )
-from app.services.license import is_licensed, quota_snapshot
+from app.services.license import (
+    quota_snapshot,
+    reconcile_cloud_account_used,
+    release_cloud_account_slot,
+    reserve_cloud_account_slot,
+)
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -54,6 +60,7 @@ def _to_out(acc: Account) -> AccountOut:
         last_error=acc.last_error,
         latest_verification_code=acc.latest_verification_code,
         latest_code_at=acc.latest_code_at,
+        latest_code_folder=acc.latest_code_folder,
         sync_enabled=acc.sync_enabled,
         last_sync_at=acc.last_sync_at,
         last_sync_error=acc.last_sync_error,
@@ -80,27 +87,6 @@ def _cloud_count(db: Session, device_id: str) -> int:
         .filter(Account.owner_user_id == device_id)
         .count()
     )
-
-
-def _check_cloud_quota(
-    db: Session,
-    device_id: str,
-    *,
-    license_token: str | None,
-    settings,
-    adding: int = 1,
-) -> None:
-    if is_licensed(device_id=device_id, license_token=license_token, settings=settings):
-        return
-    cap = int(settings.quota_max_cloud_accounts or 0)
-    if cap < 0:
-        return
-    used = _cloud_count(db, device_id)
-    if used + adding > cap:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"cloud account quota exceeded ({used}/{cap}); use a license token",
-        )
 
 
 def _provider_from_body(value: ProviderType | str | None) -> ProviderType:
@@ -145,6 +131,18 @@ def create_account(
         _require_master_key(settings)
 
     email = body.email.strip().lower()
+    update_body = AccountUpdate(
+        email=body.email,
+        provider=body.provider,
+        password=body.password,
+        credential=body.credential,
+        tag=body.tag,
+        note=body.note,
+        proxy=body.proxy,
+        sync_enabled=body.sync_enabled,
+        cookies=body.cookies,
+        client_sealed=body.client_sealed,
+    )
     existing = (
         db.query(Account)
         .filter(Account.owner_user_id == did, Account.email == email)
@@ -154,28 +152,25 @@ def create_account(
         # Upsert-style update when same device re-imports
         return _apply_update(
             existing,
-            AccountUpdate(
-                email=body.email,
-                provider=body.provider,
-                password=body.password,
-                credential=body.credential,
-                tag=body.tag,
-                note=body.note,
-                proxy=body.proxy,
-                sync_enabled=body.sync_enabled,
-                cookies=body.cookies,
-                client_sealed=body.client_sealed,
-            ),
+            update_body,
             db=db,
             settings=settings,
         )
 
-    _check_cloud_quota(
-        db, did, license_token=x_license_token, settings=settings, adding=1
-    )
-
     # Client-sealed: server never sees plaintext secrets
     if body.client_sealed:
+        try:
+            reserve_cloud_account_slot(
+                db,
+                did,
+                settings=settings,
+                license_token=x_license_token,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=str(exc),
+            ) from exc
         acc = Account(
             email=email,
             provider=_provider_from_body(body.provider),
@@ -190,11 +185,38 @@ def create_account(
         )
         save_client_sealed(acc, body.client_sealed, settings=settings)
         db.add(acc)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # Reservation rolled back with the failed insert; re-sync counter.
+            db.rollback()
+            try:
+                reconcile_cloud_account_used(db, did)
+                db.commit()
+            except Exception:
+                db.rollback()
+            winner = (
+                db.query(Account)
+                .filter(Account.owner_user_id == did, Account.email == email)
+                .one()
+            )
+            return _apply_update(winner, update_body, db=db, settings=settings)
         db.refresh(acc)
         return _to_out(acc)
 
     cred = normalize_oauth_credential_fields(dict(body.credential or {})) if body.credential else None
+    try:
+        reserve_cloud_account_slot(
+            db,
+            did,
+            settings=settings,
+            license_token=x_license_token,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+        ) from exc
     acc = Account(
         email=email,
         provider=_provider_from_body(body.provider),
@@ -212,18 +234,32 @@ def create_account(
         acc.credential_enc = encrypt_json(cred, settings=settings)
 
     db.add(acc)
-    db.flush()
+    try:
+        db.flush()
 
-    if body.cookies is not None:
-        sess = AccountSession(
-            account_id=acc.id,
-            cookies_enc=encrypt_json(body.cookies, settings=settings),
-            saved_at=datetime.now(timezone.utc),
-            valid=True,
+        if body.cookies is not None:
+            sess = AccountSession(
+                account_id=acc.id,
+                cookies_enc=encrypt_json(body.cookies, settings=settings),
+                saved_at=datetime.now(timezone.utc),
+                valid=True,
+            )
+            db.add(sess)
+
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        try:
+            reconcile_cloud_account_used(db, did)
+            db.commit()
+        except Exception:
+            db.rollback()
+        winner = (
+            db.query(Account)
+            .filter(Account.owner_user_id == did, Account.email == email)
+            .one()
         )
-        db.add(sess)
-
-    db.commit()
+        return _apply_update(winner, update_body, db=db, settings=settings)
     db.refresh(acc)
     return _to_out(acc)
 
@@ -262,8 +298,30 @@ def _apply_update(
             else:
                 acc.password_enc = encrypt_str(body.password, settings=settings)
         if body.credential is not None:
-            cred = normalize_oauth_credential_fields(dict(body.credential))
-            acc.credential_enc = encrypt_json(cred, settings=settings) if cred else None
+            # Deep-merge so partial PATCH does not wipe other credential keys.
+            existing_raw = load_credentials(acc, settings=settings)
+            if is_client_sealed_blob(existing_raw):
+                # Refuse accidental unseal via partial server-side credential patch.
+                # Client must replace the sealed envelope with client_sealed, or
+                # send credential={"_om_unwrap_sealed": true, ...} explicitly.
+                if not body.credential.get("_om_unwrap_sealed"):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            "account is client-sealed; send client_sealed to replace, "
+                            "or set credential._om_unwrap_sealed=true to convert"
+                        ),
+                    )
+                existing_raw = {}
+            existing = normalize_oauth_credential_fields(dict(existing_raw or {}))
+            incoming = normalize_oauth_credential_fields(dict(body.credential))
+            incoming.pop("_om_unwrap_sealed", None)
+            merged = {**existing, **incoming}
+            # Empty string in the patch clears that key.
+            for key, value in list(merged.items()):
+                if value == "":
+                    del merged[key]
+            acc.credential_enc = encrypt_json(merged, settings=settings) if merged else None
         if body.cookies is not None:
             if acc.session is None:
                 acc.session = AccountSession(account_id=acc.id)
@@ -273,7 +331,14 @@ def _apply_update(
             acc.session.valid = True
 
     acc.updated_at = datetime.now(timezone.utc)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="account email already exists for this device",
+        ) from exc
     db.refresh(acc)
     return _to_out(acc)
 
@@ -282,14 +347,13 @@ def _apply_update(
 def account_quota(
     db: DbDep,
     settings: SettingsDep,
-    x_device_id: str | None = Header(default=None, alias="X-Device-Id"),
+    device_id: str = Depends(device_id_strict),
     x_license_token: str | None = Header(default=None, alias="X-License-Token"),
 ) -> dict:
-    did = (x_device_id or "").strip() or None
     snap = quota_snapshot(
-        device_id=did, license_token=x_license_token, settings=settings
+        device_id=device_id, license_token=x_license_token, settings=settings
     )
-    used = _cloud_count(db, did) if did else 0
+    used = _cloud_count(db, device_id)
     snap["cloud_used"] = used
     return snap
 
@@ -322,6 +386,10 @@ def delete_account(
     device_id: str = Depends(device_id_strict),
 ) -> None:
     acc = _get_owned(db, account_id, device_id)
+    # Flush delete first so concurrent reserves see the freed row; release
+    # then decrements under a row lock (does not rewrite from COUNT).
     db.delete(acc)
+    db.flush()
+    release_cloud_account_slot(db, device_id)
     db.commit()
     return None

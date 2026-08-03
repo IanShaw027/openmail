@@ -171,16 +171,12 @@ def list_proxy_candidates(
     Used when a channel fails soft (SSO/rate-limit): walk every WARP worker
     before falling back to the server's own IP (``None``).
 
-    Fixed ``account.proxy`` is never rotated — only that URL is returned
-    (plus optional direct if ``include_direct``).
+    Fixed ``account.proxy`` is never rotated — only that URL is returned.
     """
     explicit = getattr(account, "proxy", None)
     if explicit is not None and str(explicit).strip():
         fixed = str(explicit).strip()
-        out: list[str | None] = [fixed]
-        if include_direct:
-            out.append(None)
-        return out
+        return [fixed]
 
     channels = parse_proxy_pool(settings)
     if not channels:

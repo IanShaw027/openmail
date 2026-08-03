@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from fastapi import APIRouter, Header, Request
 
 from app.deps import DbDep, SettingsDep
@@ -10,6 +12,8 @@ from app.services.device_auth import verify_request
 from app.services.license import is_licensed, quota_snapshot
 
 router = APIRouter(prefix="/api", tags=["config"])
+
+_EMPTY_BODY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 @router.get("/config/public")
@@ -21,6 +25,7 @@ def public_config(
     x_license_token: str | None = Header(default=None, alias="X-License-Token"),
     x_device_ts: str | None = Header(default=None, alias="X-Device-Ts"),
     x_device_sign: str | None = Header(default=None, alias="X-Device-Sign"),
+    x_device_body_sha256: str | None = Header(default=None, alias="X-Device-Body-Sha256"),
 ) -> dict:
     """Frontend bootstrap: quotas, flags, license status.
 
@@ -31,15 +36,26 @@ def public_config(
     cloud_used: int | None = None
     # Only count cloud accounts for proven vault devices
     if did and did.startswith("vk_"):
+        client_hash = (x_device_body_sha256 or "").strip().lower() or None
+        body_sha256: str | None = None
+        header_body_ok = True
+        if client_hash is not None:
+            # GET has empty body; header must claim sha256("") when present.
+            if client_hash != _EMPTY_BODY_SHA256:
+                header_body_ok = False
+            else:
+                body_sha256 = client_hash
         ok, _err = verify_request(
             did,
             x_device_ts,
             x_device_sign,
             request.method,
-            request.url.path,
+            f"{request.url.path}?{request.url.query}" if request.url.query else request.url.path,
             require_hmac=True,
+            body_sha256=body_sha256,
         )
-        if ok:
+        # Mismatched body-hash header must not authenticate even if legacy sig matches
+        if ok and header_body_ok:
             cloud_used = (
                 db.query(Account).filter(Account.owner_user_id == did).count()
             )

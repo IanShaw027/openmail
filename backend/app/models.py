@@ -60,6 +60,9 @@ class Account(Base):
     """
 
     __tablename__ = "accounts"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "email", name="uq_accounts_owner_email"),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("acc_"))
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -70,7 +73,7 @@ class Account(Base):
         Enum(AccountPool), default=AccountPool.public, nullable=False, index=True
     )
     # No FK to users — column kept nullable for old rows until migrate drops it
-    owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     credential_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     tag: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -82,6 +85,7 @@ class Account(Base):
     last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
     latest_verification_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     latest_code_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latest_code_folder: Mapped[str | None] = mapped_column(String(32), nullable=True)
     sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_sync_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -152,6 +156,45 @@ class FetchLockState(Base):
         DateTime(timezone=True), nullable=True
     )
     in_flight: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class DevicePollEvent(Base):
+    """Durable poll/fetch/send events for per-device hourly quota (multi-worker safe)."""
+
+    __tablename__ = "device_poll_events"
+    __table_args__ = (
+        Index("ix_device_poll_events_device_ts", "device_id", "ts"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("pol_"))
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False, index=True
+    )
+
+
+class DevicePollQuotaState(Base):
+    """Per-device lock row used to serialize hourly poll quota checks."""
+
+    __tablename__ = "device_poll_quota_state"
+
+    device_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class DeviceQuotaState(Base):
+    """Durable per-device account quota counter."""
+
+    __tablename__ = "device_quota_state"
+
+    device_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    cloud_accounts_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
     )

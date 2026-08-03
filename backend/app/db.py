@@ -61,6 +61,59 @@ def _sqlite_add_column(conn, table: str, column: str, col_type: str) -> None:  #
     conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
 
+def _ensure_account_owner_email_unique(conn) -> None:  # type: ignore[no-untyped-def]
+    """Enforce cloud upsert identity without deleting ambiguous legacy duplicates."""
+    try:
+        indexes = {idx["name"] for idx in inspect(conn).get_indexes("accounts")}
+        constraints = {
+            item["name"] for item in inspect(conn).get_unique_constraints("accounts")
+        }
+        if "uq_accounts_owner_email" in indexes | constraints:
+            return
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_accounts_owner_email "
+                "ON accounts (owner_user_id, email)"
+            )
+        )
+    except Exception:
+        # Do not silently pick a winner among rows that may hold different secrets.
+        # Log conflicting keys so operators can resolve before retrying migrate.
+        try:
+            rows = conn.execute(
+                text(
+                    "SELECT owner_user_id, email, COUNT(*) AS n "
+                    "FROM accounts "
+                    "GROUP BY owner_user_id, email "
+                    "HAVING COUNT(*) > 1 "
+                    "LIMIT 50"
+                )
+            ).fetchall()
+            if rows:
+                sample = [
+                    f"{r[0]!s}:{r[1]!s}(x{r[2]})" for r in rows[:20]
+                ]
+                logger.error(
+                    "migrate: duplicate (owner_user_id, email) pairs (sample): %s",
+                    "; ".join(sample),
+                )
+                logger.error(
+                    "migrate: resolve with e.g. "
+                    "SELECT id, owner_user_id, email, created_at FROM accounts "
+                    "WHERE owner_user_id = ? AND email = ? ORDER BY created_at; "
+                    "then delete or reassign losers and re-run migrate."
+                )
+        except Exception:
+            logger.debug("migrate: could not list duplicate account keys", exc_info=True)
+        logger.exception(
+            "migrate: cannot enforce unique account owner/email; resolve legacy duplicates"
+        )
+        raise RuntimeError(
+            "cannot enforce unique account owner/email; resolve legacy duplicates "
+            "(see logs for conflicting owner_user_id/email pairs)"
+        )
+
+
 def _sqlite_accounts_has_users_fk(conn) -> bool:  # type: ignore[no-untyped-def]
     """True if accounts.owner_user_id still references dropped users table."""
     try:
@@ -86,7 +139,7 @@ def _sqlite_rebuild_accounts_drop_users_fk(conn) -> None:  # type: ignore[no-unt
             email VARCHAR(255) NOT NULL,
             provider VARCHAR(32) NOT NULL,
             pool VARCHAR(32) NOT NULL,
-            owner_user_id VARCHAR(40),
+            owner_user_id VARCHAR(128),
             password_enc TEXT,
             credential_enc TEXT,
             tag VARCHAR(128),
@@ -96,6 +149,7 @@ def _sqlite_rebuild_accounts_drop_users_fk(conn) -> None:  # type: ignore[no-unt
             last_error VARCHAR(512),
             latest_verification_code VARCHAR(64),
             latest_code_at DATETIME,
+            latest_code_folder VARCHAR(32),
             sync_enabled BOOLEAN NOT NULL DEFAULT 0,
             last_sync_at DATETIME,
             last_sync_error VARCHAR(512),
@@ -130,12 +184,14 @@ def _sqlite_rebuild_accounts_drop_users_fk(conn) -> None:  # type: ignore[no-unt
 # Columns that may be missing on upgraded installs (create_all does not ALTER).
 # dialect-agnostic ADD COLUMN statements — nullable / with default where needed.
 _ACCOUNTS_EXTRA_COLUMNS: list[tuple[str, str]] = [
+    ("owner_user_id", "VARCHAR(128)"),
     ("last_sync_at", "TIMESTAMP"),
     ("last_sync_error", "VARCHAR(512)"),
     ("sync_enabled", "BOOLEAN DEFAULT FALSE"),
     ("proxy", "VARCHAR(512)"),
     ("latest_verification_code", "VARCHAR(64)"),
     ("latest_code_at", "TIMESTAMP"),
+    ("latest_code_folder", "VARCHAR(32)"),
     ("last_fetch_at", "TIMESTAMP"),
     ("last_error", "VARCHAR(512)"),
 ]
@@ -147,7 +203,8 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
     tables = set(insp.get_table_names())
     if "accounts" not in tables:
         return
-    existing = {c["name"] for c in insp.get_columns("accounts")}
+    account_columns = insp.get_columns("accounts")
+    existing = {c["name"] for c in account_columns}
     dialect = engine.dialect.name
     for col, col_type in _ACCOUNTS_EXTRA_COLUMNS:
         if col in existing:
@@ -167,6 +224,22 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
         except Exception:
             logger.exception("migrate: failed to add accounts.%s", col)
 
+    try:
+        owner_col = next(c for c in account_columns if c["name"] == "owner_user_id")
+        owner_type = owner_col.get("type")
+        owner_len = getattr(owner_type, "length", None)
+        if owner_len is None or owner_len < 128:
+            if dialect == "postgresql":
+                conn.execute(
+                    text("ALTER TABLE accounts ALTER COLUMN owner_user_id TYPE VARCHAR(128)")
+                )
+            elif dialect in ("mysql", "mariadb"):
+                conn.execute(text("ALTER TABLE accounts MODIFY owner_user_id VARCHAR(128)"))
+    except StopIteration:
+        pass
+    except Exception:
+        logger.exception("migrate: failed to widen accounts.owner_user_id")
+
     # Drop legacy user tables if present (local-first no longer uses them)
     for tbl in ("user_sessions", "admin_sessions", "mail_index", "users"):
         if tbl in tables:
@@ -175,6 +248,24 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
                 logger.info("migrate: dropped legacy table %s", tbl)
             except Exception:
                 logger.exception("migrate: failed to drop %s", tbl)
+
+    if "fetch_lock_state" in tables:
+        lock_columns = {c["name"] for c in insp.get_columns("fetch_lock_state")}
+        if "lease_token" not in lock_columns:
+            try:
+                if dialect in ("postgresql", "mysql", "mariadb"):
+                    conn.execute(
+                        text(
+                            "ALTER TABLE fetch_lock_state "
+                            "ADD COLUMN IF NOT EXISTS lease_token VARCHAR(36)"
+                        )
+                    )
+                else:
+                    conn.execute(
+                        text("ALTER TABLE fetch_lock_state ADD COLUMN lease_token VARCHAR(36)")
+                    )
+            except Exception:
+                logger.exception("migrate: failed to add fetch_lock_state.lease_token")
 
 
 def migrate_schema() -> None:
@@ -194,16 +285,20 @@ def migrate_schema() -> None:
             }
             if "accounts" in tables:
                 for col, col_type in (
+                    ("owner_user_id", "VARCHAR(128)"),
                     ("last_sync_at", "DATETIME"),
                     ("last_sync_error", "VARCHAR(512)"),
                     ("sync_enabled", "BOOLEAN DEFAULT 0"),
                     ("proxy", "VARCHAR(512)"),
                     ("latest_verification_code", "VARCHAR(64)"),
                     ("latest_code_at", "DATETIME"),
+                    ("latest_code_folder", "VARCHAR(32)"),
                     ("last_fetch_at", "DATETIME"),
                     ("last_error", "VARCHAR(512)"),
                 ):
                     _sqlite_add_column(conn, "accounts", col, col_type)
+            if "fetch_lock_state" in tables:
+                _sqlite_add_column(conn, "fetch_lock_state", "lease_token", "VARCHAR(36)")
 
             # Drop user system (no longer used)
             conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
@@ -226,14 +321,18 @@ def migrate_schema() -> None:
             }
             if "accounts" in tables and _sqlite_accounts_has_users_fk(conn):
                 _sqlite_rebuild_accounts_drop_users_fk(conn)
+            if "accounts" in tables:
+                _ensure_account_owner_email_unique(conn)
         return
 
     # Non-SQLite
     try:
         with engine.begin() as conn:
             _generic_add_missing_columns(conn)
+            _ensure_account_owner_email_unique(conn)
     except Exception:
         logger.exception("migrate_schema: non-sqlite migration failed")
+        raise
 
 
 def init_db() -> None:

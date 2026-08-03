@@ -63,6 +63,7 @@ class AccountOut(ORMModel):
     last_error: str | None
     latest_verification_code: str | None
     latest_code_at: datetime | None
+    latest_code_folder: str | None = None
     sync_enabled: bool
     last_sync_at: datetime | None = None
     last_sync_error: str | None = None
@@ -162,6 +163,8 @@ class SendMailRequest(BaseModel):
     provider: ProviderType | str | None = None
     password: str | None = None
     credential: dict[str, Any] | None = None
+    # Optional fixed egress proxy for this send
+    proxy: str | None = None
 
 
 class SendMailResponse(BaseModel):
@@ -182,6 +185,8 @@ class FetchMessageOut(BaseModel):
     body_html: str | None = None
     verification_code: str | None = None
     folder: str | None = None
+    # IMAP UIDVALIDITY when available (client cache key)
+    uidvalidity: int | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -207,6 +212,8 @@ class FetchResponse(BaseModel):
     session_restored: bool = False
     # HttpApi multi-inbox: temp addresses under one Worker / api_url
     mailboxes: list[str] | None = None
+    # IMAP mailbox UIDVALIDITY for this folder (optional)
+    uidvalidity: int | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 

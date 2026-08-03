@@ -78,6 +78,7 @@ class SyncWorker:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._running_cycle = False
+        self._manual_requests = 0
         self._last_run: SyncRun | None = None
         self._last_started_at: datetime | None = None
         self._last_finished_at: datetime | None = None
@@ -96,6 +97,7 @@ class SyncWorker:
                 # Another replica owns the lock — don't start loop
                 logger.info("SyncWorker not started (lock held by peer)")
                 return
+            self._manual_requests = 0
             self._stop.clear()
             self._thread = threading.Thread(
                 target=self._loop,
@@ -112,18 +114,21 @@ class SyncWorker:
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
         fl = self._file_lock
-        self._file_lock = None
-        if fl is not None and fl != "nop":
-            try:
-                import fcntl
-
-                fcntl.flock(fl.fileno(), fcntl.LOCK_UN)
-                fl.close()
-            except Exception:
+        if t is None or not t.is_alive():
+            self._file_lock = None
+            if fl is not None and fl != "nop":
                 try:
+                    import fcntl
+
+                    fcntl.flock(fl.fileno(), fcntl.LOCK_UN)
                     fl.close()
                 except Exception:
-                    pass
+                    try:
+                        fl.close()
+                    except Exception:
+                        pass
+        else:
+            logger.warning("SyncWorker stop timed out; keeping file lock until thread exits")
         logger.info("SyncWorker stopped")
 
     @property
@@ -179,8 +184,14 @@ class SyncWorker:
 
     def request_full_sync(self) -> None:
         """Wake the loop to run a cycle soon (or run immediately if idle)."""
+        with self._lock:
+            self._manual_requests += 1
+            should_spawn = self._thread is None or not self._thread.is_alive()
         self._manual_wake.set()
-        if not self._running_cycle:
+        if should_spawn:
+            with self._lock:
+                if self._manual_requests > 0:
+                    self._manual_requests -= 1
             # Fire-and-forget background cycle for API triggers
             threading.Thread(
                 target=self._safe_run_cycle,
@@ -266,7 +277,15 @@ class SyncWorker:
 
             interval = max(60, int(eff.sync_interval_seconds or 3600))
 
-            if eff.sync_enabled_global:
+            manual = False
+            with self._lock:
+                if self._manual_requests > 0:
+                    self._manual_requests -= 1
+                    manual = True
+
+            if manual:
+                self._safe_run_cycle(trigger="manual")
+            elif eff.sync_enabled_global:
                 self._safe_run_cycle(trigger="scheduled")
             else:
                 logger.debug("SyncWorker: global sync disabled, skipping cycle")
@@ -295,7 +314,13 @@ class SyncWorker:
             if self._running_cycle:
                 return {"ok": False, "error": "cycle already running", "skipped": True}
             self._running_cycle = True
+        try:
+            return self._run_cycle_body(trigger=trigger)
+        finally:
+            with self._lock:
+                self._running_cycle = False
 
+    def _run_cycle_body(self, *, trigger: str) -> dict[str, Any]:
         started = datetime.now(timezone.utc)
         self._last_started_at = started
         ok_count = 0
@@ -394,9 +419,6 @@ class SyncWorker:
             db2.rollback()
         finally:
             db2.close()
-
-        with self._lock:
-            self._running_cycle = False
 
         result = {
             "ok": fail_count == 0,

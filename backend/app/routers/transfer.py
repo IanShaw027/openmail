@@ -17,8 +17,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+from app.deps_device import device_id_quota
 
 router = APIRouter(prefix="/api/transfer", tags=["transfer"])
 
@@ -121,7 +123,9 @@ class DownloadOut(BaseModel):
 
 
 @router.post("/create", response_model=CreateOut)
-def create_package(body: CreateBody) -> CreateOut:
+def create_package(body: CreateBody, device_id: str = Depends(device_id_quota)) -> CreateOut:
+    if body.host_device_id.strip() != device_id:
+        raise HTTPException(status_code=403, detail="host device mismatch")
     with _LOCK:
         _purge_expired()
         if len(_PACKAGES) > 200:
@@ -151,8 +155,10 @@ def create_package(body: CreateBody) -> CreateOut:
 
 
 @router.post("/claim", response_model=ClaimOut)
-def claim_package(body: ClaimBody) -> ClaimOut:
+def claim_package(body: ClaimBody, device_id: str = Depends(device_id_quota)) -> ClaimOut:
     code = body.code.strip().upper()
+    if body.guest_device_id.strip() != device_id:
+        raise HTTPException(status_code=403, detail="guest device mismatch")
     with _LOCK:
         _purge_expired()
         pkg = _PACKAGES.get(code)
@@ -179,7 +185,11 @@ def claim_package(body: ClaimBody) -> ClaimOut:
 
 
 @router.get("/status/{code}", response_model=StatusOut)
-def package_status(code: str, claim_token: str = "") -> StatusOut:
+def package_status(
+    code: str,
+    claim_token: str = "",
+    device_id: str = Depends(device_id_quota),
+) -> StatusOut:
     code = code.strip().upper()
     with _LOCK:
         _purge_expired()
@@ -188,10 +198,15 @@ def package_status(code: str, claim_token: str = "") -> StatusOut:
             raise HTTPException(status_code=404, detail="Not found")
         if pkg.expires_at < time.time():
             pkg.status = "expired"
-        # Host can poll with claim_token; public status omits guest id if wrong token
-        guest = pkg.guest_device_id
-        if claim_token and claim_token != pkg.claim_token:
-            guest = None
+        is_host = device_id == pkg.host_device_id
+        is_guest = bool(pkg.guest_device_id) and device_id == pkg.guest_device_id
+        token_ok = bool(claim_token) and claim_token == pkg.claim_token
+        # Only host, claimed guest, or holder of claim_token may see details.
+        # Other registered devices that guess the code get a minimal not-found
+        # so label/direction/status are not enumerable.
+        if not (is_host or is_guest or token_ok):
+            raise HTTPException(status_code=404, detail="Not found")
+        guest = pkg.guest_device_id if (is_host or token_ok) else None
         return StatusOut(
             code=pkg.code,
             status=pkg.status,
@@ -204,8 +219,10 @@ def package_status(code: str, claim_token: str = "") -> StatusOut:
 
 
 @router.post("/approve", response_model=StatusOut)
-def approve_package(body: ApproveBody) -> StatusOut:
+def approve_package(body: ApproveBody, device_id: str = Depends(device_id_quota)) -> StatusOut:
     code = body.code.strip().upper()
+    if body.host_device_id.strip() != device_id:
+        raise HTTPException(status_code=403, detail="host device mismatch")
     with _LOCK:
         _purge_expired()
         pkg = _PACKAGES.get(code)
@@ -238,9 +255,11 @@ def approve_package(body: ApproveBody) -> StatusOut:
 
 
 @router.post("/download", response_model=DownloadOut)
-def download_package(body: ClaimBody) -> DownloadOut:
+def download_package(body: ClaimBody, device_id: str = Depends(device_id_quota)) -> DownloadOut:
     """Guest downloads ciphertext after host approval. One-shot."""
     code = body.code.strip().upper()
+    if body.guest_device_id.strip() != device_id:
+        raise HTTPException(status_code=403, detail="guest device mismatch")
     with _LOCK:
         _purge_expired()
         pkg = _PACKAGES.get(code)

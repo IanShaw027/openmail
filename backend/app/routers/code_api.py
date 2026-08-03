@@ -60,7 +60,7 @@ def _result_to_json(result: FetchServiceResult) -> CodeFetchJsonResult:
     methods=["GET", "POST"],
     summary="Public code fetch by token (legacy server accounts)",
 )
-async def public_code_fetch(
+def public_code_fetch(
     token: str,
     request: Request,
     db: DbDep,

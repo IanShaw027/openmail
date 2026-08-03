@@ -100,6 +100,8 @@ def save_client_sealed(
     account.credential_enc = encrypt_json(payload, settings=s)
     # Clear server-side password when moving to client seal
     account.password_enc = None
+    # Drop any server-stored session cookies/meta so old plaintext state cannot persist.
+    account.session = None
     account.updated_at = datetime.now(timezone.utc)
 
 
@@ -121,6 +123,23 @@ def load_cookies(account: Account, *, settings: Settings | None = None) -> list[
     try:
         data = decrypt_json(sess.cookies_enc, settings=s)
         if isinstance(data, list):
+            return data
+        return None
+    except (CryptoError, TypeError, ValueError):
+        return None
+
+
+def load_session_meta(
+    account: Account, *, settings: Settings | None = None
+) -> dict[str, Any] | None:
+    """Decrypt AccountSession.meta_enc (cookie provider restore state)."""
+    s = settings or get_settings()
+    sess = account.session
+    if sess is None or not sess.meta_enc:
+        return None
+    try:
+        data = decrypt_json(sess.meta_enc, settings=s)
+        if isinstance(data, dict):
             return data
         return None
     except (CryptoError, TypeError, ValueError):

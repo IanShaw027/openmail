@@ -55,6 +55,16 @@ class Settings(BaseSettings):
         validation_alias="FETCH_MIN_INTERVAL_SECONDS",
         description="Engineering floor: min gap between real upstream fetches per account",
     )
+    fetch_lock_lease_seconds: float = Field(
+        default=180.0,
+        validation_alias="FETCH_LOCK_LEASE_SECONDS",
+        description="Max age of in_flight fetch lock before it is treated as stale (crash recovery)",
+    )
+    code_api_cache_ttl_seconds: float = Field(
+        default=90.0,
+        validation_alias="CODE_API_CACHE_TTL_SECONDS",
+        description="TTL for public code-API short-circuit on latest_verification_code; 0 disables cache",
+    )
     # Background sync worker
     sync_interval_seconds: int = Field(
         default=3600,

@@ -15,6 +15,7 @@ from app.fetch_guard import (
     FetchInFlightError,
     FetchTooSoonError,
     account_fetch_slot,
+    lease_is_current,
 )
 from app.models import Account, AccountStatus, ProviderType
 from app.providers.base import (
@@ -28,6 +29,7 @@ from app.services.credentials import (
     load_cookies,
     load_credentials,
     load_password,
+    load_session_meta,
     merge_guest_credentials,
 )
 from app.services.parser import annotate_message_code, extract_verification_code
@@ -63,6 +65,8 @@ class FetchServiceResult:
     session_restored: bool = False
     # HttpApi multi-inbox: temp addresses discovered under one api_url
     mailboxes: list[str] | None = None
+    # IMAP mailbox UIDVALIDITY for this folder (optional)
+    uidvalidity: int | None = None
 
     def __post_init__(self) -> None:
         if self.message_count == 0 and self.messages:
@@ -111,6 +115,10 @@ def _build_credentials_for_account(
     cookies = load_cookies(account, settings=settings)
     if cookies is not None:
         creds["cookies"] = cookies
+    # Cookie providers (mail.com) need session_meta for restore / CSRF / site state
+    meta = load_session_meta(account, settings=settings)
+    if meta is not None:
+        creds["session_meta"] = meta
     # Ensure email available to providers
     creds.setdefault("email", account.email)
 
@@ -169,6 +177,7 @@ def _write_short_cache(
     code: str | None,
     *,
     matched: Message | None = None,
+    folder: str = "inbox",
 ) -> None:
     now = datetime.now(timezone.utc)
     account.last_fetch_at = now
@@ -178,7 +187,33 @@ def _write_short_cache(
     if code:
         account.latest_verification_code = code
         account.latest_code_at = now
+        account.latest_code_folder = _folder_key(folder)
     account.updated_at = now
+
+
+def _folder_key(folder: str | None) -> str:
+    value = str(folder or "inbox").strip().lower()
+    if value in ("junk", "spam", "junkemail", "垃圾", "垃圾邮件"):
+        return "spam"
+    if value in ("sent", "sentitems", "sent mail", "已发送", "已发"):
+        return "sent"
+    return "inbox"
+
+
+def _cached_code_fresh(account: Account, folder: str, settings: Settings) -> bool:
+    if not account.latest_verification_code or account.latest_code_at is None:
+        return False
+    if getattr(account, "latest_code_folder", None) != _folder_key(folder):
+        return False
+    ttl = float(getattr(settings, "code_api_cache_ttl_seconds", 90.0) or 0.0)
+    if ttl <= 0:
+        return False
+    code_at = account.latest_code_at
+    if code_at.tzinfo is None:
+        code_at = code_at.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - code_at).total_seconds()
+    return 0 <= age <= ttl
+
 
 def _mark_error(account: Account, error: str) -> None:
     """Record fetch failure on the account row."""
@@ -227,6 +262,10 @@ def fetch_account(
     settings: Settings | None = None,
     use_cache: bool = False,
     force_new_sid: bool = False,
+    since: str | None = None,
+    before: str | None = None,
+    max_messages: int | None = None,
+    full: bool = False,
 ) -> FetchServiceResult:
     """Fetch for a stored account: guard → provider → credential write-back → cache."""
     s = settings or get_settings()
@@ -241,8 +280,8 @@ def fetch_account(
             folder=folder,
         )
 
-    # Optional short-cache short-circuit (code API default path)
-    if use_cache and not force and account.latest_verification_code:
+    # Optional short-cache short-circuit (code API default path) with TTL
+    if use_cache and not force and _cached_code_fresh(account, folder, s):
         return FetchServiceResult(
             ok=True,
             code=account.latest_verification_code,
@@ -299,37 +338,34 @@ def fetch_account(
             folder=folder,
         )
 
-    # Incremental: after first successful fetch, only pull recent window
+    # Stored accounts only keep a short code cache, not per-folder message
+    # cursors. A mailbox-level last_fetch_at is not a valid high-water mark:
+    # fetching inbox first could make junk/sent skip older unseen messages.
+    # Keep this path recent-page based until a (account, folder) cursor exists.
     limits: dict[str, Any] = {}
-    lookback = int(getattr(s, "fetch_default_lookback_days", 3) or 3)
-    if account.last_fetch_at and lookback > 0 and not force:
-        from datetime import timedelta
-
-        since_dt = datetime.now(timezone.utc) - timedelta(days=lookback)
-        # also not older than last_fetch_at - 1 day slack
+    if since and not full and not before:
+        limits["since"] = since
+    if before:
+        limits["before"] = before
+    if max_messages is not None:
         try:
-            lf = account.last_fetch_at
-            if lf.tzinfo is None:
-                lf = lf.replace(tzinfo=timezone.utc)
-            slack = lf - timedelta(days=1)
-            if slack > since_dt:
-                since_dt = slack
-        except Exception:
-            pass
-        limits["since"] = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    if quick:
+            limits["max_messages"] = max(1, min(int(max_messages), 100))
+        except (TypeError, ValueError):
+            limits["max_messages"] = 15 if quick else 50
+    elif quick:
         limits["max_messages"] = 15
+    elif not full:
+        limits["max_messages"] = 50
 
     try:
-        with account_fetch_slot(db, account.id, settings=s, force=force):
-            # Walk sticky WARP → remaining pool → direct (unless fixed account.proxy)
+        with account_fetch_slot(db, account.id, settings=s, force=force) as lease_token:
+            # Walk sticky WARP → remaining pool → direct.
+            # If account.proxy is fixed, list_proxy_candidates returns only that URL.
             try:
                 from app.services.proxy import list_proxy_candidates
                 from app.services.settings_service import get_effective_settings
 
                 eff = get_effective_settings(db, settings=s)
-                # Temporarily clear account.proxy on the object used for pool listing
-                # when we want pool rotation — but fixed account.proxy must stick.
                 candidates = list_proxy_candidates(
                     account,
                     settings=eff,
@@ -337,7 +373,8 @@ def fetch_account(
                     include_direct=True,
                 )
             except Exception:
-                candidates = [creds.get("proxy") or account.proxy, None]
+                fixed_proxy = str(creds.get("proxy") or account.proxy or "").strip()
+                candidates = [fixed_proxy] if fixed_proxy else [None]
 
             seen_p: set[str] = set()
             ordered: list[str | None] = []
@@ -388,8 +425,13 @@ def fetch_account(
                     continue
                 break
 
+            if lease_token and not lease_is_current(db, account.id, lease_token, settings=s):
+                raise FetchInFlightError()
+
             if result.credential_updates and result.credential_updates.any():
                 # Merge token_expires into credential blob if present in session_meta
+                if lease_token and not lease_is_current(db, account.id, lease_token, settings=s):
+                    raise FetchInFlightError()
                 apply_credential_updates(
                     db,
                     account,
@@ -433,10 +475,20 @@ def fetch_account(
                 if not m.verification_code:
                     annotate_message_code(m, custom_regex=custom_regex)
 
+            if lease_token and not lease_is_current(db, account.id, lease_token, settings=s):
+                raise FetchInFlightError()
+
             code, matched = _pick_best_code(
                 result.messages, keyword=keyword, custom_regex=custom_regex
             )
-            _write_short_cache(db, account, result.messages, code, matched=matched)
+            _write_short_cache(
+                db,
+                account,
+                result.messages,
+                code,
+                matched=matched,
+                folder=result.folder or folder,
+            )
             db.commit()
             session = _session_fields_from_result(result)
 
@@ -456,10 +508,11 @@ def fetch_account(
                 session_meta=session["session_meta"],
                 session_restored=session["session_restored"],
                 mailboxes=session.get("mailboxes"),
+                uidvalidity=getattr(result, "uidvalidity", None),
             )
     except FetchTooSoonError as exc:
         # Fall back to cache if available
-        if account.latest_verification_code:
+        if _cached_code_fresh(account, folder, s):
             return FetchServiceResult(
                 ok=True,
                 code=account.latest_verification_code,
@@ -480,8 +533,9 @@ def fetch_account(
             too_soon=True,
             retry_after=exc.retry_after,
         )
-    except FetchInFlightError:
-        if account.latest_verification_code:
+    except FetchInFlightError as exc:
+        retry = exc.retry_after
+        if _cached_code_fresh(account, folder, s):
             return FetchServiceResult(
                 ok=True,
                 code=account.latest_verification_code,
@@ -489,13 +543,22 @@ def fetch_account(
                 account_id=account.id,
                 folder=folder,
                 cached=True,
+                retry_after=retry,
             )
+        if retry is not None and retry > 0:
+            err = (
+                f"取件进行中，请 {retry:.0f}s 后重试 / "
+                f"Fetch in progress, retry in {retry:.0f}s"
+            )
+        else:
+            err = "取件进行中，请稍后 / Fetch already in progress"
         return FetchServiceResult(
             ok=False,
-            error="取件进行中，请稍后 / Fetch already in progress",
+            error=err,
             email=email,
             account_id=account.id,
             folder=folder,
+            retry_after=retry,
         )
 
 
@@ -684,14 +747,12 @@ def fetch_proxy(
         from app.services.settings_service import get_effective_settings
 
         eff = get_effective_settings(None, settings=s)
-        # candidates: [warp sticky, warp…, None(direct)] or [fixed, None]
+        # candidates: [warp sticky, warp…, None(direct)] or [fixed]
         candidates = list_proxy_candidates(
             account, settings=eff, include_direct=True
         )
     except Exception:
         candidates = [fixed_proxy] if fixed_proxy else [None]
-        if fixed_proxy:
-            candidates.append(None)
 
     # Build a thin wrapper matching ProviderType for resolve_provider
     try:
@@ -805,4 +866,5 @@ def fetch_proxy(
         session_meta=session["session_meta"],
         session_restored=session["session_restored"],
         mailboxes=session.get("mailboxes"),
+        uidvalidity=getattr(result, "uidvalidity", None),
     )
