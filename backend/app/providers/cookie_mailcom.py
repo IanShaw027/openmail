@@ -697,51 +697,147 @@ def parse_message_list_html(html: str, *, limit: int = 50, folder: str = "inbox"
     return [by_id[i] for i in order[:limit]]
 
 
+# Marketing / chrome titles that must never become subject or preview.
+_MAILCOM_CHROME_TITLE_RE = re.compile(
+    r"(secure\s*&\s*free\s*webmail|webmail\s+features\s+for\s+your\s+mail|"
+    r"free\s+email\s+accounts\s+with\s+mail\.com|"
+    r"log\s+in\s+here\s+or\s+register|"
+    r"^\s*mail\.com\s*$|"
+    r"message\s*-\s*mail\.com)",
+    re.I,
+)
+
+
+def _strip_tags(html_frag: str) -> str:
+    import html as html_mod
+
+    text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html_frag or "")
+    text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_mod.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _is_chrome_title(text: str | None) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return True
+    return bool(_MAILCOM_CHROME_TITLE_RE.search(t))
+
+
+def extract_mailbody_iframe_src(html: str) -> str | None:
+    """lightmailer puts the real message HTML in ./mailbody/{mailId}/false iframe."""
+    if not html:
+        return None
+    # Prefer mailbody iframe
+    for m in re.finditer(r'<iframe[^>]+src=["\']([^"\']+)["\']', html, re.I):
+        src = m.group(1).strip()
+        if not src or src.startswith("about:") or "generic_dfp" in src or "keepalive" in src:
+            continue
+        if "mailbody" in src.lower():
+            return src
+    return None
+
+
 def parse_message_detail_html(html: str, *, msg_id: str, folder: str = "inbox") -> Message:
-    """Extract subject/from/body from a detail page or fixture."""
+    """Extract subject/from/body from a detail page, fixture, or mailbody iframe HTML.
+
+    Live lightmailer (2026-08): shell page uses ``mail-header__*`` + iframe
+    ``./mailbody/{id}/false`` for the real body. Fixture still uses ``.mail-body``.
+    """
     subject = ""
     from_ = ""
     body_text = ""
     body_html = ""
+    date_s = ""
 
-    sm = re.search(
+    # ── subject ──────────────────────────────────────────────────────
+    for pat in (
         r'<h1[^>]*class=["\'][^"\']*subject[^"\']*["\'][^>]*>(.*?)</h1>',
-        html or "",
-        re.I | re.S,
-    )
-    if sm:
-        subject = re.sub(r"<[^>]+>", "", sm.group(1)).strip()
+        r'class=["\'][^"\']*mail-header__subject[^"\']*["\'][^>]*>(.*?)</(?:dd|div|span|h1|h2|td)>',
+        r'class=["\'][^"\']*mail-header__subject[^"\']*["\'][^>]*>(.*?)</',
+    ):
+        sm = re.search(pat, html or "", re.I | re.S)
+        if sm:
+            subject = _strip_tags(sm.group(1))
+            if subject and not _is_chrome_title(subject):
+                break
+            subject = ""
+
     if not subject:
         sm = re.search(r"<title>(.*?)</title>", html or "", re.I | re.S)
         if sm:
-            subject = re.sub(r"<[^>]+>", "", sm.group(1)).strip()
+            cand = _strip_tags(sm.group(1))
+            if cand and not _is_chrome_title(cand):
+                subject = cand
 
-    fm = re.search(
-        r'<[^>]+class=["\'][^"\']*from[^"\']*["\'][^>]*>(.*?)</',
+    # ── from ─────────────────────────────────────────────────────────
+    for pat in (
+        r'class=["\'][^"\']*mail-header__sender[^"\']*["\'][^>]*title=["\']([^"\']+)["\']',
+        r'class=["\'][^"\']*mail-header__sender[^"\']*["\'][^>]*>(.*?)</(?:dd|div|span|td)>',
+        r'<[^>]+class=["\'][^"\']*\bfrom\b[^"\']*["\'][^>]*>(.*?)</',
+    ):
+        fm = re.search(pat, html or "", re.I | re.S)
+        if fm:
+            from_ = _strip_tags(fm.group(1))
+            # skip pure labels like "From:"
+            if from_ and from_.lower() not in ("from", "from:", "sender"):
+                break
+            from_ = ""
+
+    # ── date (optional) ──────────────────────────────────────────────
+    dm = re.search(
+        r'class=["\'][^"\']*mail-header__date[^"\']*["\'][^>]*>(.*?)</',
         html or "",
         re.I | re.S,
     )
-    if fm:
-        from_ = re.sub(r"<[^>]+>", "", fm.group(1)).strip()
+    if dm:
+        date_s = _strip_tags(dm.group(1))
 
+    # ── body: inline containers (fixtures + some themes) ─────────────
+    # Do NOT use message-detail-panel__body — live lightmailer only embeds an
+    # <iframe src="./mailbody/..."> there (no real content).
     bm = re.search(
         r'<div[^>]+class=["\'][^"\']*mail-body[^"\']*["\'][^>]*>(.*?)</div>',
         html or "",
         re.I | re.S,
     )
     if bm:
-        body_html = bm.group(1).strip()
-        body_text = re.sub(r"<[^>]+>", " ", body_html)
-        body_text = re.sub(r"\s+", " ", body_text).strip()
-    else:
-        # plain text fixture
+        frag = bm.group(1).strip()
+        # Ignore shell that is only an iframe to mailbody
+        if "mailbody" in frag.lower() and len(_strip_tags(frag)) < 40:
+            frag = ""
+        if frag:
+            body_html = frag
+            body_text = _strip_tags(body_html)
+    if not body_text:
         pm = re.search(
             r'<pre[^>]+class=["\'][^"\']*body-text[^"\']*["\'][^>]*>(.*?)</pre>',
             html or "",
             re.I | re.S,
         )
         if pm:
-            body_text = pm.group(1).strip()
+            body_text = _strip_tags(pm.group(1))
+
+    # If this is already a mailbody iframe document (almost pure email HTML)
+    low = (html or "").lower()
+    is_shell = "message-detail-panel" in low or "mail-header__subject" in low
+    if not body_text and not body_html and html and not is_shell:
+        if "folderlist" not in low and (
+            "mime" in low
+            or "<table" in low
+            or "verification" in low
+            or len(html) > 400
+            or "<html" in low
+        ):
+            body_html = html
+            body_text = _strip_tags(html)
+
+    # Never use marketing chrome as preview
+    preview_src = body_text or subject
+    if _is_chrome_title(preview_src):
+        preview_src = body_text or ""
 
     addr_m = re.search(r"[\w.+-]+@[\w.-]+", from_)
     msg = Message(
@@ -749,13 +845,15 @@ def parse_message_detail_html(html: str, *, msg_id: str, folder: str = "inbox") 
         subject=subject,
         from_=from_,
         from_address=(addr_m.group(0).lower() if addr_m else ""),
+        date=date_s or None,
         body_text=body_text,
         body_html=body_html,
-        body_preview=(body_text or subject)[:280],
+        body_preview=(preview_src)[:280],
         folder=folder,
         verification_code=extract_verification_code(
             subject=subject, body_text=body_text, body_html=body_html
         ),
+        raw_refs={"mailbody_iframe": extract_mailbody_iframe_src(html or "")},
     )
     return msg
 
@@ -912,9 +1010,17 @@ class MailcomCookieProvider:
                         msg.subject = msg.subject or detail.subject
                         msg.from_ = msg.from_ or detail.from_
                         msg.from_address = msg.from_address or detail.from_address
-                        msg.body_text = detail.body_text
-                        msg.body_html = detail.body_html
-                        msg.body_preview = detail.body_preview or msg.body_preview
+                        if detail.body_text or detail.body_html:
+                            msg.body_text = detail.body_text
+                            msg.body_html = detail.body_html
+                        # Never clobber list subject with chrome marketing titles
+                        prev = (detail.body_preview or detail.body_text or "").strip()
+                        if prev and not _is_chrome_title(prev):
+                            msg.body_preview = prev[:280]
+                        elif msg.body_text and not _is_chrome_title(msg.body_text):
+                            msg.body_preview = msg.body_text[:280]
+                        elif msg.subject and not _is_chrome_title(msg.subject):
+                            msg.body_preview = msg.subject[:280]
                         msg.verification_code = detail.verification_code or msg.verification_code
                 except Exception:
                     continue
@@ -1342,7 +1448,11 @@ class MailcomCookieProvider:
         meta: dict[str, Any] | None = None,
         detail_url: str | None = None,
     ) -> Message | None:
-        """Fetch a single message body by lightmailer detail URL or id patterns."""
+        """Fetch a single message body by lightmailer detail URL or id patterns.
+
+        Live lightmailer: detail shell + iframe ``./mailbody/{mailId}/false`` holds
+        the real HTML body — both must be fetched.
+        """
         if not message_id and not detail_url:
             return None
         candidates: list[str] = []
@@ -1357,6 +1467,12 @@ class MailcomCookieProvider:
         folder_url = (meta or {}).get("folder_url") if meta else None
         if folder_url:
             bases = [str(folder_url), *bases]
+        light_base = "https://lightmailer.mail.com"
+        try:
+            bare = urlparse(f"https://{site}").hostname or DEFAULT_SITE
+            light_base = f"https://lightmailer.{bare}"
+        except Exception:
+            pass
         for base in bases:
             b = str(base).rstrip("/")
             # lightmailer relative detail
@@ -1365,6 +1481,10 @@ class MailcomCookieProvider:
                     [
                         f"{b}/messagedetail?mailId={mid}",
                         f"{b}/./messagedetail?mailId={mid}",
+                        f"{light_base}/messagedetail?mailId={mid}",
+                        # direct body iframe (works when session valid)
+                        f"{light_base}/mailbody/{mid}/false",
+                        f"{b}/mailbody/{mid}/false",
                     ]
                 )
             if mid:
@@ -1377,6 +1497,7 @@ class MailcomCookieProvider:
                     ]
                 )
         seen: set[str] = set()
+        best: Message | None = None
         for url in candidates:
             if not url or url in seen:
                 continue
@@ -1392,13 +1513,90 @@ class MailcomCookieProvider:
             if not html or _resp_status(resp) >= 400:
                 continue
             if _looks_like_session_loss(html) and not session_looks_valid(html):
-                continue
+                # pure mailbody docs won't have folder markers — allow if path is mailbody
+                if "mailbody" not in url.lower():
+                    continue
+            final_url = str(getattr(resp, "url", url) or url)
             msg = parse_message_detail_html(
                 html, msg_id=mid or str(message_id or "detail"), folder=folder.lower()
             )
+            # Always follow mailbody iframe when present (shell has no real body)
+            iframe_src = extract_mailbody_iframe_src(html)
+            need_iframe = bool(iframe_src) and (
+                not (msg.body_text or "").strip()
+                or "mailbody" in (msg.body_html or "").lower()
+                or len((msg.body_text or "").strip()) < 20
+            )
+            if need_iframe and iframe_src:
+                try:
+                    body_url = urljoin(final_url, iframe_src)
+                    if body_url not in seen:
+                        seen.add(body_url)
+                        bresp = client.get(body_url)
+                        bhtml = _resp_text(bresp)
+                        if bhtml and _resp_status(bresp) < 400:
+                            body_msg = parse_message_detail_html(
+                                bhtml,
+                                msg_id=mid or str(message_id or "detail"),
+                                folder=folder.lower(),
+                            )
+                            if body_msg.body_html or body_msg.body_text:
+                                msg.body_html = body_msg.body_html or msg.body_html
+                                msg.body_text = body_msg.body_text or msg.body_text
+                                if msg.body_text and not _is_chrome_title(msg.body_text):
+                                    msg.body_preview = msg.body_text[:280]
+                                if body_msg.verification_code and not msg.verification_code:
+                                    msg.verification_code = body_msg.verification_code
+                except Exception:
+                    pass
+
+            # Also try direct mailbody if still empty and we have numeric id
+            if not (msg.body_text or msg.body_html) and mid.isdigit():
+                for burl in (
+                    f"{light_base}/mailbody/{mid}/false",
+                    urljoin(final_url, f"./mailbody/{mid}/false"),
+                ):
+                    if burl in seen:
+                        continue
+                    seen.add(burl)
+                    try:
+                        bresp = client.get(burl)
+                        bhtml = _resp_text(bresp)
+                        if not bhtml or _resp_status(bresp) >= 400:
+                            continue
+                        body_msg = parse_message_detail_html(
+                            bhtml,
+                            msg_id=mid,
+                            folder=folder.lower(),
+                        )
+                        if body_msg.body_html or body_msg.body_text:
+                            msg.body_html = body_msg.body_html
+                            msg.body_text = body_msg.body_text
+                            if msg.body_text and not _is_chrome_title(msg.body_text):
+                                msg.body_preview = msg.body_text[:280]
+                            if body_msg.verification_code:
+                                msg.verification_code = body_msg.verification_code
+                            break
+                    except Exception:
+                        continue
+
+            # Recompute preview; never leave marketing chrome
+            if msg.body_text and not _is_chrome_title(msg.body_text):
+                msg.body_preview = msg.body_text[:280]
+            elif msg.subject and not _is_chrome_title(msg.subject):
+                msg.body_preview = msg.subject[:280]
+            else:
+                msg.body_preview = (msg.body_preview or "")[:280]
+                if _is_chrome_title(msg.body_preview):
+                    msg.body_preview = ""
+
             if msg.subject or msg.body_text or msg.body_html:
-                return msg
-        return None
+                # Prefer a message that actually has body content
+                if msg.body_text or msg.body_html:
+                    return msg
+                if best is None:
+                    best = msg
+        return best
 
 
 # Back-compat alias used by registry
