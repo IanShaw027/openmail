@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-03
+
+### Added
+
+- Multi-folder fetch (inbox / spam / sent): empty folder → latest 20; else catch-up since newest
+- Mail list **infinite scroll** (pull-up load older); top refresh / bottom loading status without a load-more button
+- SMTP host table for **GMX / Zoho**; after SMTP send, best-effort **IMAP APPEND** to Sent
+- NetEase **IMAP ID** after login (fixes 126/163 `Unsafe Login` on SELECT)
+- mail.com **messagelist multi-page** paging for load-older / wider windows
+- Client-sealed cloud accounts: **re-seal** envelope when password/tokens change
+
+### Changed
+
+- Credential TXT export rebuilds lines from **current** secrets (no stale `rawLine`)
+- Vault unlock migrates stale `rawLine`; fetch merge **reparses** cached OTP codes
+- Delete account clears unused **mailCache**; system import keeps cache only for restored accounts
+- 2FA cards: wider layout, multi-line account names (less aggressive ellipsis)
+- Verification parser: reject years / marketing words (`purchase`, `two-factor`, bare `one-time`)
+
+### Fixed
+
+- Clear & refetch keeps the list until a **successful** response, then replaces
+- Load-more never wipes existing messages; append only after success
+- Sticky false `verification_code` on mailCache merge
+- Panel verification **banner** removed (less redundant UI)
+
 ## [0.3.1] — 2026-08-03
 
 ### Fixed
@@ -135,7 +161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - User registration, admin console, server mail search UI
 - Code-API **create** (legacy token URLs may still resolve if present in DB)
 
-[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/IanShaw027/openmail/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/IanShaw027/openmail/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IanShaw027/openmail/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/IanShaw027/openmail/compare/v0.2.0...v0.2.1
