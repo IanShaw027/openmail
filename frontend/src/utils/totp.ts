@@ -422,19 +422,46 @@ export function remainingSeconds(period: number, nowMs: number = Date.now()): nu
   return p - elapsed
 }
 
-/** Service / brand presets — "other" requires custom name. */
+/** Service / brand presets — "other" requires custom name. Icons from brandLogos. */
 export const SERVICE_PRESETS: Array<{ id: string; name: string; issuer: string }> = [
   { id: 'google', name: 'Google', issuer: 'Google' },
   { id: 'microsoft', name: 'Microsoft', issuer: 'Microsoft' },
   { id: 'github', name: 'GitHub', issuer: 'GitHub' },
   { id: 'apple', name: 'Apple', issuer: 'Apple' },
   { id: 'amazon', name: 'Amazon', issuer: 'Amazon' },
+  { id: 'openai', name: 'OpenAI / ChatGPT', issuer: 'OpenAI' },
+  { id: 'claude', name: 'Claude', issuer: 'Anthropic' },
   { id: 'discord', name: 'Discord', issuer: 'Discord' },
   { id: 'twitter', name: 'X / Twitter', issuer: 'Twitter' },
   { id: 'facebook', name: 'Facebook', issuer: 'Facebook' },
+  { id: 'instagram', name: 'Instagram', issuer: 'Instagram' },
+  { id: 'telegram', name: 'Telegram', issuer: 'Telegram' },
+  { id: 'whatsapp', name: 'WhatsApp', issuer: 'WhatsApp' },
+  { id: 'slack', name: 'Slack', issuer: 'Slack' },
+  { id: 'notion', name: 'Notion', issuer: 'Notion' },
   { id: 'dropbox', name: 'Dropbox', issuer: 'Dropbox' },
   { id: 'steam', name: 'Steam', issuer: 'Steam' },
+  { id: 'epicgames', name: 'Epic Games', issuer: 'Epic Games' },
   { id: 'binance', name: 'Binance', issuer: 'Binance' },
+  { id: 'coinbase', name: 'Coinbase', issuer: 'Coinbase' },
+  { id: 'stripe', name: 'Stripe', issuer: 'Stripe' },
+  { id: 'paypal', name: 'PayPal', issuer: 'PayPal' },
+  { id: 'aws', name: 'AWS', issuer: 'Amazon Web Services' },
+  { id: 'cloudflare', name: 'Cloudflare', issuer: 'Cloudflare' },
+  { id: 'docker', name: 'Docker', issuer: 'Docker' },
+  { id: 'gitlab', name: 'GitLab', issuer: 'GitLab' },
+  { id: 'bitwarden', name: 'Bitwarden', issuer: 'Bitwarden' },
+  { id: '1password', name: '1Password', issuer: '1Password' },
+  { id: 'linkedin', name: 'LinkedIn', issuer: 'LinkedIn' },
+  { id: 'reddit', name: 'Reddit', issuer: 'Reddit' },
+  { id: 'twitch', name: 'Twitch', issuer: 'Twitch' },
+  { id: 'youtube', name: 'YouTube', issuer: 'YouTube' },
+  { id: 'spotify', name: 'Spotify', issuer: 'Spotify' },
+  { id: 'netflix', name: 'Netflix', issuer: 'Netflix' },
+  { id: 'figma', name: 'Figma', issuer: 'Figma' },
+  { id: 'adobe', name: 'Adobe', issuer: 'Adobe' },
+  { id: 'shopify', name: 'Shopify', issuer: 'Shopify' },
+  { id: 'vercel', name: 'Vercel', issuer: 'Vercel' },
   { id: 'other', name: 'Other', issuer: '' },
 ]
 
