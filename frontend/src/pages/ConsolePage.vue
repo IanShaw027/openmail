@@ -24,7 +24,12 @@ import {
 import { ApiError, isAbortError, isTimeoutError } from '@/api/client'
 import { useSettingsStore } from '@/stores/settings'
 import { useMailCacheStore } from '@/stores/mailCache'
-import { exportCredentialsTxt, buildSystemSnapshot, parseSystemSnapshot } from '@/utils/exportImport'
+import {
+  exportCredentialsTxt,
+  buildSystemSnapshot,
+  parseSystemSnapshot,
+  rebuildRawLine,
+} from '@/utils/exportImport'
 import { getDeviceId, getLicenseToken, setLicenseToken } from '@/utils/device'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
 import {
@@ -665,6 +670,23 @@ function applyDraftEdits(row: ImportDraftRow) {
     imapHost: row.editImapHost || undefined,
     note: row.editNote || undefined,
   }
+  // Rebuild rawLine so export/import lines reflect the edited password
+  row.partial.rawLine = rebuildRawLine({
+    ...row.partial,
+    email: row.partial.email,
+    type: row.partial.type,
+    password: row.partial.password,
+    authCode: row.partial.authCode,
+    clientId: row.partial.clientId,
+    refreshToken: row.partial.refreshToken,
+    imapHost: row.partial.imapHost,
+    imapPort: row.partial.imapPort,
+    apiUrl: row.partial.apiUrl,
+    apiKey: row.partial.apiKey,
+    smtpHost: row.partial.smtpHost,
+    smtpPort: row.partial.smtpPort,
+  })
+  row.rawLine = row.partial.rawLine
   row.email = row.partial.email
   row.editing = false
 }
@@ -2181,6 +2203,7 @@ function openEdit(acc: MailAccount) {
 async function saveEdit() {
   const f = editForm.value
   if (!f.id) return
+  const prev = accounts.findById(f.id)
   const patch: Partial<MailAccount> = {
     // Empty string (not undefined) so clear dual-writes and survives refresh
     note: (f.note || '').trim() ? f.note.trim() : '',
@@ -2203,6 +2226,23 @@ async function saveEdit() {
     patch.smtpHost = f.smtpHost?.trim() || undefined
     patch.smtpPort = f.smtpPort === '' ? undefined : Number(f.smtpPort) || undefined
   }
+  // Keep rawLine aligned with edited secrets (TXT export previously preferred stale rawLine)
+  const mergedForLine = {
+    email: f.email || prev?.email || '',
+    type: (f.type || prev?.type || 'unknown') as MailAccount['type'],
+    password: patch.password ?? prev?.password,
+    authCode: patch.authCode ?? prev?.authCode,
+    clientId: patch.clientId ?? prev?.clientId,
+    refreshToken: patch.refreshToken ?? prev?.refreshToken,
+    apiUrl: patch.apiUrl ?? prev?.apiUrl,
+    apiKey: patch.apiKey ?? prev?.apiKey,
+    imapHost: patch.imapHost ?? prev?.imapHost,
+    imapPort: prev?.imapPort,
+    smtpHost: patch.smtpHost ?? prev?.smtpHost,
+    smtpPort: patch.smtpPort ?? prev?.smtpPort,
+    rawLine: prev?.rawLine || '',
+  }
+  patch.rawLine = rebuildRawLine(mergedForLine)
   await accounts.patchAccount(f.id, patch)
   showEdit.value = false
   flashMsg(t('console.saveEdit'))

@@ -3,21 +3,78 @@
 import type { MailAccount } from '@/types/account'
 import type { MailGroup } from '@/utils/groups'
 
-export function accountToImportLine(a: MailAccount): string {
-  if (a.rawLine && a.rawLine.includes('----')) return a.rawLine
+/**
+ * Build an importable credential line from the **current** account fields.
+ *
+ * Never prefer a stale `rawLine` when secrets were edited after import — that
+ * was causing TXT export to ship the old password while `password` on the
+ * account (and system JSON) already had the new one.
+ */
+export function accountToImportLine(
+  a: Pick<
+    MailAccount,
+    | 'email'
+    | 'type'
+    | 'password'
+    | 'authCode'
+    | 'clientId'
+    | 'refreshToken'
+    | 'apiUrl'
+    | 'apiKey'
+    | 'imapHost'
+    | 'imapPort'
+    | 'smtpHost'
+    | 'smtpPort'
+    | 'rawLine'
+  >,
+): string {
+  const email = (a.email || '').trim()
+  const secret = (a.password || a.authCode || '').trim()
+
   if (a.type === 'oauth' && a.refreshToken && a.clientId) {
-    return [a.email, a.password || '', a.clientId, a.refreshToken].join('----')
+    return [email, secret, a.clientId, a.refreshToken].join('----')
   }
   if (a.type === 'http_api' && a.apiUrl) {
-    return `${a.email}----${a.apiUrl}`
+    const key = (a.apiKey || a.password || '').trim()
+    return key ? `${email}----${a.apiUrl}----${key}` : `${email}----${a.apiUrl}`
   }
-  if (a.imapHost) {
-    return `imap----${a.email}----${a.password || a.authCode || ''}----${a.imapHost}----${a.imapPort || 993}`
+  if (a.imapHost || a.type === 'imap') {
+    const host = a.imapHost || 'imap'
+    const port = a.imapPort || 993
+    const line = `imap----${email}----${secret}----${host}----${port}`
+    if (a.smtpHost) {
+      return `${line}----${a.smtpHost}${a.smtpPort ? `:${a.smtpPort}` : ''}`
+    }
+    return line
   }
-  if (a.password || a.authCode) {
-    return `${a.email}----${a.password || a.authCode}`
+  if (secret) {
+    return `${email}----${secret}`
   }
-  return a.email
+  // Last resort: legacy raw line only when we have no structured secret
+  if (a.rawLine && a.rawLine.includes('----')) return a.rawLine
+  return email
+}
+
+/** Keep rawLine in sync after password/token edits (import preview + list edit). */
+export function rebuildRawLine(
+  a: Pick<
+    MailAccount,
+    | 'email'
+    | 'type'
+    | 'password'
+    | 'authCode'
+    | 'clientId'
+    | 'refreshToken'
+    | 'apiUrl'
+    | 'apiKey'
+    | 'imapHost'
+    | 'imapPort'
+    | 'smtpHost'
+    | 'smtpPort'
+    | 'rawLine'
+  >,
+): string {
+  return accountToImportLine(a)
 }
 
 export function exportCredentialsTxt(accounts: MailAccount[]): string {

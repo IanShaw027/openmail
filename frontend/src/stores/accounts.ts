@@ -23,6 +23,7 @@ import {
   patchAccountUiMeta,
   removeAccountUiMetaIfUnused,
 } from '@/utils/accountUiMeta'
+import { exportCredentialsTxt } from '@/utils/exportImport'
 
 function tt(key: string, params?: Record<string, unknown>): string {
   // vue-i18n Composer typings are strict about message keys; runtime keys are fine.
@@ -498,6 +499,9 @@ export const useAccountsStore = defineStore('accounts', () => {
           skipped += 1
           continue
         }
+        // Prefer partial secrets; rebuild rawLine from merged fields so export
+        // never keeps a pre-edit import line after password change.
+        const mergedPartial = { ...prev, ...partial }
         localAccounts.value[existingIdx] = {
           ...prev,
           ...partial,
@@ -512,6 +516,7 @@ export const useAccountsStore = defineStore('accounts', () => {
           serverId: prev.serverId,
           createdAt: prev.createdAt,
           updatedAt: Date.now(),
+          rawLine: partial.rawLine || prev.rawLine || mergedPartial.email,
         }
         updated += 1
       } else {
@@ -955,7 +960,8 @@ export const useAccountsStore = defineStore('accounts', () => {
     if (format === 'emails') {
       return list.map((a) => a.email).join('\n')
     }
-    return list.map((a) => a.rawLine || a.email).join('\n')
+    // Always rebuild from current fields — never trust stale rawLine after edits
+    return exportCredentialsTxt(list)
   }
 
   /**
