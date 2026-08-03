@@ -40,3 +40,19 @@ def test_gmail_table_ok():
 def test_smtp_gmail_ok():
     h = resolve_smtp_host("user@gmail.com")
     assert h.host == "smtp.gmail.com"
+
+
+def test_smtp_gmx_zoho_netease_table():
+    assert resolve_smtp_host("a@gmx.com").host == "mail.gmx.com"
+    assert resolve_smtp_host("a@gmx.de").host == "mail.gmx.net"
+    assert resolve_smtp_host("a@zoho.com").host == "smtp.zoho.com"
+    assert resolve_smtp_host("a@zohomail.com").host == "smtp.zoho.com"
+    assert resolve_smtp_host("a@126.com").host == "smtp.126.com"
+    # imap host → smtp swap for GMX/Zoho
+    assert resolve_smtp_host("a@x.com", smtp_host="imap.gmx.com").host == "mail.gmx.com"
+    assert resolve_smtp_host("a@x.com", smtp_host="imap.zoho.com").host == "smtp.zoho.com"
+
+
+def test_imap_gmx_zoho_table():
+    assert resolve_imap_host("a@gmx.com").host == "imap.gmx.com"
+    assert resolve_imap_host("a@zoho.com").host == "imap.zoho.com"

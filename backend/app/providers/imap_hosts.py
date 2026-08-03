@@ -39,6 +39,11 @@ DOMAIN_IMAP_HOSTS: dict[str, ImapHostHint] = {
     "ymail.com": ImapHostHint("imap.mail.yahoo.com"),
     "aliyun.com": ImapHostHint("imap.aliyun.com"),
     "mxhichina.com": ImapHostHint("imap.mxhichina.com"),
+    "gmx.com": ImapHostHint("imap.gmx.com"),
+    "gmx.net": ImapHostHint("imap.gmx.net"),
+    "gmx.de": ImapHostHint("imap.gmx.net"),
+    "zoho.com": ImapHostHint("imap.zoho.com"),
+    "zohomail.com": ImapHostHint("imap.zoho.com"),
 }
 
 

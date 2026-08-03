@@ -34,6 +34,15 @@ DOMAIN_SMTP_HOSTS: dict[str, SmtpHostHint] = {
     "ymail.com": SmtpHostHint("smtp.mail.yahoo.com"),
     "aliyun.com": SmtpHostHint("smtp.aliyun.com"),
     "mxhichina.com": SmtpHostHint("smtp.mxhichina.com"),
+    # GMX (United Internet)
+    "gmx.com": SmtpHostHint("mail.gmx.com"),
+    "gmx.net": SmtpHostHint("mail.gmx.net"),
+    "gmx.de": SmtpHostHint("mail.gmx.net"),
+    # Zoho
+    "zoho.com": SmtpHostHint("smtp.zoho.com"),
+    "zohomail.com": SmtpHostHint("smtp.zoho.com"),
+    # Proton Bridge is local-only (127.0.0.1:1025) and blocked by SSRF defaults —
+    # users must pass explicit smtp_host if they open that path; no public cloud SMTP.
 }
 
 
@@ -49,11 +58,16 @@ def _normalize_smtp_host(host: str) -> str:
         "imap.qq.com": "smtp.qq.com",
         "imap.163.com": "smtp.163.com",
         "imap.126.com": "smtp.126.com",
+        "imap.yeah.net": "smtp.yeah.net",
         "imap.mail.me.com": "smtp.mail.me.com",
         "imap.mail.yahoo.com": "smtp.mail.yahoo.com",
         "imap.qiye.aliyun.com": "smtp.qiye.aliyun.com",
         "imap.mxhichina.com": "smtp.mxhichina.com",
         "outlook.office365.com": "smtp.office365.com",
+        "imap.gmx.com": "mail.gmx.com",
+        "imap.gmx.net": "mail.gmx.net",
+        "imap.zoho.com": "smtp.zoho.com",
+        "imap.zoho.eu": "smtp.zoho.eu",
     }
     if h in swaps:
         return swaps[h]
