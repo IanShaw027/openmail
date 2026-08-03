@@ -617,6 +617,12 @@ function displayName(e: TwoFaEntry) {
   return e.issuer || e.label
 }
 
+function entrySubTitle(e: TwoFaEntry) {
+  const parts = [`${e.type.toUpperCase()} · ${e.algorithm} · ${e.digits}`]
+  if (e.accountEmail) parts.push(e.accountEmail)
+  return parts.join(' · ')
+}
+
 function serviceLogoKey(e: TwoFaEntry): string {
   return serviceKey(e)
 }
@@ -809,8 +815,8 @@ onUnmounted(() => {
           </span>
           <TwoFaServiceMark :logo="serviceLogoKey(e)" :issuer="e.issuer" :size="40" />
           <div class="meta">
-            <div class="name">{{ displayName(e) }}</div>
-            <div class="sub muted">
+            <div class="name" :title="displayName(e)">{{ displayName(e) }}</div>
+            <div class="sub muted" :title="entrySubTitle(e)">
               {{ e.type.toUpperCase() }} · {{ e.algorithm }} · {{ e.digits }}
               <template v-if="e.accountEmail"> · ★ {{ e.accountEmail }}</template>
             </div>
@@ -986,7 +992,8 @@ onUnmounted(() => {
 <style scoped>
 .twofa-page {
   padding: 12px 16px 32px;
-  max-width: 1100px;
+  /* Wider page so account names (issuer · email) have room */
+  max-width: 1400px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -1067,8 +1074,15 @@ onUnmounted(() => {
 }
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* Wider cards so long account names are readable */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
   gap: 12px;
+}
+.meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Prefer giving the name more horizontal room than action buttons */
+  max-width: 100%;
 }
 .svc-filter {
   display: flex;
@@ -1107,7 +1121,7 @@ onUnmounted(() => {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .svc-chip-label {
-  max-width: 120px;
+  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1170,23 +1184,38 @@ onUnmounted(() => {
 .drag-handle:active {
   cursor: grabbing;
 }
-.meta {
-  flex: 1;
-  min-width: 0;
-}
 .name {
   font-weight: 700;
   font-size: 14px;
+  /* Allow long issuer · account labels to wrap instead of clipping early */
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 .sub {
   font-size: 11px;
   margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 .entry-acts {
   display: flex;
+  flex-shrink: 0;
   gap: 2px;
 }
 .code-row {
