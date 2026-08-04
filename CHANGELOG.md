@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-08-04
+
+### Fixed
+
+- Parse mail.com UI dates (`Tuesday, August 04, 2026 at 10:56 AM`) for sort and since/before
+- CF temp-mail (ian10-mail-admin): map `created_at` → date, `recipient` → to
+- Mail list newest-first; load-more older mail appends below
+
+### Changed
+
+- Server-side body slim on fetch; local vault quota drops oldest mail by date first
+
+
 ## [0.3.3] — 2026-08-03
 
 ### Fixed
@@ -174,7 +187,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - User registration, admin console, server mail search UI
 - Code-API **create** (legacy token URLs may still resolve if present in DB)
 
-[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/IanShaw027/openmail/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/IanShaw027/openmail/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/IanShaw027/openmail/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/IanShaw027/openmail/compare/v0.3.0...v0.3.1
