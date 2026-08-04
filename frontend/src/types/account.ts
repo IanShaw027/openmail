@@ -140,14 +140,29 @@ export function accountCanFetch(acc: Pick<
 /** Whether this account can send mail (local secrets required). */
 export function accountCanSend(acc: Pick<
   MailAccount,
-  'type' | 'password' | 'authCode' | 'refreshToken' | 'clientId' | 'isApiSource'
+  | 'type'
+  | 'password'
+  | 'authCode'
+  | 'refreshToken'
+  | 'clientId'
+  | 'isApiSource'
+  | 'sessionCookies'
 >): boolean {
-  // Temp-mail API sources / pure cookie without password: no outbound send
+  // Temp-mail / HttpApi: receive-only
   if (acc.isApiSource) return false
   if (acc.type === 'http_api') return false
+  // OAuth: Graph sendMail with same client_id + refresh_token as fetch
   if (acc.type === 'oauth') return Boolean(acc.refreshToken && acc.clientId)
+  // IMAP: SMTP with password / app password
   if (acc.type === 'imap') return Boolean(acc.password || acc.authCode)
-  if (acc.type === 'cookie') return Boolean(acc.password)
+  // mail.com cookie: same session as fetch (cookies and/or password for re-login)
+  if (acc.type === 'cookie' || acc.type === 'unknown') {
+    return Boolean(
+      acc.password ||
+        acc.authCode ||
+        (acc.sessionCookies && acc.sessionCookies.length),
+    )
+  }
   return Boolean(acc.password || acc.authCode || (acc.refreshToken && acc.clientId))
 }
 

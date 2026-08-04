@@ -582,9 +582,10 @@ export default {
     capFetchOn: '可收件（凭证齐全）',
     capFetchOff: '不可收件（缺凭证或类型不支持）',
     capSendOn: '可发件',
-    capSendOff: '不可发件（HttpApi/临时邮或缺少发信凭证）',
+    capSendOff: '不可发件（临时邮/HttpApi 仅收件，或缺少发信凭证）',
     cannotFetchHint: '当前账号无法取件：请补全密码/授权码/OAuth/API 地址',
-    cannotSendHint: '当前账号无法发件：HttpApi/临时邮不支持，或缺少发信凭证',
+    cannotSendHint:
+      '无法发件：HttpApi/临时邮仅收件；OAuth 需 refresh_token；IMAP 需密码/授权码；mail.com 需 Cookie 会话或密码',
     emptyAccountsTitle: '尚未导入账号',
     emptyAccountsDesc: '在左侧粘贴账号行，一键导入到本浏览器缓存，即可开始取件。',
     emptyGuestTitle: '本地优先操作台',

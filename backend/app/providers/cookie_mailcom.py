@@ -12,11 +12,13 @@ Live network tests are opt-in (pytest mark network).
 
 from __future__ import annotations
 
+import json
 import re
 import time
+import uuid
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from app.providers.base import CredentialUpdates, FetchResult, HealthResult, Message
 from app.services.parser import attach_verification_code, extract_verification_code
@@ -389,6 +391,762 @@ def extract_wicket_redirect(xml_text: str) -> str:
     if not match:
         raise RuntimeError("mail.com lightmailer 未返回启动跳转。")
     return match.group(1).strip()
+
+
+# Paths to try for compose UI (relative to lightmailer origin)
+_COMPOSE_PATHS = (
+    "/compose",
+    "/mailcompose",
+    "/messagecompose",
+    "/write",
+    "/folderlist?compose=true",
+)
+
+
+def _lightmailer_origin(meta: dict[str, Any] | None = None, site: str = DEFAULT_SITE) -> str:
+    meta = meta or {}
+    for key in ("folder_url", "light_url", "mailbox_url", "start_url"):
+        u = meta.get(key)
+        if not u:
+            continue
+        try:
+            p = urlparse(str(u))
+            if p.scheme and p.netloc:
+                return f"{p.scheme}://{p.netloc}"
+        except Exception:
+            continue
+    bare = (site or DEFAULT_SITE).lstrip(".").removeprefix("www.")
+    return f"https://lightmailer.{bare}"
+
+
+def _pick_compose_form(forms: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Choose the HTML form that looks like a compose/send form."""
+    best: dict[str, Any] | None = None
+    best_score = -1
+    for form in forms:
+        inputs = form.get("inputs") or {}
+        names = " ".join(str(n).lower() for n in inputs)
+        action = str(form.get("action") or "").lower()
+        fid = str(form.get("id") or form.get("name") or "").lower()
+        score = 0
+        if any(x in names for x in ("to", "recipient", "rcpt", "mail_to", "mailto")):
+            score += 3
+        if any(x in names for x in ("subject", "subj", "betreff")):
+            score += 2
+        if any(x in names for x in ("body", "content", "text", "message", "editor", "html")):
+            score += 2
+        if any(x in action for x in ("compose", "send", "write", "message")):
+            score += 2
+        if any(x in fid for x in ("compose", "send", "write", "mail")):
+            score += 2
+        # Prefer POST
+        if str(form.get("method") or "get").lower() == "post":
+            score += 1
+        if score > best_score:
+            best_score = score
+            best = form
+    return best if best_score >= 3 else None
+
+
+def _fill_compose_payload(
+    form: dict[str, Any],
+    *,
+    to: list[str],
+    subject: str,
+    body_text: str,
+    body_html: str | None,
+) -> dict[str, str]:
+    """Map openmail fields onto whatever names the compose form uses."""
+    payload: dict[str, str] = {}
+    to_joined = ", ".join(to)
+    body_value = (body_html or body_text or "").strip()
+    plain = (body_text or "").strip()
+    if not plain and body_html:
+        plain = re.sub(r"<[^>]+>", " ", body_html)
+        plain = re.sub(r"\s+", " ", plain).strip()
+
+    to_set = subject_set = body_set = False
+    for name, info in (form.get("inputs") or {}).items():
+        itype = (info.get("type") or "text").lower()
+        val = info.get("value") or ""
+        lname = str(name).lower()
+        if itype in ("submit", "button", "image", "file"):
+            # Keep named submit buttons that look like Send
+            if itype == "submit" and any(
+                x in lname or x in val.lower()
+                for x in ("send", "submit", "senden", "absenden")
+            ):
+                payload[name] = val or "Send"
+            elif val and itype != "file":
+                # hidden submit tokens
+                if itype == "hidden":
+                    payload[name] = val
+            continue
+        if itype == "hidden":
+            payload[name] = val
+            continue
+        if any(
+            x in lname
+            for x in ("to", "recipient", "rcpt", "mail_to", "mailto", "an:")
+        ) and "token" not in lname:
+            payload[name] = to_joined
+            to_set = True
+        elif any(x in lname for x in ("cc", "bcc")):
+            # leave empty unless prefilled
+            payload[name] = val
+        elif any(x in lname for x in ("subject", "subj", "betreff")):
+            payload[name] = subject or ""
+            subject_set = True
+        elif any(
+            x in lname
+            for x in ("body", "content", "text", "message", "editor", "html", "mailtext")
+        ):
+            # Prefer HTML field when name hints html
+            if "html" in lname and body_html:
+                payload[name] = body_html
+            else:
+                payload[name] = body_value or plain
+            body_set = True
+        else:
+            payload[name] = val
+
+    # Fallbacks if form used non-standard names
+    if not to_set:
+        payload.setdefault("to", to_joined)
+        payload.setdefault("recipients", to_joined)
+    if not subject_set:
+        payload.setdefault("subject", subject or "")
+    if not body_set:
+        payload.setdefault("body", body_value or plain)
+        payload.setdefault("text", plain)
+        if body_html:
+            payload.setdefault("html", body_html)
+    return payload
+
+
+def _compose_looks_sent(html: str, status: int, final_url: str) -> bool:
+    if status >= 400:
+        return False
+    h = (html or "").lower()
+    u = (final_url or "").lower()
+    if any(
+        x in h
+        for x in (
+            "messagesent",
+            "message sent",
+            "mail sent",
+            "has been sent",
+            "successfully sent",
+            "发送成功",
+            "已发送",
+            "nachricht gesendet",
+            "email sent",
+        )
+    ):
+        return True
+    if any(x in u for x in ("sent", "success", "folderlist", "messagelist")):
+        # landed back on mailbox after compose — weak success
+        if status in (200, 302, 303) and "compose" not in u:
+            if "error" not in h and "invalid" not in h:
+                return True
+    return False
+
+
+# Modern mail.com webmailer (2026) — captured from browser compose/send:
+# POST https://webmail-cats-live.mail.com/mailbox/primary/mailsubmission
+# Authorization: Bearer qX{JWT}  (oauth2.mail.com / oauthbridge, scope mail_mailbox_w)
+# Content-Type: application/vnd.ui.trinity.minimalmailmessage+json
+#
+# Token (captured):
+#   POST oauthbridge…/navigator/oauth2/token?sid={sid}
+#   Authorization: Basic base64(mailcom_mailcompose_passport_live:*******)
+#   Content-Type: application/x-www-form-urlencoded
+#   body: grant_type=urn:mam:oauth:grant-type:spa&scope={scope}
+#   → {"access_token":"qX…","token_type":"Bearer","expires_in":3600,"scope":…}
+CATS_BASE = "https://webmail-cats-live.mail.com"
+WEBMAILER_ORIGIN = "https://webmailer.mail.com"
+COMPOSE_X_UI_APP = "mailcom.webmailer.mail-compose/1.43.5"
+COMPOSE_CLIENT_ID = "mailcom_mailcompose_passport_live"
+# Public HTML / Basic auth use literal asterisks as the "secret"; real auth is cookies+sid.
+COMPOSE_CLIENT_SECRET = "*******"
+COMPOSE_GRANT_TYPE = "urn:mam:oauth:grant-type:spa"
+COMPOSE_SCOPE_W = "mail_mailbox_w"
+COMPOSE_SCOPE_R = "mail_mailbox_r"
+OAUTH_BRIDGE_TOKEN = (
+    "https://oauthbridge.navigator-lxa.mail.com/navigator/oauth2/token"
+)
+# Real browser sid is a long hex on ?sid=… (≈ 80–120 chars). The `navigator=`
+# cookie is a shorter session hash — never treat it as sid.
+_SID_QUERY_RE = re.compile(r"[?&]sid=([0-9a-fA-F]{40,160})")
+_AUTH_ID_RE = re.compile(r"\b(a-[A-Za-z0-9_-]{10,})\b")
+
+
+def _navigator_cluster(meta: dict[str, Any] | None = None) -> str:
+    """Return navigator host like navigator-lxa.mail.com from session meta/cookies."""
+    meta = meta or {}
+    for key in ("folder_url", "light_url", "start_url", "navigator_url"):
+        u = meta.get(key)
+        if not u:
+            continue
+        host = (urlparse(str(u)).hostname or "").lower()
+        if host.startswith("navigator-") and host.endswith(".mail.com"):
+            return host
+        if "lightmailer" in host:
+            # lightmailer.mail.com ↔ navigator-lxa.mail.com (US default)
+            return "navigator-lxa.mail.com"
+    return "navigator-lxa.mail.com"
+
+
+def _sid_from_text(text: str | None) -> str | None:
+    """Pull navigator ?sid=… (long hex) from URL or HTML — not the navigator cookie."""
+    if not text:
+        return None
+    m = _SID_QUERY_RE.search(text)
+    if m:
+        return m.group(1)
+    m2 = re.search(r'["\']sid["\']\s*[:=]\s*["\']([0-9a-fA-F]{40,160})["\']', text)
+    if m2:
+        return m2.group(1)
+    return None
+
+
+def _extract_sid_from_client(client: Any, meta: dict[str, Any] | None = None) -> str | None:
+    """sid appears on navigator URLs (?sid=…) and session_meta after login/restore.
+
+    Do **not** use the ``navigator`` cookie value — capture shows that is a different
+    short hash, while send/refresh use the long hex sid query param.
+    """
+    meta = meta or {}
+    for key in ("sid", "session_id", "navigator_sid"):
+        val = meta.get(key)
+        if val and len(str(val)) >= 40:
+            return str(val)
+    for key in ("folder_url", "light_url", "start_url", "navigator_url"):
+        sid = _sid_from_text(str(meta.get(key) or ""))
+        if sid:
+            return sid
+    # Cookie jar: some stacks store sid in a dedicated cookie (not "navigator")
+    jar = getattr(client, "cookies", None)
+    if jar is not None:
+        for name in ("sid", "SID", "ngsid", "session_sid"):
+            try:
+                val = jar.get(name)  # type: ignore[call-arg]
+                if val and len(str(val)) >= 40:
+                    return str(val)
+            except Exception:
+                pass
+            try:
+                for cookie in getattr(jar, "jar", []):
+                    if str(getattr(cookie, "name", "")).lower() == name.lower():
+                        val = str(getattr(cookie, "value", "") or "")
+                        if len(val) >= 40:
+                            return val
+            except Exception:
+                pass
+    return None
+
+
+def _harvest_session_markers(meta: dict[str, Any], text: str | None, url: str | None = None) -> None:
+    """Update meta with sid / auth_id found in a response URL or body."""
+    for candidate in (url, text):
+        sid = _sid_from_text(candidate)
+        if sid:
+            meta["sid"] = sid
+            if url and "navigator-" in (url or ""):
+                meta["navigator_url"] = url
+            break
+    if text:
+        m = _AUTH_ID_RE.search(text)
+        if m:
+            meta["auth_id"] = m.group(1)
+        # webmailer bootstrap embeds authConfig + no_cache-like ids
+        for m2 in re.finditer(
+            r'auth_id["\']?\s*[:=]\s*["\']?(a-[A-Za-z0-9_-]{10,})', text
+        ):
+            meta["auth_id"] = m2.group(1)
+            break
+
+
+def _ensure_navigator_session(
+    client: Any, *, meta: dict[str, Any], site: str = DEFAULT_SITE
+) -> dict[str, Any]:
+    """Hit navigator + webmailer so sid / passport cookies exist for oauthbridge.
+
+    Captured flow keeps session warm with:
+      POST /refresh?sid=…  body {"checkNewMails":false}
+    """
+    host = _navigator_cluster(meta)
+    sid = _extract_sid_from_client(client, meta)
+    referer = meta.get("folder_url") or meta.get("navigator_url") or MAIL_HOME_URL
+    headers_html = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": str(referer),
+        "User-Agent": USER_AGENT,
+    }
+
+    # 1) Warm webmailer shell (sets passport-related cookies / authConfig)
+    for url in (WEBMAILER_ORIGIN + "/", f"https://{host}/mail" + (f"?sid={sid}" if sid else "")):
+        try:
+            resp = client.get(url, headers=headers_html)
+            final = str(getattr(resp, "url", url))
+            _harvest_session_markers(meta, _resp_text(resp), final)
+            sid = meta.get("sid") or sid
+        except Exception:
+            continue
+
+    # 2) Navigator refresh (browser heartbeat while composing)
+    sid = _extract_sid_from_client(client, meta) or sid
+    if sid:
+        refresh_url = f"https://{host}/refresh?sid={sid}"
+        try:
+            resp = client.post(
+                refresh_url,
+                content=json.dumps({"checkNewMails": False}),
+                headers={
+                    "Accept": "*/*",
+                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Origin": f"https://{host}",
+                    "Referer": f"https://{host}/mail?sid={sid}",
+                    "User-Agent": USER_AGENT,
+                },
+            )
+            _harvest_session_markers(meta, _resp_text(resp), str(getattr(resp, "url", refresh_url)))
+        except Exception:
+            pass
+        # also GET mail UI with sid
+        try:
+            mail_url = f"https://{host}/mail?sid={sid}"
+            resp = client.get(mail_url, headers=headers_html)
+            _harvest_session_markers(meta, _resp_text(resp), str(getattr(resp, "url", mail_url)))
+            meta["navigator_url"] = f"https://{host}/mail?sid={sid}"
+            meta["sid"] = sid
+        except Exception:
+            pass
+    else:
+        # No sid yet — probe navigator entry and follow redirects
+        for url in (f"https://{host}/mail", f"https://{host}/"):
+            try:
+                resp = client.get(url, headers=headers_html)
+                final = str(getattr(resp, "url", url))
+                _harvest_session_markers(meta, _resp_text(resp), final)
+                if meta.get("sid"):
+                    break
+            except Exception:
+                continue
+    return meta
+
+
+def _coerce_token_string(value: Any) -> str | None:
+    """Accept only string JWT-like tokens (never nested dicts)."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _parse_token_response(
+    text: str, meta: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """Extract (access_token, auth_id) from oauthbridge JSON or bare JWT."""
+    data: Any = None
+    try:
+        data = json.loads(text) if text else None
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        # Nested shapes: {token:{access_token}}, {data:{…}}
+        candidates: list[dict[str, Any]] = [data]
+        for nest in ("token", "data", "result", "payload"):
+            inner = data.get(nest)
+            if isinstance(inner, dict):
+                candidates.append(inner)
+        for d in candidates:
+            token = None
+            nested_auth: Any = None
+            for key in (
+                "access_token",
+                "accessToken",
+                "id_token",
+                "idToken",
+                "token",
+            ):
+                raw = d.get(key)
+                token = _coerce_token_string(raw)
+                if token:
+                    break
+                if isinstance(raw, dict):
+                    token = _coerce_token_string(
+                        raw.get("access_token")
+                        or raw.get("accessToken")
+                        or raw.get("token")
+                    )
+                    if token:
+                        nested_auth = (
+                            raw.get("auth_id")
+                            or raw.get("authId")
+                            or raw.get("no_cache")
+                        )
+                        break
+            auth_id = (
+                nested_auth
+                or d.get("auth_id")
+                or d.get("authId")
+                or d.get("no_cache")
+                or meta.get("auth_id")
+            )
+            if token:
+                if not auth_id:
+                    auth_id = _auth_id_from_jwt(token)
+                return token, str(auth_id) if auth_id else None
+    # bare JWT (optionally qX-prefixed)
+    if text:
+        tok = text.strip().strip('"')
+        if tok.startswith("qX") and tok.count(".") >= 2:
+            return tok, _auth_id_from_jwt(tok) or meta.get("auth_id")
+        if tok.count(".") >= 2 and len(tok) > 40:
+            return tok, _auth_id_from_jwt(tok) or meta.get("auth_id")
+    return None, None
+
+
+def _compose_basic_auth() -> str:
+    """Basic base64(client_id:*******) — secret is literal asterisks in the browser."""
+    import base64
+
+    raw = f"{COMPOSE_CLIENT_ID}:{COMPOSE_CLIENT_SECRET}".encode()
+    return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
+def _obtain_compose_token(
+    client: Any, *, meta: dict[str, Any], scope: str | None = None
+) -> tuple[str | None, str | None, str | None]:
+    """Request passport JWT for compose via oauthbridge SPA grant.
+
+    Captured (2026-08):
+      POST …/navigator/oauth2/token?sid={sid}
+      Authorization: Basic base64(mailcom_mailcompose_passport_live:*******)
+      Content-Type: application/x-www-form-urlencoded
+      body: grant_type=urn:mam:oauth:grant-type:spa&scope={scope}
+      → {"access_token":"qX…","token_type":"Bearer","expires_in":3600,"scope":…}
+
+    Returns (access_token, auth_id, error). For send, scope defaults to mail_mailbox_w.
+    """
+    host = _navigator_cluster(meta)
+    base_url = f"https://oauthbridge.{host}/navigator/oauth2/token"
+    if host == "navigator-lxa.mail.com":
+        base_url = OAUTH_BRIDGE_TOKEN
+
+    sid = _extract_sid_from_client(client, meta)
+    if not sid:
+        return None, None, "缺少 navigator sid，请先取件刷新 mail.com 会话"
+
+    scopes = [scope] if scope else [COMPOSE_SCOPE_W, COMPOSE_SCOPE_R]
+    # de-dupe while preserving order
+    seen: set[str] = set()
+    scope_list: list[str] = []
+    for s in scopes:
+        if s and s not in seen:
+            seen.add(s)
+            scope_list.append(s)
+
+    token_url = f"{base_url}?sid={sid}"
+    headers = {
+        "Accept": "*/*",
+        "Authorization": _compose_basic_auth(),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": WEBMAILER_ORIGIN,
+        "Referer": WEBMAILER_ORIGIN + "/",
+        "User-Agent": USER_AGENT,
+        "x-ui-app": COMPOSE_X_UI_APP,
+    }
+    last_err = "无法获取 mail.com 发信令牌 (oauthbridge)"
+    for sc in scope_list:
+        form = {
+            "grant_type": COMPOSE_GRANT_TYPE,
+            "scope": sc,
+        }
+        try:
+            resp = client.post(token_url, data=form, headers=headers)
+        except Exception as exc:
+            last_err = f"oauthbridge 请求失败: {exc}"
+            continue
+        text = _resp_text(resp)
+        status = _resp_status(resp)
+        if status >= 400:
+            snippet = (text or "").replace("\n", " ")[:120]
+            last_err = f"oauthbridge HTTP {status}" + (
+                f": {snippet}" if snippet else ""
+            )
+            continue
+        token, auth_id = _parse_token_response(text or "", meta)
+        if token:
+            if auth_id:
+                meta["auth_id"] = str(auth_id)
+            # Prefer the requested scope when present in JWT
+            return token, auth_id or _auth_id_from_jwt(token), None
+        if text:
+            last_err = f"oauthbridge 响应无令牌: {(text or '')[:120]}"
+    return None, None, last_err
+
+
+def _auth_id_from_jwt(token: str) -> str | None:
+    """Decode JWT payload (no verify) for auth_id claim."""
+    try:
+        import base64
+
+        raw = token[2:] if token.startswith("qX") else token
+        parts = raw.split(".")
+        if len(parts) < 2:
+            return None
+        pad = "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+        aid = payload.get("auth_id") or payload.get("authId")
+        return str(aid) if aid else None
+    except Exception:
+        return None
+
+
+def _jwt_scope(token: str) -> str | None:
+    try:
+        import base64
+
+        raw = token[2:] if token.startswith("qX") else token
+        parts = raw.split(".")
+        if len(parts) < 2:
+            return None
+        pad = "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+        return str(payload.get("scope") or "") or None
+    except Exception:
+        return None
+
+
+def _normalize_bearer(token: str) -> str:
+    """Browser sends Authorization: Bearer qX{jwt}."""
+    t = (token or "").strip()
+    if t.lower().startswith("bearer "):
+        t = t[7:].strip()
+    if not t.startswith("qX") and t.count(".") >= 2:
+        t = "qX" + t
+    return t
+
+
+def _build_submission_body(
+    *,
+    from_addr: str,
+    to: list[str],
+    subject: str,
+    body_text: str,
+    body_html: str | None,
+    reply_to_id: str | None = None,
+) -> dict[str, Any]:
+    """Body shape from browser capture (minimalmailmessage).
+
+    Live compose sends htmlBody with plaintextBody=null (not a dual plain/html pair).
+    """
+    html = (body_html or "").strip()
+    plain = (body_text or "").strip()
+    if not html and plain:
+        esc = (
+            plain.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<br>")
+        )
+        html = f"<html><body>{esc}</body></html>"
+        # After wrapping plain → html, match browser: plaintextBody null
+        plain_out: str | None = None
+    elif html:
+        # Prefer HTML-only like webmailer quick-reply / compose
+        plain_out = None
+    else:
+        plain_out = plain or None
+    header: dict[str, Any] = {
+        "messageType": "MAIL",
+        "from": from_addr,
+        "to": list(to),
+        "cc": [],
+        "bcc": [],
+        "subject": subject or "",
+    }
+    body: dict[str, Any] = {
+        "mailHeader": header,
+        "htmlBody": html or None,
+        "plaintextBody": plain_out,
+        "mailClientMeta": {"mail-drop": None},
+        "transientMailProperties": {},
+        "attachments": [],
+    }
+    if reply_to_id:
+        body["transientMailProperties"] = {"reply": str(reply_to_id)}
+    return body
+
+
+def _cats_mailsubmission_send(
+    client: Any,
+    *,
+    from_addr: str,
+    to: list[str],
+    subject: str,
+    body_text: str,
+    body_html: str | None,
+    meta: dict[str, Any] | None,
+    site: str = DEFAULT_SITE,
+) -> tuple[bool, str | None]:
+    """Send via webmail-cats mailsubmission API (real browser path).
+
+    Captured flow (2026-08 quick-reply Send):
+      1. Session cookies + navigator refresh?sid=
+      2. Passport JWT via oauthbridge (scope mail_mailbox_w, client mailcom_mailcompose_passport_live)
+      3. POST /mailbox/primary/mailsubmission?absoluteURI=false&no_cache={auth_id}
+         Authorization: Bearer qX{jwt}
+         Content-Type: application/vnd.ui.trinity.minimalmailmessage+json
+         x-ui-app: mailcom.webmailer.mail-compose/1.43.5
+    """
+    meta = dict(meta or {})
+    meta = _ensure_navigator_session(client, meta=meta, site=site)
+    # Send needs write scope; SPA grant returns a token whose JWT.scope matches the request
+    token, auth_id, err = _obtain_compose_token(
+        client, meta=meta, scope=COMPOSE_SCOPE_W
+    )
+    if not token:
+        # Fallback: legacy lightmailer HTML compose (often broken on modern UI)
+        return _legacy_html_compose_send(
+            client,
+            to=to,
+            subject=subject,
+            body_text=body_text,
+            body_html=body_html,
+            meta=meta,
+            site=site,
+            prefix_err=err,
+        )
+
+    # Prefer write-scope token; reject pure read tokens early with a clear error
+    scope = _jwt_scope(token) or ""
+    if scope and COMPOSE_SCOPE_W not in scope:
+        if scope == COMPOSE_SCOPE_R or scope == "mail_mailbox_r":
+            return False, (
+                "mail.com 发信令牌仅有读权限 (mail_mailbox_r)，"
+                "请重新取件刷新会话后再试"
+            )
+
+    auth_id = auth_id or meta.get("auth_id") or _auth_id_from_jwt(token)
+    if not auth_id:
+        return False, "mail.com 发信缺少 auth_id（no_cache），请重新取件后再试"
+    meta["auth_id"] = auth_id
+    bearer = _normalize_bearer(token)
+    url = (
+        f"{CATS_BASE}/mailbox/primary/mailsubmission"
+        f"?absoluteURI=false&no_cache={auth_id}"
+    )
+    payload = _build_submission_body(
+        from_addr=from_addr,
+        to=to,
+        subject=subject,
+        body_text=body_text,
+        body_html=body_html,
+    )
+    req_id = str(uuid.uuid4())
+    try:
+        resp = client.post(
+            url,
+            content=json.dumps(payload, ensure_ascii=False),
+            headers={
+                "Accept": "text/plain",
+                "Authorization": f"Bearer {bearer}",
+                "Content-Type": (
+                    "application/vnd.ui.trinity.minimalmailmessage+json; charset=utf-8"
+                ),
+                "Origin": WEBMAILER_ORIGIN,
+                "Referer": WEBMAILER_ORIGIN + "/",
+                "User-Agent": USER_AGENT,
+                "x-ui-app": COMPOSE_X_UI_APP,
+                "x-request-id": req_id,
+            },
+        )
+    except Exception as exc:
+        return False, f"mailsubmission 请求失败: {exc}"
+
+    status = _resp_status(resp)
+    text = _resp_text(resp)
+    if status in (200, 201, 202, 204):
+        return True, None
+    if status in (401, 403):
+        return False, f"mail.com 发信鉴权失败 ({status})，请重新取件刷新会话后再试"
+    # Sometimes returns empty 200-equivalent body with other codes
+    if status < 400 and not text:
+        return True, None
+    snippet = (text or "").replace("\n", " ")[:180]
+    return False, f"mail.com 发信失败 ({status}){(': ' + snippet) if snippet else ''}"
+
+
+def _legacy_html_compose_send(
+    client: Any,
+    *,
+    to: list[str],
+    subject: str,
+    body_text: str,
+    body_html: str | None,
+    meta: dict[str, Any] | None,
+    site: str = DEFAULT_SITE,
+    prefix_err: str | None = None,
+) -> tuple[bool, str | None]:
+    """Best-effort lightmailer HTML form send (fallback if passport token fails)."""
+    origin = _lightmailer_origin(meta, site)
+    compose_html = ""
+    compose_url = ""
+    for path in _COMPOSE_PATHS:
+        url = urljoin(origin + "/", path.lstrip("/"))
+        try:
+            resp = client.get(
+                url,
+                headers={
+                    "Referer": (meta or {}).get("folder_url") or origin + "/folderlist",
+                    "Accept": "text/html,application/xhtml+xml",
+                },
+            )
+        except Exception:
+            continue
+        html = _resp_text(resp)
+        if _resp_status(resp) >= 400 or _looks_like_session_loss(html):
+            continue
+        if _pick_compose_form(parse_forms(html)):
+            compose_html = html
+            compose_url = str(getattr(resp, "url", url))
+            break
+    form = _pick_compose_form(parse_forms(compose_html)) if compose_html else None
+    if not form:
+        base = prefix_err or "无法获取发信令牌"
+        return (
+            False,
+            f"{base}；且 lightmailer 写邮件页不可用。"
+            "请先成功取件刷新 Cookie 后重试。",
+        )
+    action = form.get("action") or compose_url
+    post_url = urljoin(compose_url or origin + "/", action)
+    payload = _fill_compose_payload(
+        form,
+        to=to,
+        subject=subject,
+        body_text=body_text,
+        body_html=body_html,
+    )
+    try:
+        post = client.post(
+            post_url,
+            data=payload,
+            headers={
+                "Referer": compose_url or origin,
+                "Origin": origin,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+    except Exception as exc:
+        return False, f"mail.com 发信提交失败: {exc}"
+    if _compose_looks_sent(
+        _resp_text(post), _resp_status(post), str(getattr(post, "url", post_url))
+    ):
+        return True, None
+    return False, "mail.com 发信未确认成功（passport API 与表单回退均失败）"
 
 
 # Avoid bare "wrong"/"denied" — marketing / cookie banners false-positive as bad password.
@@ -1583,7 +2341,88 @@ class MailcomCookieProvider:
             return False, "账号或密码错误", None
         return False, last_err, None
 
+    def send_mail(
+        self,
+        *,
+        to: list[str],
+        subject: str,
+        body_text: str = "",
+        body_html: str | None = None,
+        credentials: dict[str, Any] | None = None,
+        account: Any = None,
+    ) -> tuple[bool, str | None, dict[str, Any] | None]:
+        """Send via the same cookie/lightmailer session used for fetch.
 
+        Returns (ok, error_message, session_writeback) where session_writeback is
+        optional {cookies, session_meta} after a successful restore/login.
+        """
+        creds = dict(credentials or {})
+        email_addr = (
+            getattr(account, "email", None) or creds.get("email") or ""
+        ).strip()
+        password = creds.get("password") or getattr(account, "password", None) or ""
+        site = str(creds.get("site") or DEFAULT_SITE)
+        cookies = cookies_to_jar_list(
+            creds.get("cookies") or creds.get("session_cookies") or creds.get("session")
+        )
+        meta = dict(creds.get("session_meta") or {})
+        proxy = creds.get("proxy") or getattr(account, "proxy", None)
+        recipients = [a.strip() for a in (to or []) if a and str(a).strip()]
+        if not email_addr:
+            return False, "缺少发件邮箱", None
+        if not recipients:
+            return False, "收件人不能为空", None
+
+        client = None
+        try:
+            client = _http_client(
+                self.timeout, proxy=proxy if isinstance(proxy, str) else None
+            )
+            session_ok = False
+            if cookies:
+                ok, meta_update = self.try_restore(
+                    client, cookies, site=site, meta=meta
+                )
+                if ok:
+                    session_ok = True
+                    if meta_update:
+                        meta.update(meta_update)
+            if not session_ok:
+                if not password:
+                    return False, "会话失效，请补充密码后重试", None
+                ok, err, meta_update = self.full_login(
+                    client, email_addr, str(password), site=site
+                )
+                if not ok:
+                    return False, err or "mail.com 登录失败", None
+                if meta_update:
+                    meta.update(meta_update)
+
+            ok_send, err_send = _cats_mailsubmission_send(
+                client,
+                from_addr=email_addr,
+                to=recipients,
+                subject=subject or "",
+                body_text=body_text or "",
+                body_html=body_html,
+                meta=meta,
+                site=site,
+            )
+            writeback = {
+                "cookies": dump_client_cookies(client),
+                "session_meta": meta or None,
+            }
+            if not ok_send:
+                return False, err_send or "mail.com 发信失败", writeback
+            return True, None, writeback
+        except Exception as exc:  # noqa: BLE001
+            return False, f"mail.com 发信异常: {exc}", None
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def fetch_message_list(
         self,

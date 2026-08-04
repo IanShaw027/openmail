@@ -11,7 +11,19 @@ import pytest
 
 from app.providers.base import resolve_provider
 from app.providers.cookie_mailcom import (
+    COMPOSE_CLIENT_ID,
+    COMPOSE_CLIENT_SECRET,
+    COMPOSE_GRANT_TYPE,
+    COMPOSE_SCOPE_W,
     MailcomCookieProvider,
+    _auth_id_from_jwt,
+    _build_submission_body,
+    _compose_basic_auth,
+    _extract_sid_from_client,
+    _normalize_bearer,
+    _obtain_compose_token,
+    _parse_token_response,
+    _sid_from_text,
     collect_messagelist_with_paging,
     extract_messagelist_next_url,
     extract_ott,
@@ -471,3 +483,200 @@ def test_live_mailcom_skipped_without_env() -> None:
     if os.environ.get("OPENMAIL_LIVE_MAILCOM") != "1":
         pytest.skip("live mail.com tests disabled")
     pytest.fail("configure live credentials to enable")
+
+
+# --- cats mailsubmission / passport helpers (browser capture 2026-08) ---------
+
+
+def test_sid_from_text_prefers_query_param() -> None:
+    sid = (
+        "3291c647bcf1d8239fdd88393df7f0af71bf3e43c17ac5c5f6fd417b61041c6beba05771"
+        "f7173a221624ef7103c3dfb3"
+    )
+    url = f"https://navigator-lxa.mail.com/mail?sid={sid}"
+    assert _sid_from_text(url) == sid
+    assert _sid_from_text("https://navigator-lxa.mail.com/mail") is None
+    # short navigator cookie hash must NOT match
+    assert _sid_from_text("navigator=9560521fcbc8d409ea90e15a164422de") is None
+
+
+def test_extract_sid_ignores_navigator_cookie() -> None:
+    sid = (
+        "3291c647bcf1d8239fdd88393df7f0af71bf3e43c17ac5c5f6fd417b61041c6beba05771"
+        "f7173a221624ef7103c3dfb3"
+    )
+    client = SimpleNamespace(cookies=SimpleNamespace(jar=[], get=lambda n: "shortnavhash"))
+    # only navigator cookie present → no sid
+    assert _extract_sid_from_client(client, {}) is None
+    # meta sid wins
+    assert _extract_sid_from_client(client, {"sid": sid}) == sid
+    # URL in meta
+    assert (
+        _extract_sid_from_client(
+            client, {"navigator_url": f"https://navigator-lxa.mail.com/mail?sid={sid}"}
+        )
+        == sid
+    )
+
+
+def test_normalize_bearer_qX_prefix() -> None:
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJhdXRoX2lkIjoiYS14In0.sig"
+    assert _normalize_bearer(jwt).startswith("qX")
+    assert _normalize_bearer("qX" + jwt) == "qX" + jwt
+    assert _normalize_bearer("Bearer " + jwt).startswith("qX")
+
+
+def test_auth_id_from_jwt() -> None:
+    import base64
+    import json
+
+    payload = {
+        "auth_id": "a-FzbiCxTaQ5CR0mb0_kH0kQ",
+        "scope": "mail_mailbox_w",
+        "client_id": "mailcom_mailcompose_passport_live",
+    }
+    mid = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    token = f"qXhdr.{mid}.sig"
+    assert _auth_id_from_jwt(token) == "a-FzbiCxTaQ5CR0mb0_kH0kQ"
+    assert _auth_id_from_jwt(f"hdr.{mid}.sig") == "a-FzbiCxTaQ5CR0mb0_kH0kQ"
+
+
+def test_build_submission_body_html_only_like_browser() -> None:
+    body = _build_submission_body(
+        from_addr="user@mail.com",
+        to=["rcpt@example.com"],
+        subject="Aw: hello",
+        body_text="ignored when html present",
+        body_html="<html><body>hi</body></html>",
+    )
+    assert body["mailHeader"]["messageType"] == "MAIL"
+    assert body["mailHeader"]["from"] == "user@mail.com"
+    assert body["mailHeader"]["to"] == ["rcpt@example.com"]
+    assert body["mailHeader"]["cc"] == []
+    assert body["mailHeader"]["bcc"] == []
+    assert body["htmlBody"] == "<html><body>hi</body></html>"
+    # browser capture: plaintextBody is null when composing HTML
+    assert body["plaintextBody"] is None
+    assert body["mailClientMeta"] == {"mail-drop": None}
+    assert body["attachments"] == []
+    assert body["transientMailProperties"] == {}
+
+
+def test_build_submission_body_plain_wrapped_to_html() -> None:
+    body = _build_submission_body(
+        from_addr="user@mail.com",
+        to=["a@b.com"],
+        subject="s",
+        body_text="line1\nline2",
+        body_html=None,
+    )
+    assert body["htmlBody"] is not None
+    assert "<br>" in body["htmlBody"]
+    assert body["plaintextBody"] is None
+
+
+def test_build_submission_body_reply() -> None:
+    body = _build_submission_body(
+        from_addr="user@mail.com",
+        to=["a@b.com"],
+        subject="Re:",
+        body_text="ok",
+        body_html=None,
+        reply_to_id="1785837024699918732",
+    )
+    assert body["transientMailProperties"] == {"reply": "1785837024699918732"}
+
+
+def test_parse_token_response_shapes() -> None:
+    import base64
+    import json
+
+    payload = {"auth_id": "a-ABC", "scope": "mail_mailbox_w"}
+    mid = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    jwt = f"hdr.{mid}.sig"
+    tok, aid = _parse_token_response(json.dumps({"access_token": jwt}), {})
+    assert tok == jwt
+    assert aid == "a-ABC"
+    tok2, aid2 = _parse_token_response(
+        json.dumps({"token": {"access_token": jwt, "auth_id": "a-XYZ"}}), {}
+    )
+    assert tok2 == jwt
+    assert aid2 == "a-XYZ"
+
+
+def test_compose_basic_auth_matches_capture() -> None:
+    """Browser: Authorization: Basic bWFpbGNvbV9tYWlsY29tcG9zZV9wYXNzcG9ydF9saXZlOioqKioqKio="""
+    import base64
+
+    header = _compose_basic_auth()
+    assert header.startswith("Basic ")
+    decoded = base64.b64decode(header.split(" ", 1)[1]).decode()
+    assert decoded == f"{COMPOSE_CLIENT_ID}:{COMPOSE_CLIENT_SECRET}"
+    assert decoded.endswith(":*******")
+
+
+def test_obtain_compose_token_spa_grant() -> None:
+    """POST ?sid=… with Basic + form grant_type=urn:mam:oauth:grant-type:spa."""
+    import base64
+    import json
+
+    sid = (
+        "6a6d249d8fb6acc80117dc55840255fc0904b1d78e48f8aacc5a08e3bd4e383213721567"
+        "63280eb383f78324097cc7a8"
+    )
+    payload = {
+        "auth_id": "a-IX2uygxAS7yYV_aXSRuTAw",
+        "scope": COMPOSE_SCOPE_W,
+        "client_id": COMPOSE_CLIENT_ID,
+    }
+    mid = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    jwt = f"qXhdr.{mid}.sig"
+    resp_body = json.dumps(
+        {
+            "access_token": jwt,
+            "scope": COMPOSE_SCOPE_W,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        status_code = 200
+        text = resp_body
+
+    class _Client:
+        def post(self, url: str, **kwargs: Any) -> _Resp:
+            captured["url"] = url
+            captured["headers"] = kwargs.get("headers") or {}
+            captured["data"] = kwargs.get("data")
+            return _Resp()
+
+    token, auth_id, err = _obtain_compose_token(
+        _Client(), meta={"sid": sid}, scope=COMPOSE_SCOPE_W
+    )
+    assert err is None
+    assert token == jwt
+    assert auth_id == "a-IX2uygxAS7yYV_aXSRuTAw"
+    assert f"sid={sid}" in captured["url"]
+    assert "oauth2/token" in captured["url"]
+    assert captured["headers"]["Authorization"].startswith("Basic ")
+    assert captured["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+    assert captured["headers"]["Origin"] == "https://webmailer.mail.com"
+    assert captured["data"]["grant_type"] == COMPOSE_GRANT_TYPE
+    assert captured["data"]["scope"] == COMPOSE_SCOPE_W
+    assert COMPOSE_GRANT_TYPE == "urn:mam:oauth:grant-type:spa"
+
+
+def test_obtain_compose_token_requires_sid() -> None:
+    class _Client:
+        cookies = None
+
+        def post(self, *a: Any, **k: Any) -> Any:
+            raise AssertionError("must not call oauthbridge without sid")
+
+    token, auth_id, err = _obtain_compose_token(_Client(), meta={})
+    assert token is None
+    assert auth_id is None
+    assert err is not None
+    assert "sid" in err.lower()

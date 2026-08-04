@@ -41,6 +41,21 @@ DOMAIN_SMTP_HOSTS: dict[str, SmtpHostHint] = {
     # Zoho
     "zoho.com": SmtpHostHint("smtp.zoho.com"),
     "zohomail.com": SmtpHostHint("smtp.zoho.com"),
+    # United Internet / mail.com family — free webmail usually has SMTP with
+    # the same password as login (when not blocked); cookie send is preferred
+    # in send_service for provider=cookie. Table kept for IMAP-class imports.
+    "mail.com": SmtpHostHint("smtp.mail.com", port=587),
+    "email.com": SmtpHostHint("smtp.mail.com", port=587),
+    "usa.com": SmtpHostHint("smtp.mail.com", port=587),
+    "myself.com": SmtpHostHint("smtp.mail.com", port=587),
+    "consultant.com": SmtpHostHint("smtp.mail.com", port=587),
+    "europe.com": SmtpHostHint("smtp.mail.com", port=587),
+    "iname.com": SmtpHostHint("smtp.mail.com", port=587),
+    "writeme.com": SmtpHostHint("smtp.mail.com", port=587),
+    "techie.com": SmtpHostHint("smtp.mail.com", port=587),
+    "dr.com": SmtpHostHint("smtp.mail.com", port=587),
+    "engineer.com": SmtpHostHint("smtp.mail.com", port=587),
+    "cheerful.com": SmtpHostHint("smtp.mail.com", port=587),
     # Proton Bridge is local-only (127.0.0.1:1025) and blocked by SSRF defaults —
     # users must pass explicit smtp_host if they open that path; no public cloud SMTP.
 }

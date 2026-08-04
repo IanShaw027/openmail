@@ -2526,15 +2526,29 @@ async function doSend() {
     flashMsg(t('console.sendTo'), 'danger')
     return
   }
-  if (!acc.password && !acc.refreshToken && !acc.authCode) {
+  // Cookie accounts may send with session cookies only (no password re-entry)
+  const hasSendSecret =
+    Boolean(acc.password || acc.authCode || (acc.refreshToken && acc.clientId)) ||
+    Boolean(acc.sessionCookies && acc.sessionCookies.length)
+  if (!hasSendSecret) {
     flashMsg(t('console.sendNeedLocal'), 'danger')
     return
   }
   sendBusy.value = true
   try {
+    // mail.com / cookie: keep provider=cookie so server uses lightmailer session
+    // (not SMTP). unknown+@mail.com also forces cookie.
+    let provider: string = acc.type
+    if (acc.type === 'unknown') {
+      const em = (acc.email || '').toLowerCase()
+      provider =
+        em.endsWith('@mail.com') || em.endsWith('.mail.com') || (acc.sessionCookies?.length ?? 0) > 0
+          ? 'cookie'
+          : 'imap'
+    }
     const result = await proxySendMail({
       email: acc.email,
-      provider: acc.type === 'unknown' ? 'imap' : acc.type,
+      provider,
       password: acc.password || acc.authCode,
       credential: credentialFromLocal(acc),
       proxy: acc.proxy || undefined,

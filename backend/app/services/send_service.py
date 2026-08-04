@@ -308,14 +308,33 @@ def send_mail(
     body_html: str | None = None,
     proxy: str | None = None,
 ) -> SendResult:
-    """Dispatch send by provider. Cookie/http_api not supported for send."""
+    """Dispatch send by provider.
+
+    - **oauth**: Microsoft Graph ``/me/sendMail`` (same tokens as fetch)
+    - **cookie / mail.com**: lightmailer **web session** (same cookies as fetch)
+    - **imap / unknown**: SMTP (+ best-effort IMAP APPEND to Sent)
+    - **http_api**: not supported
+    """
     creds = dict(credential or {})
+    if password and not creds.get("password"):
+        creds["password"] = password
+    if proxy and not creds.get("proxy"):
+        creds["proxy"] = proxy
+    if email and not creds.get("email"):
+        creds["email"] = email
     prov = (provider or "").lower()
 
     if prov == "oauth":
+        client_id = str(creds.get("client_id") or "")
+        refresh = str(creds.get("refresh_token") or "")
+        if not client_id or not refresh:
+            return SendResult(
+                ok=False,
+                error="OAuth 发信需要 client_id + refresh_token（与取件相同凭证）",
+            )
         result = send_via_graph(
-            client_id=str(creds.get("client_id") or ""),
-            refresh_token=str(creds.get("refresh_token") or ""),
+            client_id=client_id,
+            refresh_token=refresh,
             to=to,
             subject=subject,
             body_text=body_text,
@@ -326,7 +345,35 @@ def send_mail(
             result.saved_to_sent = True  # Graph saveToSentItems
         return result
 
-    if prov in ("imap", "unknown", "cookie"):
+    # Cookie / lightmailer: same path as fetch (session cookies, not SMTP)
+    if prov == "cookie" or (
+        prov in ("unknown", "")
+        and (
+            (email or "").lower().endswith("@mail.com")
+            or (email or "").lower().endswith(".mail.com")
+            or bool(creds.get("cookies") or creds.get("session_cookies"))
+        )
+    ):
+        from app.providers.cookie_mailcom import MailcomCookieProvider
+
+        provider_impl = MailcomCookieProvider()
+        ok, err, writeback = provider_impl.send_mail(
+            to=to,
+            subject=subject,
+            body_text=body_text,
+            body_html=body_html,
+            credentials=creds,
+            account=type("A", (), {"email": email, "password": password, "proxy": proxy})(),
+        )
+        if ok:
+            detail = "sent via mail.com cookie session"
+            # Surface rolling cookies so callers can persist (proxy path may ignore)
+            if writeback and writeback.get("cookies"):
+                detail = f"{detail}; session refreshed"
+            return SendResult(ok=True, detail=detail, saved_to_sent=False)
+        return SendResult(ok=False, error=err or "mail.com 发信失败")
+
+    if prov in ("imap", "unknown"):
         # SMTP only — never pass imap_host as SMTP (Gmail imap.gmail.com breaks send)
         raw_pw = password or str(creds.get("password") or creds.get("auth_code") or "")
         pw = normalize_imap_secret(raw_pw, email)
@@ -337,7 +384,6 @@ def send_mail(
         # Optional: derive from imap host via resolver normalizer, not raw imap host
         if not smtp_host and imap_host:
             smtp_host = str(imap_host)
-        # Cookie/mail.com rarely has IMAP — still try domain SMTP; APPEND may soft-fail
         return send_via_smtp(
             email_addr=email,
             password=pw,
@@ -349,10 +395,13 @@ def send_mail(
             smtp_port=int(smtp_port) if smtp_port is not None else None,
             imap_host=str(imap_host) if imap_host else None,
             imap_port=int(imap_port) if imap_port is not None else None,
-            save_to_sent=prov != "cookie",  # no public IMAP for typical mail.com free
+            save_to_sent=True,
         )
 
     if prov == "http_api":
-        return SendResult(ok=False, error="HttpApi 账号不支持发信")
+        return SendResult(
+            ok=False,
+            error="HttpApi / 临时邮箱不支持发信（仅收件）",
+        )
 
     return SendResult(ok=False, error=f"不支持的发信类型: {provider}")

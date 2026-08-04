@@ -585,9 +585,10 @@ export default {
     capFetchOn: 'Can fetch (credentials present)',
     capFetchOff: 'Cannot fetch (missing credentials)',
     capSendOn: 'Can send',
-    capSendOff: 'Cannot send (HttpApi/temp mail or missing send credentials)',
+    capSendOff: 'Cannot send (temp/HttpApi receive-only, or missing send credentials)',
     cannotFetchHint: 'Cannot fetch: add password / auth code / OAuth / API URL',
-    cannotSendHint: 'Cannot send: HttpApi/temp mail unsupported, or missing send credentials',
+    cannotSendHint:
+      'Cannot send: temp/HttpApi are receive-only; OAuth needs refresh_token; IMAP needs password; mail.com needs cookie session or password',
     emptyAccountsTitle: 'No accounts yet',
     emptyAccountsDesc: 'Paste account lines on the left and import into browser storage to get started.',
     emptyGuestTitle: 'Local-first console',
