@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-08-05
+
+### Added
+
+- **mail.com cookie send**: same web session as fetch — oauthbridge SPA grant (`urn:mam:oauth:grant-type:spa`, Basic `client_id:*******`, `sid` query) then `webmail-cats` `mailsubmission` with Bearer `qX{JWT}` and `no_cache=auth_id`
+- **Display settings**: default timezone `Asia/Shanghai` (configurable); theme light / dark / system
+
+### Changed
+
+- Cookie / `@mail.com` accounts send via session API, not SMTP; `accountCanSend` allows session cookies without password re-entry
+
 ## [0.3.4] — 2026-08-04
 
 ### Fixed
