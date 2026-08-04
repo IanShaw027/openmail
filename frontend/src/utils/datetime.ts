@@ -35,13 +35,22 @@ export function intlLocale(appLocale?: string): string {
 export function toEpochMs(input?: string | number | Date | null): number | null {
   if (input == null || input === '') return null
   if (typeof input === 'number') {
-    return Number.isFinite(input) ? input : null
+    if (!Number.isFinite(input)) return null
+    return input < 1e12 ? input * 1000 : input
   }
   if (input instanceof Date) {
     const t = input.getTime()
     return Number.isFinite(t) ? t : null
   }
-  const t = Date.parse(String(input))
+  // Share mail.com / RFC heuristics with mail cache sort
+  let s = String(input).trim()
+  if (!s) return null
+  s = s.replace(/\s+at\s+/gi, ' ').replace(/\s+/g, ' ')
+  let t = Date.parse(s)
+  if (Number.isFinite(t)) return t
+  t = Date.parse(
+    s.replace(/^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+/i, ''),
+  )
   return Number.isFinite(t) ? t : null
 }
 

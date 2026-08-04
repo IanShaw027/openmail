@@ -502,20 +502,23 @@ function loadMessagesFromCache(
   acc: MailAccount,
   opts: { preserveVisible?: boolean; resetRemoteFlag?: boolean } = {},
 ) {
+  // listFor is newest-first; re-assert so load-more older mail always sits at the bottom
   const cached = mailCache.listFor(acc.email, mailFolder.value)
   messages.value = cached
   if (!opts.preserveVisible || !selectedMessageId.value) {
+    // Default select newest
     selectedMessageId.value = cached[0]?.id ?? null
   } else if (!cached.some((m) => m.id === selectedMessageId.value)) {
     selectedMessageId.value = cached[0]?.id ?? null
   }
   if (opts.preserveVisible) {
-    // Grow or clamp; never collapse below previous window after load-more merge
+    // Grow window only: older pages from load-more appear after the existing slice
     mailVisibleCount.value = Math.min(
       Math.max(mailVisibleCount.value, Math.min(MAIL_FIRST_PAGE, cached.length)),
       cached.length || 0,
     )
   } else {
+    // First paint / clear-refetch: only the newest MAIL_FIRST_PAGE
     mailVisibleCount.value = Math.min(MAIL_FIRST_PAGE, cached.length)
   }
   if (opts.resetRemoteFlag !== false && !opts.preserveVisible) {

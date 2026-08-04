@@ -44,6 +44,44 @@ def test_normalize_generic_message() -> None:
     assert msg.verification_code == "998877"
 
 
+def test_normalize_ian10_mail_admin_list_row() -> None:
+    """CF worker list shape (ian10-mail-admin mailListRow)."""
+    msg = normalize_message_item(
+        {
+            "id": 310362,
+            "domain": "qazwc.com",
+            "created_at": "2026-08-04 09:12:17",
+            "recipient": "46htbot22s6o@kv8wl0tyjx.qazwc.com",
+            "from": "OpenAI <trustandsafety@tm.openai.com>",
+            "subject": "OpenAI - Access Deactivated",
+            "code": "ABC123",
+            "message_id": "mid-1",
+            "text": "Hello, your account…",
+        }
+    )
+    assert msg.id == "310362"
+    assert msg.to == "46htbot22s6o@kv8wl0tyjx.qazwc.com"
+    assert msg.date is not None
+    assert "2026-08-04" in msg.date
+    assert msg.from_address == "trustandsafety@tm.openai.com" or "openai" in (msg.from_ or "").lower()
+    assert msg.body_text.startswith("Hello")
+    assert msg.verification_code == "ABC123"
+
+
+def test_normalize_created_at_epoch_ms() -> None:
+    msg = normalize_message_item(
+        {
+            "id": "e1",
+            "subject": "hi",
+            "recipient": "a@b.com",
+            "created_at": 1_722_768_000_000,
+            "text": "x",
+        }
+    )
+    assert msg.to == "a@b.com"
+    assert msg.date is not None
+
+
 def test_extract_message_list_shapes() -> None:
     assert len(extract_message_list({"messages": [{"id": "1", "subject": "x"}]})) == 1
     assert len(extract_message_list({"data": [{"id": "2", "subject": "y"}]})) == 1

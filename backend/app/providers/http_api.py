@@ -190,21 +190,54 @@ def _format_address_list(raw: Any) -> str:
     return _as_str(raw)
 
 
+def _normalize_date_value(raw: Any) -> str | None:
+    """Coerce Worker/API date fields to a parseable string (ISO preferred)."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, (int, float)):
+        # epoch seconds vs ms
+        v = float(raw)
+        ms = v if abs(v) >= 100_000_000_000 else v * 1000.0
+        try:
+            from datetime import datetime, timezone
+
+            return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return str(raw)
+    s = _as_str(raw).strip()
+    if not s:
+        return None
+    # SQLite-style "2026-08-04 09:12:17" → ISO-ish for JS Date.parse
+    if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}", s) and "T" not in s:
+        s = s.replace(" ", "T", 1)
+        if not s.endswith("Z") and "+" not in s[10:]:
+            s = s + "Z"
+    return s
+
+
 def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index: int = 0) -> Message:
-    """Map a generic JSON message object to Message."""
+    """Map a generic JSON message object to Message.
+
+    Aligns with CF temp-mail workers (ian10-mail-admin / MoeMail-style):
+
+    - ``recipient`` / ``address`` → to
+    - ``created_at`` / ``createdAt`` → date
+    - ``text`` → body_text; ``code`` → verification_code
+    """
     raw_id = _pick(item, "id", "message_id", "uid", "messageId")
     if raw_id is None or not str(raw_id).strip():
         # Content-derived identity remains stable when upstream omits IDs.
         identity = {k: item.get(k) for k in (
             "subject", "from", "from_address", "sender", "to", "recipient",
-            "date", "received_at", "receivedAt", "body", "body_text", "body_html",
+            "date", "created_at", "createdAt", "received_at", "receivedAt",
+            "body", "body_text", "body_html", "text",
         ) if item.get(k) is not None}
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str, separators=(",", ":")).encode()).hexdigest()[:24]
         mid = f"http-{digest}"
     else:
         mid = _as_str(raw_id)
     subject = _as_str(_pick(item, "subject", "title", "Subject"), default="")
-    from_raw = _pick(item, "from", "from_", "sender", "from_address", "fromAddress")
+    from_raw = _pick(item, "from", "from_", "sender", "from_address", "fromAddress", "source")
     from_display = ""
     from_address = ""
     if isinstance(from_raw, dict):
@@ -222,6 +255,9 @@ def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index
         from_address = _as_str(_pick(item, "from_address", "fromAddress", "sender_email"), default="")
         from_display = from_address
 
+    # ian10-mail-admin list rows: recipient = temp mailbox address (收件人)
+    # Prefer explicit to/recipient over bare "address" so mailbox list objects
+    # are not mistaken when both exist.
     to_raw = _pick(
         item,
         "to",
@@ -229,10 +265,10 @@ def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index
         "toAddress",
         "recipient",
         "recipients",
-        "mailbox",
-        "address",
         "to_mail",
         "toMail",
+        "mailbox",
+        "address",  # CF raw_mails.address when exposed as-is
         default="",
     )
     to_str = _format_address_list(to_raw)
@@ -242,10 +278,11 @@ def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index
         default="",
     )
     body_html = _as_str(
-        _pick(item, "body_html", "bodyHtml", "html", "htmlBody", "rawHtml", "source"),
+        _pick(item, "body_html", "bodyHtml", "html", "htmlBody", "rawHtml", "source_html"),
         default="",
     )
     # Generic "body" / "content" — may be HTML or plain depending on Worker
+    # Note: do not use "source" alone as body — ian10 uses source as From fallback
     generic_body = _as_str(_pick(item, "body", "content", "message", "raw"), default="")
     if generic_body and not body_html and not body_text:
         if re.search(r"<(?:html|body|div|p|br|table)\b", generic_body, re.I) or generic_body.lstrip().startswith(
@@ -265,10 +302,25 @@ def normalize_message_item(item: dict[str, Any], *, folder: str = "inbox", index
         body_text = re.sub(r"\s+", " ", stripped).strip()
     if not preview and body_text:
         preview = body_text[:200]
-    date = _pick(item, "date", "received_at", "receivedAt", "time", "timestamp")
-    date_str = _as_str(date) if date is not None else None
+    # CF worker (ian10-mail-admin): created_at; also createdAt / received_at / time
+    date = _pick(
+        item,
+        "date",
+        "created_at",
+        "createdAt",
+        "received_at",
+        "receivedAt",
+        "time",
+        "timestamp",
+        "sent_at",
+        "sentAt",
+    )
+    date_str = _normalize_date_value(date)
     code = _pick(item, "verification_code", "code", "otp")
     code_str = _as_str(code) if code is not None else None
+    # Ignore bogus year-only codes from marketing (parser also filters; belt)
+    if code_str and re.fullmatch(r"(?:19|20)\d{2}", code_str):
+        code_str = None
 
     msg = Message(
         id=mid,

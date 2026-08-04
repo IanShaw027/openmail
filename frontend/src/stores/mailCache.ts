@@ -163,11 +163,44 @@ function load(): CacheMap {
   return {}
 }
 
-/** Best-effort parse of message.date; null if unparseable. */
-export function parseMessageDateMs(date?: string | null): number | null {
-  if (!date || typeof date !== 'string') return null
-  const t = Date.parse(date)
-  return Number.isFinite(t) ? t : null
+/**
+ * Best-effort parse of message.date → epoch ms.
+ * Accepts ISO, RFC2822, mail.com UI strings ("Tuesday, August 04, 2026 at 10:56 AM"),
+ * epoch ms/seconds numbers. null if unparseable (sort treats as oldest).
+ */
+export function parseMessageDateMs(date?: string | number | null): number | null {
+  if (date == null || date === '') return null
+  if (typeof date === 'number') {
+    if (!Number.isFinite(date)) return null
+    // Heuristic: seconds vs milliseconds
+    const ms = date < 1e12 ? date * 1000 : date
+    return Number.isFinite(ms) ? ms : null
+  }
+  if (typeof date !== 'string') return null
+  let s = date.trim()
+  if (!s) return null
+
+  // mail.com lightmailer: "Tuesday, August 04, 2026 at 10:56 AM"
+  // Date.parse rejects the bare "at"; strip it.
+  s = s.replace(/\s+at\s+/gi, ' ')
+  // Collapse whitespace
+  s = s.replace(/\s+/g, ' ').trim()
+
+  let t = Date.parse(s)
+  if (Number.isFinite(t)) return t
+  // Some providers strip the comma: "3 Aug 2026 14:30:00 +0000"
+  t = Date.parse(s.replace(/^(\w{3})\s+(\d)/, '$1, $2'))
+  if (Number.isFinite(t)) return t
+  // "August 04, 2026 10:56 AM" without weekday
+  const noWeekday = s.replace(
+    /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+/i,
+    '',
+  )
+  if (noWeekday !== s) {
+    t = Date.parse(noWeekday)
+    if (Number.isFinite(t)) return t
+  }
+  return null
 }
 
 /**
@@ -190,17 +223,25 @@ export function pruneByRetention(
 }
 
 /**
- * Sort helper: newer first. Undated messages sort as oldest so they drop first
- * when trimming by date under quota pressure.
+ * Sort helper: **newest first** (desc by date).
+ * Undated messages sort as oldest so they land at the bottom / drop under caps.
+ * Exported so UI can re-assert order after load-more merges.
  */
-function compareMailDateDesc(a: MailMessage, b: MailMessage): number {
+export function compareMailDateDesc(
+  a: Pick<MailMessage, 'id' | 'date'>,
+  b: Pick<MailMessage, 'id' | 'date'>,
+): number {
   const da = parseMessageDateMs(a.date)
   const db = parseMessageDateMs(b.date)
-  // null date → treat as very old
+  // null date → treat as very old (bottom of newest-first list)
   const va = da ?? Number.NEGATIVE_INFINITY
   const vb = db ?? Number.NEGATIVE_INFINITY
   if (vb !== va) return vb - va
-  return String(a.id).localeCompare(String(b.id))
+  // Stable: higher numeric id (IMAP UID) first when same timestamp
+  const na = Number(a.id)
+  const nb = Number(b.id)
+  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return nb - na
+  return String(b.id).localeCompare(String(a.id))
 }
 
 /**
@@ -597,12 +638,8 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       byFp.set(fp, preferRicherMessage(prev, m))
     }
 
-    return [...byFp.values(), ...noFp].sort((a, b) => {
-      const da = parseMessageDateMs(a.date) ?? 0
-      const db = parseMessageDateMs(b.date) ?? 0
-      if (db !== da) return db - da
-      return String(a.id).localeCompare(String(b.id))
-    })
+    // Always newest-first so list + load-more (older appends visually at bottom) stay consistent
+    return [...byFp.values(), ...noFp].sort(compareMailDateDesc)
   }
 
   function preferRicherMessage(a: MailMessage, b: MailMessage): MailMessage {
@@ -626,11 +663,24 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     } else {
       verification_code = other.verification_code
     }
+    // Prefer a parseable date so sort never falls back to id order after merge
+    const dateA = parseMessageDateMs(a.date)
+    const dateB = parseMessageDateMs(b.date)
+    let date = base.date
+    if (dateA != null && dateB != null) {
+      // Keep the one that matches the newer of the two timestamps' source string
+      date = dateA >= dateB ? a.date : b.date
+    } else if (dateA != null) {
+      date = a.date
+    } else if (dateB != null) {
+      date = b.date
+    }
     return {
       ...other,
       ...base,
       folder: normalizeFolder(base.folder || other.folder || 'inbox'),
       uidvalidity: base.uidvalidity ?? other.uidvalidity,
+      date: date ?? base.date ?? other.date,
       body_html,
       body_text,
       body_preview,
@@ -941,12 +991,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
         flat.push({ ...m, accountEmail: email })
       }
     }
-    return flat.sort((a, b) => {
-      const da = parseMessageDateMs(a.date) ?? 0
-      const db = parseMessageDateMs(b.date) ?? 0
-      if (db !== da) return db - da
-      return String(a.id).localeCompare(String(b.id))
-    })
+    return flat.sort(compareMailDateDesc)
   }
 
   function replaceAll(map: CacheMap, retentionDays?: number) {

@@ -7,6 +7,7 @@ in sibling modules and registered here.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -157,26 +158,50 @@ def filter_messages_by_time(
             return value if abs(value) >= 100_000_000_000 else value * 1000.0
         if not isinstance(date, str):
             return None
+        s = date.strip()
+        if not s:
+            return None
         try:
-            s = date.strip()
             numeric = float(s)
             return numeric if abs(numeric) >= 100_000_000_000 else numeric * 1000.0
         except ValueError:
             pass
-        try:
-            s = date.strip().replace("Z", "+00:00")
-            dt = datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.timestamp() * 1000.0
-        except Exception:
+        # mail.com UI: "Tuesday, August 04, 2026 at 10:56 AM"
+        s_norm = re.sub(r"\s+at\s+", " ", s, flags=re.I)
+        s_norm = re.sub(r"\s+", " ", s_norm).strip()
+        for candidate in (s_norm, s, re.sub(r"^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+", "", s_norm, flags=re.I)):
+            if not candidate:
+                continue
             try:
-                dt = parsedate_to_datetime(date.strip())
+                iso = candidate.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(iso)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 return dt.timestamp() * 1000.0
             except Exception:
-                return None
+                pass
+            try:
+                dt = parsedate_to_datetime(candidate)
+                if dt is None:
+                    continue
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp() * 1000.0
+            except Exception:
+                pass
+            # strptime for "Month DD, YYYY H:MM AM/PM" (mail.com after stripping "at")
+            for fmt in (
+                "%A, %B %d, %Y %I:%M %p",
+                "%B %d, %Y %I:%M %p",
+                "%A, %B %d, %Y %H:%M",
+                "%B %d, %Y %H:%M",
+            ):
+                try:
+                    dt = datetime.strptime(candidate, fmt).replace(tzinfo=timezone.utc)
+                    return dt.timestamp() * 1000.0
+                except ValueError:
+                    continue
+        return None
 
     since_ms = _ms(since) if since else None
     before_ms = _ms(before) if before else None
