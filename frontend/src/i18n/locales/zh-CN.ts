@@ -693,7 +693,7 @@ export default {
   },
   settings: {
     title: '设置',
-    subtitle: '取件策略、保留与设备授权（无用户登录）',
+    subtitle: '取件策略、显示、保留与设备授权（无用户登录）',
     fetchTitle: '取件策略',
     lookbackDays: '增量回看天数',
     lookbackHint: '首次全量后仅请求近 N 天邮件',
@@ -703,6 +703,16 @@ export default {
     batchConc: '批量并发',
     importPrecheck: '导入时预检查凭证',
     importPrecheckHint: '开启后导入会先取信探测；关闭则只检查格式与字段是否合法。',
+    displayTitle: '显示',
+    timeZone: '时区',
+    timeZoneHint:
+      '邮件列表与详情中的时间按此时区显示（格式 YYYY-MM-DD HH:mm）。默认中国（上海）。选择「浏览器 / 系统时区」则跟随本机设置。',
+    timeZoneBrowser: '浏览器 / 系统时区',
+    theme: '主题',
+    themeHint: '浅色 / 深色，或跟随系统外观。',
+    themeSystem: '跟随系统',
+    themeLight: '浅色',
+    themeDark: '深色',
     licenseTitle: '设备授权',
     licenseHint:
       '填写任意一个有效授权码即可解除本机/云端/取件全部限额。未授权时使用下方默认配额。',

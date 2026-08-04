@@ -2,6 +2,9 @@ import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { apiRequest } from '@/api/client'
 import { useMailCacheStore } from '@/stores/mailCache'
+import { setDisplayTheme, setDisplayTimeZone } from '@/utils/displayPrefs'
+import { applyTheme, bindSystemThemeListener, normalizeTheme, type ThemeMode } from '@/utils/theme'
+import { DEFAULT_TIMEZONE, normalizeTimeZone } from '@/utils/timezones'
 
 const KEY = 'openmail.userSettings'
 /** Cap map keys so CF temp churn cannot blow localStorage (origin ~5MB shared). */
@@ -27,6 +30,13 @@ export interface UserSettings {
   licenseToken: string
   /** When true, import modal probes mailboxes; when false, format-only check */
   importPrecheck: boolean
+  /**
+   * IANA timezone for display (e.g. Asia/Shanghai), or `browser` to follow OS.
+   * Default: Asia/Shanghai.
+   */
+  timeZone: string
+  /** UI theme: system | light | dark */
+  theme: ThemeMode
 }
 
 /** Normalize folder to inbox|spam|sent for fetch-map keys. */
@@ -63,6 +73,8 @@ function defaults(): UserSettings {
     batchConcurrency: 10,
     licenseToken: '',
     importPrecheck: true,
+    timeZone: DEFAULT_TIMEZONE,
+    theme: 'system',
   }
 }
 
@@ -88,6 +100,8 @@ function sanitize(raw: Partial<UserSettings> | null | undefined): UserSettings {
     batchConcurrency: Math.max(1, Math.min(50, Number(raw.batchConcurrency) || d.batchConcurrency)),
     licenseToken: typeof raw.licenseToken === 'string' ? raw.licenseToken : '',
     importPrecheck: raw.importPrecheck !== false,
+    timeZone: normalizeTimeZone(raw.timeZone ?? d.timeZone),
+    theme: normalizeTheme(raw.theme ?? d.theme),
   }
 }
 
@@ -111,6 +125,8 @@ function persistPayload(v: UserSettings): string {
     batchConcurrency: clean.batchConcurrency,
     licenseToken: clean.licenseToken,
     importPrecheck: clean.importPrecheck,
+    timeZone: clean.timeZone,
+    theme: clean.theme,
   })
 }
 
@@ -160,20 +176,24 @@ function safeSetItem(key: string, value: string): boolean {
         /* ignore */
       }
     }
-    const minimal = {
+    const minimal: UserSettings = {
       retentionDays: 90,
       lookbackDays: 3,
       firstFullDone: {},
       batchConcurrency: 10,
       licenseToken: '',
       importPrecheck: true,
+      timeZone: DEFAULT_TIMEZONE,
+      theme: 'system',
     }
-    // preserve license if present in original payload
+    // preserve license / display prefs if present in original payload
     try {
-      const parsed = JSON.parse(value) as { licenseToken?: string; retentionDays?: number; lookbackDays?: number }
+      const parsed = JSON.parse(value) as Partial<UserSettings>
       if (parsed.licenseToken) minimal.licenseToken = parsed.licenseToken
       if (parsed.retentionDays) minimal.retentionDays = parsed.retentionDays
       if (parsed.lookbackDays) minimal.lookbackDays = parsed.lookbackDays
+      if (parsed.timeZone) minimal.timeZone = normalizeTimeZone(parsed.timeZone)
+      if (parsed.theme) minimal.theme = normalizeTheme(parsed.theme)
     } catch {
       /* ignore */
     }
@@ -220,6 +240,22 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   watch(s, () => schedulePersist(), { deep: true })
+
+  // Theme + timezone: push to runtime helpers / CSS on change and at init
+  watch(
+    () => s.value.theme,
+    (mode) => {
+      setDisplayTheme(mode)
+      applyTheme(mode)
+    },
+    { immediate: true },
+  )
+  watch(
+    () => s.value.timeZone,
+    (tz) => setDisplayTimeZone(tz),
+    { immediate: true },
+  )
+  bindSystemThemeListener(() => s.value.theme)
 
   // Prune local mail cache when retention window changes
   watch(

@@ -1,21 +1,24 @@
 /**
- * Display times in the browser's local timezone.
+ * Display times in the configured user timezone (default Asia/Shanghai).
  * Storage/API remain UTC ISO or epoch ms — only formatting uses the user zone.
  *
  * Display format (fixed, locale-independent digits):
  *   datetime → YYYY-MM-DD HH:mm:ss
- *   short    → YYYY-MM-DD HH:mm   (same calendar day may omit year? no — always full for clarity)
+ *   short    → YYYY-MM-DD HH:mm
  *   date     → YYYY-MM-DD
  *   time     → HH:mm:ss
  *   mail     → YYYY-MM-DD HH:mm   (list / detail default)
  */
 
-/** IANA timezone from the browser (e.g. Asia/Shanghai). */
+import { getDisplayTimeZone } from '@/utils/displayPrefs'
+import { DEFAULT_TIMEZONE } from '@/utils/timezones'
+
+/** Active IANA timezone for formatting (from settings, default Asia/Shanghai). */
 export function userTimeZone(): string {
   try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    return getDisplayTimeZone()
   } catch {
-    return 'UTC'
+    return DEFAULT_TIMEZONE
   }
 }
 
@@ -66,10 +69,10 @@ type Parts = {
 }
 
 /** Extract calendar parts in the user's timezone (24h). */
-function partsInUserTz(ms: number): Parts | null {
+function partsInUserTz(ms: number, timeZone?: string): Parts | null {
   try {
     const fmt = new Intl.DateTimeFormat('en-CA', {
-      timeZone: userTimeZone(),
+      timeZone: timeZone || userTimeZone(),
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -125,6 +128,8 @@ export function formatInUserTz(
     locale?: string
     kind?: DateTimeFormatKind
     fallback?: string
+    /** Override IANA timezone. */
+    timeZone?: string
   } = {},
 ): string {
   const fallback = opts.fallback ?? '—'
@@ -134,7 +139,8 @@ export function formatInUserTz(
     if (typeof input === 'string' && input.trim()) return input.trim()
     return fallback
   }
-  const parts = partsInUserTz(ms)
+  const tz = opts.timeZone || userTimeZone()
+  const parts = partsInUserTz(ms, tz)
   if (!parts) {
     try {
       return new Date(ms).toISOString()

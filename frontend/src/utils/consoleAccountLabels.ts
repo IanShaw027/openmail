@@ -69,7 +69,7 @@ export function formatRelativeTime(
     if (diff < 60_000) return t('console.timeJustNow')
     if (diff < 3600_000) return t('console.timeMinsAgo', { n: Math.floor(diff / 60_000) })
     if (diff < 86400_000) return t('console.timeHoursAgo', { n: Math.floor(diff / 3600_000) })
-    // Absolute clock in the browser timezone (not UTC wall-clock)
+    // Absolute clock in the configured display timezone (not UTC wall-clock)
     return formatInUserTz(ts, { locale, kind: 'short' })
   } catch {
     return '—'

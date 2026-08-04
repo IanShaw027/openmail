@@ -697,7 +697,7 @@ export default {
   },
   settings: {
     title: 'Settings',
-    subtitle: 'Fetch policy, retention, device license (no user login)',
+    subtitle: 'Fetch policy, display, retention, device license (no user login)',
     fetchTitle: 'Fetch policy',
     lookbackDays: 'Incremental lookback (days)',
     lookbackHint: 'After first full fetch, only request last N days',
@@ -707,6 +707,16 @@ export default {
     batchConc: 'Batch concurrency',
     importPrecheck: 'Precheck credentials on import',
     importPrecheckHint: 'When on, import probes mailboxes first; when off, only format/field validation runs.',
+    displayTitle: 'Display',
+    timeZone: 'Time zone',
+    timeZoneHint:
+      'Mail list and detail timestamps use this zone (format YYYY-MM-DD HH:mm). Default is China (Shanghai). Pick “Browser / system” to follow the OS.',
+    timeZoneBrowser: 'Browser / system',
+    theme: 'Theme',
+    themeHint: 'Light, dark, or follow the system appearance.',
+    themeSystem: 'System',
+    themeLight: 'Light',
+    themeDark: 'Dark',
     licenseTitle: 'Device license',
     licenseHint:
       'Any single valid license code removes all local / cloud / poll limits. Unlicensed clients use the default quotas below.',

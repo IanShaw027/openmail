@@ -1261,12 +1261,15 @@ function formatTime(ts?: number) {
   return formatRelativeTime(t, locale.value, ts)
 }
 
-/** Mail message date: YYYY-MM-DD HH:mm in the browser timezone. */
+/** Mail message date: YYYY-MM-DD HH:mm in the configured display timezone. */
 function formatMailDate(date?: string | null): string {
+  // touch settings so list re-renders when the user changes TZ
+  void userSettings.s.timeZone
   return formatInUserTz(date, { locale: locale.value, kind: 'mail' })
 }
 
 function formatMailDateTitle(date?: string | null): string {
+  void userSettings.s.timeZone
   return formatInUserTzTitle(date, locale.value)
 }
 function displayCode(code: string | undefined, id: string): string {

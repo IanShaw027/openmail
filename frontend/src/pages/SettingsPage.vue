@@ -9,14 +9,50 @@ import { useMailCacheStore } from '@/stores/mailCache'
 import { getLicenseToken, setLicenseToken } from '@/utils/device'
 import { useToast } from '@/composables/useToast'
 import { copyText } from '@/utils/clipboard'
+import UiSelect from '@/components/UiSelect.vue'
+import { browserTimeZone, TIMEZONE_OPTIONS } from '@/utils/timezones'
+import type { ThemeMode } from '@/utils/theme'
+import type { UiSelectOption } from '@/components/UiSelect.vue'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const settings = useSettingsStore()
 const vault = useVaultStore()
 const accounts = useAccountsStore()
 const twofa = useTwoFaStore()
 const mailCache = useMailCacheStore()
 const { flashMsg } = useToast()
+
+const isZh = computed(() => String(locale.value).toLowerCase().startsWith('zh'))
+
+const timeZoneOptions = computed<UiSelectOption[]>(() =>
+  TIMEZONE_OPTIONS.map((o) => {
+    const base = isZh.value ? o.labelZh : o.labelEn
+    if (o.value === 'browser') {
+      return {
+        value: o.value,
+        label: `${t('settings.timeZoneBrowser')} (${browserTimeZone()})`,
+        title: browserTimeZone(),
+      }
+    }
+    return { value: o.value, label: `${base} · ${o.value}`, title: o.value }
+  }),
+)
+
+const themeOptions = computed<UiSelectOption[]>(() => [
+  { value: 'system', label: t('settings.themeSystem') },
+  { value: 'light', label: t('settings.themeLight') },
+  { value: 'dark', label: t('settings.themeDark') },
+])
+
+function onTimeZoneChange(v: string | number) {
+  settings.s.timeZone = String(v)
+  flashMsg(t('settings.saved'))
+}
+
+function onThemeChange(v: string | number) {
+  settings.s.theme = String(v) as ThemeMode
+  flashMsg(t('settings.saved'))
+}
 
 const licenseInput = ref(getLicenseToken())
 const lockMin = ref(vault.lockMinutes)
@@ -144,6 +180,28 @@ onMounted(() => {
         <button type="button" class="btn btn-primary btn-sm" @click="saveRetention">
           {{ t('common.save') }}
         </button>
+      </section>
+
+      <section class="block">
+        <h2>{{ t('settings.displayTitle') }}</h2>
+        <div class="field">
+          <label class="label">{{ t('settings.timeZone') }}</label>
+          <UiSelect
+            :model-value="settings.s.timeZone"
+            :options="timeZoneOptions"
+            @update:model-value="onTimeZoneChange"
+          />
+          <p class="hint">{{ t('settings.timeZoneHint') }}</p>
+        </div>
+        <div class="field">
+          <label class="label">{{ t('settings.theme') }}</label>
+          <UiSelect
+            :model-value="settings.s.theme"
+            :options="themeOptions"
+            @update:model-value="onThemeChange"
+          />
+          <p class="hint">{{ t('settings.themeHint') }}</p>
+        </div>
       </section>
 
       <section class="block">

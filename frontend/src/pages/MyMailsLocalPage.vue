@@ -9,16 +9,20 @@ import { sanitizeHtml } from '@/utils/sanitizeHtml'
 import { formatLinkPreview, onEmailHtmlClick } from '@/utils/emailLinks'
 import { formatInUserTz, formatInUserTzTitle } from '@/utils/datetime'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
+import { useSettingsStore } from '@/stores/settings'
 
 const { t, locale } = useI18n()
 const mailCache = useMailCacheStore()
 const accounts = useAccountsStore()
+const settings = useSettingsStore()
 const { flashMsg } = useToast()
 
 function formatMailDate(date?: string | null): string {
+  void settings.s.timeZone
   return formatInUserTz(date, { locale: locale.value, kind: 'mail' })
 }
 function formatMailDateTitle(date?: string | null): string {
+  void settings.s.timeZone
   return formatInUserTzTitle(date, locale.value)
 }
 
