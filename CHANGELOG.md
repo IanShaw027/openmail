@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] — 2026-08-06
+
+### Added
+
+- **Server-decryptable cloud poll**: upload/import with poll stores master-key credentials (`sync_enabled`); SyncWorker upserts `mail_items` + `sync_cursors`
+- **`GET /api/sync/status`** and **`GET /api/sync/delta`**: device HMAC incremental pull into local mailCache on vault unlock (+ 3‑minute poll)
+- Shared **stable_id** (`p:` / `m:` / `wh_`+sha256) for local and cloud merge
+
+### Fixed
+
+- SyncWorker catch-up no longer stops on a full page of already-known (overlap) mail; pages older via `before=` within the since window
+- Cloud delta ack uses mail `updated_at`+`id` keyset instead of wall-clock `server_time` (avoids skipped rows)
+
+### Changed
+
+- Cloud poll is no longer client-sealed by default (sealed remains backup-only / non-poll)
+
 ## [0.3.5] — 2026-08-05
 
 ### Added
