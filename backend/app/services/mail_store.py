@@ -129,6 +129,11 @@ def _message_id_from_msg(msg: Any) -> str | None:
 
 
 def _weak_fingerprint(msg: Any) -> str:
+    """Weak id material: trim-only fields joined by ``|`` (must match frontend).
+
+    ``from|date|subject|size`` — size empty string when missing.
+    Prefix ``wh_`` + sha256 hex[:40].
+    """
     from_addr = _as_str(
         _attr(msg, "from_addr", "from_address", "from_", "from", default="")
     )

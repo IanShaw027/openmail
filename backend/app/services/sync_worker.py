@@ -594,6 +594,22 @@ def _sync_account(
     }
 
 
+def _oldest_received_at(messages: list[Any]) -> datetime | None:
+    """Earliest parseable received_at in a page (for before= paging)."""
+    oldest: datetime | None = None
+    for msg in messages:
+        dt = parse_received_at(
+            getattr(msg, "date", None)
+            if not isinstance(msg, dict)
+            else msg.get("date") or msg.get("received_at")
+        )
+        if dt is None:
+            continue
+        if oldest is None or dt < oldest:
+            oldest = dt
+    return oldest
+
+
 def _sync_folder(
     db: Session,
     account: Account,
@@ -604,41 +620,42 @@ def _sync_folder(
 ) -> dict[str, Any]:
     """Incremental fetch → upsert mail_items → advance time high-water cursor.
 
-    Multi-round catch-up when a page is full and new rows were inserted.
+    Providers return **newest-first** pages. Within a since-window we page older via
+    ``before=oldest(page)`` until a short page (EOF). Do **not** stop merely because
+    a full page was all already-known (overlap) — that would skip older-unseen mail
+    still inside the window.
     """
     cursor = get_cursor(db, account.id, folder)
     hw_time, hw_ids = _parse_high_water(cursor.cursor_json if cursor else None)
+
+    # Fixed lower bound for this sync cycle (overlap for clock skew / same-second)
+    if hw_time is not None:
+        window_since = (hw_time - timedelta(seconds=OVERLAP_SECONDS)).isoformat()
+    else:
+        window_since = None
 
     total_inserted = total_updated = total_unchanged = 0
     total_message_count = 0
     folder_ok = False
     folder_error: str | None = None
     rounds = 0
+    before: str | None = None
+    page_limit = PAGE_CATCHUP
 
     for _round in range(MAX_CATCHUP_ROUNDS):
         rounds += 1
-        if hw_time is not None:
-            since = (hw_time - timedelta(seconds=OVERLAP_SECONDS)).isoformat()
-            max_messages = PAGE_CATCHUP
-            quick = False
-            page_limit = PAGE_CATCHUP
-        else:
-            # First run / no cursor: quick defaults as before
-            since = None
-            max_messages = None
-            quick = True
-            page_limit = 15  # fetch_account quick default for stored accounts
 
         result = fetch_account(
             db,
             account,
             folder=folder,
-            quick=quick,
+            quick=False,
             force=force,
             settings=settings,
             use_cache=False,
-            since=since,
-            max_messages=max_messages,
+            since=window_since,
+            before=before,
+            max_messages=page_limit,
         )
 
         if not result.ok:
@@ -650,7 +667,6 @@ def _sync_folder(
         msg_count = result.message_count or len(msgs)
         total_message_count += msg_count
 
-        inserted_this = 0
         if msgs:
             counts = upsert_messages(
                 db, account.id, folder, msgs, settings=settings
@@ -658,7 +674,6 @@ def _sync_folder(
             total_inserted += counts.get("inserted", 0)
             total_updated += counts.get("updated", 0)
             total_unchanged += counts.get("unchanged", 0)
-            inserted_this = int(counts.get("inserted", 0))
 
             batch_time, batch_ids = _high_water_from_messages(msgs)
             hw_time, hw_ids = _merge_high_water(hw_time, hw_ids, batch_time, batch_ids)
@@ -667,11 +682,24 @@ def _sync_folder(
                     db, account.id, folder, hw_time, hw_ids
                 )
 
-        # Stop when page not full or no new inserts (known mail / empty)
-        if msg_count < page_limit or inserted_this == 0:
+        # Short page or empty → window exhausted (newest-first)
+        if not msgs or msg_count < page_limit:
             break
-        if not msgs:
+
+        # Full page: walk older within the same since-window
+        oldest = _oldest_received_at(msgs)
+        if oldest is None:
             break
+        oldest_iso = oldest.isoformat()
+        # No progress on before cursor → stop (avoid infinite loop)
+        if before is not None:
+            try:
+                prev_b = parse_received_at(before)
+                if prev_b is not None and oldest >= prev_b:
+                    break
+            except Exception:
+                pass
+        before = oldest_iso
 
     return {
         "folder": folder,

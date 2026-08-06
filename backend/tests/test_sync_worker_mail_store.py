@@ -195,3 +195,101 @@ def test_sync_account_incremental_uses_since_overlap(db_session: Session) -> Non
         .count()
     )
     assert n == 1
+
+
+def test_sync_folder_full_page_all_known_pages_older(db_session: Session) -> None:
+    """Full page of already-stored mail must NOT stop catch-up (review H1).
+
+    Newest-first: first page all known → second page uses before=oldest.
+    """
+    from app.services.mail_store import upsert_messages
+    from app.services.sync_worker import PAGE_CATCHUP
+
+    acc = _make_account(db_session, email="overlap@example.com")
+    account_id = acc.id
+
+    # Pre-seed PAGE_CATCHUP "known" messages (newest block)
+    known = [
+        Message(
+            id=f"known-{i}",
+            subject=f"Known {i}",
+            from_="k@e.com",
+            date=f"2026-08-01T12:{i:02d}:00+00:00",
+            body_text=f"body {i}",
+        )
+        for i in range(PAGE_CATCHUP)
+    ]
+    upsert_messages(db_session, account_id, "inbox", known)
+    db_session.commit()
+
+    calls: list[dict] = []
+
+    def _fake_fetch(db, account, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        folder = str(kwargs.get("folder", "inbox")).lower()
+        if folder != "inbox":
+            return FetchServiceResult(ok=True, messages=[], message_count=0, folder=folder)
+        before = kwargs.get("before")
+        if before is None:
+            # First page: full page of already-known (newest)
+            return FetchServiceResult(
+                ok=True,
+                messages=known,
+                message_count=len(known),
+                folder=folder,
+                account_id=account.id,
+                email=account.email,
+            )
+        # Second page: older unseen mail
+        older = Message(
+            id="older-1",
+            subject="Older unseen",
+            from_="o@e.com",
+            date="2026-07-01T10:00:00+00:00",
+            body_text="should not be skipped",
+        )
+        return FetchServiceResult(
+            ok=True,
+            messages=[older],
+            message_count=1,
+            folder=folder,
+            account_id=account.id,
+            email=account.email,
+        )
+
+    with patch("app.services.sync_worker.fetch_account", side_effect=_fake_fetch):
+        worker = get_sync_worker()
+        detail = worker.sync_one_account(account_id, force=True)
+
+    assert detail["ok"] is True
+    inbox_calls = [c for c in calls if str(c.get("folder", "")).lower() == "inbox"]
+    assert len(inbox_calls) >= 2, f"expected multi-page, got {inbox_calls}"
+    assert inbox_calls[0].get("before") is None
+    assert inbox_calls[1].get("before") is not None
+
+    db_session.expire_all()
+    sids = {
+        r.stable_id
+        for r in db_session.query(MailItem)
+        .filter(MailItem.account_id == account_id, MailItem.folder == "inbox")
+        .all()
+    }
+    assert "p:older-1" in sids
+
+
+def test_weak_stable_id_matches_frontend_material() -> None:
+    """Server weak id is wh_ + sha256[:40] of from|date|subject|size."""
+    from app.services.mail_store import compute_stable_id
+    import hashlib
+
+    class M:
+        id = None
+        from_addr = "Alice <a@b.com>"
+        date = "2026-08-01T12:00:00Z"
+        subject = "Hello"
+        size = None
+
+    sid = compute_stable_id(M())
+    material = "Alice <a@b.com>|2026-08-01T12:00:00Z|Hello|"
+    expect = "wh_" + hashlib.sha256(material.encode()).hexdigest()[:40]
+    assert sid == expect

@@ -4,10 +4,9 @@
  * Priority (docs/19-cloud-sync-incremental.md):
  * 1. Provider native id (message.id when it looks like a provider id)
  * 2. Internet Message-ID / message_id header when present
- * 3. Weak fingerprint: hash of from|date|subject|approx size
- *
- * Sync: pure/sync so mailCache soft-dedupe stays sync. Weak ids use FNV-1a hex
- * (not SubtleCrypto) — collision-resistant enough for client soft merge.
+ * 3. Weak fingerprint: must match backend `mail_store._weak_fingerprint`
+ *    → `wh_` + sha256(from|date|subject|size)[:40]
+ *    Material is raw trimmed strings (not lowercased) so client and server agree.
  */
 
 /** Fields used for stable_id / soft fingerprint (works for MailMessage + delta DTOs). */
@@ -34,32 +33,106 @@ export type MailIdentityInput = {
   uidvalidity?: number | null
 }
 
-const WEAK_PREFIX = 'w:'
+const WEAK_PREFIX = 'wh_'
+/** Legacy client-only weak ids (FNV); still recognized for merge/dedupe. */
+const WEAK_PREFIX_LEGACY = 'w:'
 const MSGID_PREFIX = 'm:'
 const PROVIDER_PREFIX = 'p:'
 
-/** FNV-1a 32-bit → 8 hex chars (sync, deterministic). */
-function fnv1aHex(input: string): string {
-  let h = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i)
-    h = Math.imul(h, 0x01000193)
+/** Minimal sync SHA-256 (UTF-8) → hex — matches Python hashlib.sha256. */
+function sha256Hex(message: string): string {
+  // Pure JS SHA-256 (compact). Same digest as backend for identical UTF-8 bytes.
+  const K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+    0xc67178f2,
+  ])
+  const bytes = new TextEncoder().encode(message)
+  const l = bytes.length
+  const bitLen = l * 8
+  const withOne = l + 1
+  let total = withOne + 8
+  const pad = (64 - (total % 64)) % 64
+  total += pad
+  const buf = new Uint8Array(total)
+  buf.set(bytes)
+  buf[l] = 0x80
+  const view = new DataView(buf.buffer)
+  // length in bits as big-endian 64-bit (high 32 always 0 for our sizes)
+  view.setUint32(total - 4, bitLen >>> 0, false)
+
+  let h0 = 0x6a09e667
+  let h1 = 0xbb67ae85
+  let h2 = 0x3c6ef372
+  let h3 = 0xa54ff53a
+  let h4 = 0x510e527f
+  let h5 = 0x9b05688c
+  let h6 = 0x1f83d9ab
+  let h7 = 0x5be0cd19
+
+  const w = new Uint32Array(64)
+  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n))
+
+  for (let i = 0; i < total; i += 64) {
+    for (let j = 0; j < 16; j++) {
+      w[j] = view.getUint32(i + j * 4, false)
+    }
+    for (let j = 16; j < 64; j++) {
+      const s0 = rotr(w[j - 15]!, 7) ^ rotr(w[j - 15]!, 18) ^ (w[j - 15]! >>> 3)
+      const s1 = rotr(w[j - 2]!, 17) ^ rotr(w[j - 2]!, 19) ^ (w[j - 2]! >>> 10)
+      w[j] = (w[j - 16]! + s0 + w[j - 7]! + s1) >>> 0
+    }
+    let a = h0
+    let b = h1
+    let c = h2
+    let d = h3
+    let e = h4
+    let f = h5
+    let g = h6
+    let h = h7
+    for (let j = 0; j < 64; j++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+      const ch = (e & f) ^ (~e & g)
+      const t1 = (h + S1 + ch + K[j]! + w[j]!) >>> 0
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+      const maj = (a & b) ^ (a & c) ^ (b & c)
+      const t2 = (S0 + maj) >>> 0
+      h = g
+      g = f
+      f = e
+      e = (d + t1) >>> 0
+      d = c
+      c = b
+      b = a
+      a = (t1 + t2) >>> 0
+    }
+    h0 = (h0 + a) >>> 0
+    h1 = (h1 + b) >>> 0
+    h2 = (h2 + c) >>> 0
+    h3 = (h3 + d) >>> 0
+    h4 = (h4 + e) >>> 0
+    h5 = (h5 + f) >>> 0
+    h6 = (h6 + g) >>> 0
+    h7 = (h7 + h) >>> 0
   }
-  return (h >>> 0).toString(16).padStart(8, '0')
+
+  const out = new Uint32Array([h0, h1, h2, h3, h4, h5, h6, h7])
+  let hex = ''
+  for (let i = 0; i < 8; i++) {
+    hex += out[i]!.toString(16).padStart(8, '0')
+  }
+  return hex
 }
 
-/** Expand to 16 hex via two FNV passes (closer to short sha256 prefix feel). */
-function weakHashHex(input: string): string {
-  const a = fnv1aHex(input)
-  const b = fnv1aHex(`om1|${input}|${a}`)
-  return a + b
-}
-
-function normStr(v: unknown): string {
-  return String(v ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
+function trimStr(v: unknown): string {
+  return String(v ?? '').trim()
 }
 
 /**
@@ -79,8 +152,13 @@ export function normalizeMessageId(raw: string | null | undefined): string {
 export function looksLikeProviderId(id: string | null | undefined): boolean {
   const s = String(id ?? '').trim()
   if (!s) return false
-  // Already-tagged stable ids
-  if (s.startsWith(PROVIDER_PREFIX) || s.startsWith(MSGID_PREFIX) || s.startsWith(WEAK_PREFIX)) {
+  // Already-tagged stable ids (incl. legacy weak `w:`)
+  if (
+    s.startsWith(PROVIDER_PREFIX) ||
+    s.startsWith(MSGID_PREFIX) ||
+    s.startsWith(WEAK_PREFIX) ||
+    s.startsWith(WEAK_PREFIX_LEGACY)
+  ) {
     return false
   }
   // Pure whitespace / placeholder
@@ -96,37 +174,28 @@ export function looksLikeProviderId(id: string | null | undefined): boolean {
   return false
 }
 
-function pickFrom(m: MailIdentityInput): string {
-  return normStr(m.from_address || m.from_addr || m.from || '')
+/** Match Python mail_store._as_str for weak fingerprint fields (trim only). */
+function pickFromRaw(m: MailIdentityInput): string {
+  return trimStr(m.from_address || m.from_addr || m.from || '')
 }
 
-function pickDate(m: MailIdentityInput): string {
+function pickDateRaw(m: MailIdentityInput): string {
   if (m.date == null || m.date === '') return ''
+  // Server uses str(date).strip() on the raw field; keep string form as-is when string.
   if (typeof m.date === 'number' && Number.isFinite(m.date)) {
-    const ms = m.date < 1e12 ? m.date * 1000 : m.date
-    return String(Math.floor(ms))
+    return String(m.date)
   }
-  return String(m.date).trim().toLowerCase().replace(/\s+/g, ' ')
+  return String(m.date).trim()
 }
 
 /**
- * Approx size for weak fingerprint. Prefer explicit size, then preview length.
- * Do NOT use full body_text/html — detail fetch would change weak stable_id
- * and break list↔detail soft merge.
+ * Size segment for weak fingerprint — must match server:
+ * empty when size missing; else str(size). Do not use preview length.
  */
-function approxSize(m: MailIdentityInput): number {
-  if (m.size != null && Number.isFinite(Number(m.size)) && Number(m.size) >= 0) {
-    return Math.floor(Number(m.size))
-  }
-  const preview = String(m.preview || m.body_preview || '')
-  if (preview.length > 0) return preview.length
-  // Last resort when no preview yet (rare): capped body length bucket
-  const text = String(m.body_text || '')
-  const html = String(m.body_html || '')
-  const n = text.length || html.length
-  if (n <= 0) return 0
-  // Bucket so minor body trims do not churn the id
-  return Math.min(n, 280)
+function sizeSegment(m: MailIdentityInput): string {
+  if (m.size == null || m.size === ('' as unknown)) return ''
+  if (!Number.isFinite(Number(m.size))) return ''
+  return String(m.size)
 }
 
 /**
@@ -143,7 +212,7 @@ export function computeMailStableId(m: MailIdentityInput): string {
   // 1b) message.id when it looks like a provider id
   const id = String(m.id ?? '').trim()
   if (id && looksLikeProviderId(id)) {
-    // Scope IMAP UIDs with uidvalidity when present (matches mailCache keying)
+    // Scope IMAP UIDs with uidvalidity when present (matches mailCache / server)
     if (/^\d{1,12}$/.test(id) && m.uidvalidity != null && Number.isFinite(Number(m.uidvalidity))) {
       return `${PROVIDER_PREFIX}${Number(m.uidvalidity)}:${id}`
     }
@@ -156,13 +225,13 @@ export function computeMailStableId(m: MailIdentityInput): string {
     return `${MSGID_PREFIX}${mid}`
   }
 
-  // 3) Weak fingerprint: from|date|subject|approx size
-  const from = pickFrom(m)
-  const date = pickDate(m)
-  const subject = normStr(m.subject || '')
-  const size = approxSize(m)
+  // 3) Weak fingerprint — identical material + digest prefix as backend
+  const from = pickFromRaw(m)
+  const date = pickDateRaw(m)
+  const subject = trimStr(m.subject || '')
+  const size = sizeSegment(m)
   const material = `${from}|${date}|${subject}|${size}`
-  return `${WEAK_PREFIX}${weakHashHex(material)}`
+  return `${WEAK_PREFIX}${sha256Hex(material).slice(0, 40)}`
 }
 
 /**
@@ -192,5 +261,6 @@ export function normalizeFolderForStable(folder?: string | null): string {
 
 /** True when stable_id is weak (content fingerprint only). */
 export function isWeakStableId(stableId: string): boolean {
-  return String(stableId || '').startsWith(WEAK_PREFIX)
+  const s = String(stableId || '')
+  return s.startsWith(WEAK_PREFIX) || s.startsWith(WEAK_PREFIX_LEGACY)
 }

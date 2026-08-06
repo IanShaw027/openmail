@@ -8,7 +8,7 @@ import {
 } from '@/api/sync'
 import { useAccountsStore } from '@/stores/accounts'
 import { useMailCacheStore, type DeltaMailItem } from '@/stores/mailCache'
-import { getSyncAck, setSyncAck } from '@/utils/syncAck'
+import { formatSyncAck, getSyncAck, parseSyncAck, setSyncAck } from '@/utils/syncAck'
 
 const MAX_PAGES = 20
 const DEFAULT_LIMIT = 200
@@ -119,8 +119,13 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
 
       try {
         const mailCache = useMailCacheStore()
-        let since: string | null = getSyncAck()
-        let sinceId: string | null = null
+        // Ack is "updated_at\tid" keyset — never wall-clock server_time alone
+        const ack0 = parseSyncAck(getSyncAck())
+        let since: string | null = ack0.since
+        let sinceId: string | null = ack0.sinceId
+        /** Last consumed mail row keyset (for durable ack). */
+        let lastMailSince: string | null = since
+        let lastMailId: string | null = sinceId
 
         for (let page = 0; page < MAX_PAGES; page++) {
           let res
@@ -153,35 +158,36 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
 
           if (res.server_time) lastServerTime = String(res.server_time)
 
-          if (!res.has_more) {
-            done = true
-            break
-          }
-
-          // Keyset cursor for next page: last row updated_at + id
+          // Advance durable cursor from last mail on this page (keyset)
           const last = mails[mails.length - 1]
           if (last?.updated_at) {
-            since = String(last.updated_at)
-            sinceId =
+            lastMailSince = String(last.updated_at)
+            lastMailId =
               res.next_since_id != null && String(res.next_since_id)
                 ? String(res.next_since_id)
                 : last.id != null
                   ? String(last.id)
                   : null
-          } else if (res.server_time) {
-            // Fallback: advance since to server_time without id
-            since = String(res.server_time)
-            sinceId = null
-          } else {
-            // Cannot paginate safely
-            console.warn('[openmail] delta has_more but no cursor; stopping')
+            since = lastMailSince
+            sinceId = lastMailId
+          }
+
+          if (!res.has_more) {
+            done = true
+            break
+          }
+
+          if (!last?.updated_at) {
+            console.warn('[openmail] delta has_more but no mail cursor; stopping')
             break
           }
         }
 
-        // Ack only after full success (has_more drained within MAX_PAGES)
-        if (done && lastServerTime) {
-          setSyncAck(lastServerTime)
+        // Ack last consumed (updated_at, id) — not wall-clock server_time
+        if (done && lastMailSince) {
+          setSyncAck(formatSyncAck(lastMailSince, lastMailId))
+        } else if (done && lastServerTime && !lastMailSince) {
+          // Empty delta page: keep previous ack; nothing new to advance
         }
 
         if (totalMerged > 0) {

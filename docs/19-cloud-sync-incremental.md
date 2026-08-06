@@ -150,11 +150,19 @@ Optional advanced: sealed backup only → `sync_enabled: false`, no poll badge a
 
 1. Skip / disable poll if `is_client_sealed_blob`
 2. For each folder in `sync_folders` (default inbox,junk):
-   - Load cursor; fetch with since/overlap or provider native
-   - Map messages → stable_id; upsert mail_items; set `updated_at=now` only on change
-   - Advance cursor after successful upsert
+   - Load cursor; `window_since = high_water_time - OVERLAP` (or null on first run)
+   - Fetch newest-first pages with `max_messages=PAGE_CATCHUP`:
+     - page 0: `since=window_since`, no `before`
+     - while full page: next page `before=oldest(page)`, same `since` (walk older in window)
+   - **Do not stop** just because a full page was all already-known (overlap); only stop on short page / empty / no `before` progress
+   - Upsert mail_items; advance high_water from max(received_at) after each page
 3. Credential write-back (cookies/refresh) as today
 4. Keep `last_sync_at` / `last_sync_error`
+
+## Client delta ack
+
+- Prefer `setSyncAck(\`${last.updated_at}\\t${last.id}\`)` after `has_more` drained
+- Next pull: `since` + `since_id` keyset — **not** wall-clock `server_time` alone
 
 ## Frontend delta pull
 
