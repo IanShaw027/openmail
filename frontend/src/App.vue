@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterView, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import AppShell from '@/layouts/AppShell.vue'
@@ -10,6 +10,7 @@ import { useAccountsStore } from '@/stores/accounts'
 import { useTwoFaStore } from '@/stores/twofa'
 import { useMailCacheStore } from '@/stores/mailCache'
 import { useSettingsStore } from '@/stores/settings'
+import { useCloudSyncStore } from '@/stores/cloudSync'
 import {
   formatLinkPreview,
   peekLandingRedirect,
@@ -22,6 +23,7 @@ const accounts = useAccountsStore()
 const twofa = useTwoFaStore()
 const mailCache = useMailCacheStore()
 const settings = useSettingsStore()
+const cloudSync = useCloudSyncStore()
 
 const bootReady = ref(false)
 
@@ -44,7 +46,18 @@ async function hydrateStores() {
   await twofa.hydrateFromVault()
   await mailCache.hydrateFromVault()
   void accounts.loadServerAccounts()
+  // Cloud mail delta → mailCache (soft-fails if API not ready)
+  void cloudSync.pullCloudMailDelta()
+  cloudSync.startCloudDeltaPolling()
 }
+
+// Stop interval poll when vault locks (explicit lock or idle timeout)
+watch(
+  () => vault.unlocked,
+  (u) => {
+    if (!u) cloudSync.stopCloudDeltaPolling()
+  },
+)
 
 function onActivity() {
   if (vault.unlocked) vault.touch()
@@ -129,6 +142,7 @@ onUnmounted(() => {
   document.removeEventListener('visibilitychange', onVisibility)
   window.removeEventListener('pagehide', onPageHide)
   window.removeEventListener('beforeunload', onPageHide)
+  cloudSync.stopCloudDeltaPolling()
 })
 </script>
 

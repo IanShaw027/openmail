@@ -9,6 +9,7 @@ import { useVaultStore } from '@/stores/vault'
 import { useAccountsStore } from '@/stores/accounts'
 import { useTwoFaStore } from '@/stores/twofa'
 import { useMailCacheStore } from '@/stores/mailCache'
+import { useCloudSyncStore } from '@/stores/cloudSync'
 import OpenMailLogo from '@/components/OpenMailLogo.vue'
 
 const { t } = useI18n()
@@ -19,6 +20,7 @@ const vault = useVaultStore()
 const accounts = useAccountsStore()
 const twofa = useTwoFaStore()
 const mailCache = useMailCacheStore()
+const cloudSync = useCloudSyncStore()
 
 const menuOpen = ref(false)
 
@@ -29,6 +31,7 @@ function toggleLocale() {
 }
 
 function lockVault() {
+  cloudSync.stopCloudDeltaPolling()
   accounts.clearLocalSecrets()
   twofa.clearSecrets()
   mailCache.clearSecrets()

@@ -1,7 +1,8 @@
 """Background SyncWorker: fetch non-sealed server accounts with sync_enabled.
 
 Primary product path is browser vault + proxy fetch. This worker only helps
-legacy/server-stored rows (not client_sealed). Mail search is local mailCache.
+legacy/server-stored rows (not client_sealed). Cloud poll path A persists into
+mail_items with time cursors (see docs/19-cloud-sync-incremental.md).
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -19,6 +20,13 @@ from app.config import Settings
 from app.db import SessionLocal
 from app.models import Account, AccountStatus, SyncRun
 from app.services.fetch_service import fetch_account
+from app.services.mail_store import (
+    compute_stable_id,
+    get_cursor,
+    parse_received_at,
+    save_cursor_time_high_water,
+    upsert_messages,
+)
 from app.services.settings_service import (
     EffectiveSettings,
     as_settings_compatible,
@@ -26,6 +34,11 @@ from app.services.settings_service import (
 )
 
 logger = logging.getLogger("openmail.sync_worker")
+
+# Time-cursor overlap so weak providers do not drop edge messages (contract).
+OVERLAP_SECONDS = 120
+PAGE_CATCHUP = 50
+MAX_CATCHUP_ROUNDS = 10
 
 
 def _safe_err(msg: str | None) -> str:
@@ -439,6 +452,70 @@ class SyncWorker:
         return result
 
 
+def _parse_high_water(
+    cursor_json: str | None,
+) -> tuple[datetime | None, list[str]]:
+    """Extract high_water_time / high_water_ids from SyncCursor.cursor_json."""
+    if not cursor_json:
+        return None, []
+    try:
+        data = json.loads(cursor_json)
+    except Exception:
+        return None, []
+    if not isinstance(data, dict):
+        return None, []
+    hw_time = parse_received_at(data.get("high_water_time"))
+    raw_ids = data.get("high_water_ids") or []
+    if not isinstance(raw_ids, list):
+        raw_ids = []
+    hw_ids = [str(x) for x in raw_ids if x]
+    return hw_time, hw_ids
+
+
+def _high_water_from_messages(
+    messages: list[Any],
+) -> tuple[datetime | None, list[str]]:
+    """Max received_at among messages; stable_ids tied at that timestamp."""
+    best: datetime | None = None
+    ids_at_best: list[str] = []
+    for msg in messages:
+        dt = parse_received_at(
+            getattr(msg, "date", None)
+            if not isinstance(msg, dict)
+            else msg.get("date") or msg.get("received_at")
+        )
+        if dt is None:
+            continue
+        sid = compute_stable_id(msg)
+        if best is None or dt > best:
+            best = dt
+            ids_at_best = [sid]
+        elif dt == best:
+            if sid not in ids_at_best:
+                ids_at_best.append(sid)
+    return best, ids_at_best
+
+
+def _merge_high_water(
+    prev_time: datetime | None,
+    prev_ids: list[str],
+    new_time: datetime | None,
+    new_ids: list[str],
+) -> tuple[datetime | None, list[str]]:
+    """Advance high-water mark; merge ids when times match."""
+    if new_time is None:
+        return prev_time, prev_ids
+    if prev_time is None or new_time > prev_time:
+        return new_time, list(new_ids)
+    if new_time == prev_time:
+        merged = list(prev_ids)
+        for sid in new_ids:
+            if sid not in merged:
+                merged.append(sid)
+        return prev_time, merged
+    return prev_time, prev_ids
+
+
 def _sync_account(
     db: Session,
     account: Account,
@@ -447,7 +524,7 @@ def _sync_account(
     settings: Settings,
     force: bool = True,
 ) -> dict[str, Any]:
-    """Fetch configured folders for one account; update last_sync_* fields."""
+    """Fetch configured folders for one account; upsert mail_items + advance cursors."""
     from app.services.credentials import is_client_sealed_blob, load_credentials
 
     # Client-sealed vault credentials: server cannot decrypt — skip silently
@@ -477,27 +554,18 @@ def _sync_account(
 
     for folder in folders:
         try:
-            result = fetch_account(
+            detail = _sync_folder(
                 db,
                 account,
                 folder=folder,
-                quick=True,
-                force=force,
                 settings=settings,
-                use_cache=False,
+                force=force,
             )
-            folder_results.append(
-                {
-                    "folder": folder,
-                    "ok": result.ok,
-                    "message_count": result.message_count,
-                    "error": result.error,
-                }
-            )
-            if result.ok:
+            folder_results.append(detail)
+            if detail.get("ok"):
                 any_ok = True
-            elif result.error:
-                errors.append(f"{folder}: {_safe_err(result.error)}")
+            elif detail.get("error"):
+                errors.append(f"{folder}: {_safe_err(str(detail['error']))}")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{folder}: {exc.__class__.__name__}: {_safe_err(str(exc))}")
             folder_results.append(
@@ -523,6 +591,98 @@ def _sync_account(
         "folders": folder_results,
         "error": account.last_sync_error,
         "last_sync_at": now.isoformat(),
+    }
+
+
+def _sync_folder(
+    db: Session,
+    account: Account,
+    *,
+    folder: str,
+    settings: Settings,
+    force: bool = True,
+) -> dict[str, Any]:
+    """Incremental fetch → upsert mail_items → advance time high-water cursor.
+
+    Multi-round catch-up when a page is full and new rows were inserted.
+    """
+    cursor = get_cursor(db, account.id, folder)
+    hw_time, hw_ids = _parse_high_water(cursor.cursor_json if cursor else None)
+
+    total_inserted = total_updated = total_unchanged = 0
+    total_message_count = 0
+    folder_ok = False
+    folder_error: str | None = None
+    rounds = 0
+
+    for _round in range(MAX_CATCHUP_ROUNDS):
+        rounds += 1
+        if hw_time is not None:
+            since = (hw_time - timedelta(seconds=OVERLAP_SECONDS)).isoformat()
+            max_messages = PAGE_CATCHUP
+            quick = False
+            page_limit = PAGE_CATCHUP
+        else:
+            # First run / no cursor: quick defaults as before
+            since = None
+            max_messages = None
+            quick = True
+            page_limit = 15  # fetch_account quick default for stored accounts
+
+        result = fetch_account(
+            db,
+            account,
+            folder=folder,
+            quick=quick,
+            force=force,
+            settings=settings,
+            use_cache=False,
+            since=since,
+            max_messages=max_messages,
+        )
+
+        if not result.ok:
+            folder_error = result.error
+            break
+
+        folder_ok = True
+        msgs = list(result.messages or [])
+        msg_count = result.message_count or len(msgs)
+        total_message_count += msg_count
+
+        inserted_this = 0
+        if msgs:
+            counts = upsert_messages(
+                db, account.id, folder, msgs, settings=settings
+            )
+            total_inserted += counts.get("inserted", 0)
+            total_updated += counts.get("updated", 0)
+            total_unchanged += counts.get("unchanged", 0)
+            inserted_this = int(counts.get("inserted", 0))
+
+            batch_time, batch_ids = _high_water_from_messages(msgs)
+            hw_time, hw_ids = _merge_high_water(hw_time, hw_ids, batch_time, batch_ids)
+            if hw_time is not None:
+                save_cursor_time_high_water(
+                    db, account.id, folder, hw_time, hw_ids
+                )
+
+        # Stop when page not full or no new inserts (known mail / empty)
+        if msg_count < page_limit or inserted_this == 0:
+            break
+        if not msgs:
+            break
+
+    return {
+        "folder": folder,
+        "ok": folder_ok,
+        "message_count": total_message_count,
+        "inserted": total_inserted,
+        "updated": total_updated,
+        "unchanged": total_unchanged,
+        "rounds": rounds,
+        "error": folder_error if not folder_ok else None,
+        "high_water_time": hw_time.isoformat() if hw_time else None,
     }
 
 

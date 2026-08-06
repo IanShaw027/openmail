@@ -613,11 +613,9 @@ export const useAccountsStore = defineStore('accounts', () => {
   }
 
   /**
-   * Import selected partials to device cloud (encrypted server store).
-   */
-  /**
-   * Upload selected local accounts to device cloud with hourly poll enabled.
-   * Keeps a local row (secrets stay in browser); adds/updates server row for SyncWorker.
+   * Upload selected local accounts to device cloud for server poll.
+   * Sends server-decryptable credentials (master-key); does NOT client-seal.
+   * Keeps a local vault row (secrets stay in browser) and links serverId.
    */
   async function uploadLocalToCloud(
     ids: string[],
@@ -631,16 +629,7 @@ export const useAccountsStore = defineStore('accounts', () => {
       const acc = localAccounts.value.find((a) => a.id === id)
       if (!acc) continue
       try {
-        let clientSealed: string | undefined
-        try {
-          const vault = useVaultStore()
-          if (vault.status === 'unlocked') {
-            clientSealed = await vault.sealForCloud(sealPayloadFromAccount(acc))
-          }
-        } catch {
-          /* ignore */
-        }
-        // Sealed cloud rows cannot be polled server-side
+        // Cloud poll path: plaintext fields → server master-key encrypt (not sealForCloud)
         const body = toCreateBody(
           {
             email: acc.email,
@@ -660,19 +649,17 @@ export const useAccountsStore = defineStore('accounts', () => {
             sessionCookies: acc.sessionCookies,
             sessionMeta: acc.sessionMeta,
           },
-          { syncEnabled: clientSealed ? false : syncEnabled, clientSealed },
+          { syncEnabled },
         )
         const row = await createServerAccount(body)
-        // Sealed cloud rows cannot be polled server-side — keep local syncEnabled false
-        const localSyncEnabled = clientSealed ? false : syncEnabled
-        // mark local as linked to cloud for UI
+        // mark local as linked to cloud for UI; secrets stay in vault
         const li = localAccounts.value.findIndex((a) => a.id === id)
         if (li >= 0) {
           localAccounts.value[li] = {
             ...localAccounts.value[li]!,
             serverId: row.id,
-            clientSealed: Boolean(clientSealed),
-            syncEnabled: localSyncEnabled,
+            clientSealed: false,
+            syncEnabled,
             updatedAt: Date.now(),
           }
         }
@@ -681,8 +668,8 @@ export const useAccountsStore = defineStore('accounts', () => {
           id: `srv_${row.id}`,
           storage: 'server',
           serverId: row.id,
-          clientSealed: Boolean(clientSealed),
-          syncEnabled: localSyncEnabled,
+          clientSealed: false,
+          syncEnabled,
           updatedAt: Date.now(),
         })
         const si = serverAccounts.value.findIndex(
@@ -740,41 +727,14 @@ export const useAccountsStore = defineStore('accounts', () => {
         continue
       }
       try {
-        let clientSealed: string | undefined
-        try {
-          const vault = useVaultStore()
-          if (vault.status === 'unlocked') {
-            const p = partial as Partial<MailAccount> & {
-              sessionCookies?: MailAccount['sessionCookies']
-              sessionMeta?: MailAccount['sessionMeta']
-              apiKey?: string
-            }
-            clientSealed = await vault.sealForCloud({
-              email: partial.email,
-              type: partial.type,
-              password: partial.password,
-              refreshToken: partial.refreshToken,
-              clientId: partial.clientId,
-              apiUrl: partial.apiUrl,
-              apiKey: p.apiKey,
-              imapHost: partial.imapHost,
-              imapPort: partial.imapPort,
-              smtpHost: partial.smtpHost,
-              smtpPort: partial.smtpPort,
-              authCode: partial.authCode,
-              sessionCookies: p.sessionCookies,
-              sessionMeta: p.sessionMeta,
-            })
-          }
-        } catch {
-          /* seal optional */
-        }
-        // Client-sealed: no server-side poll (cannot decrypt). Plain upload only if seal fails.
+        // Cloud import: server-decryptable credentials for SyncWorker poll.
+        // Do NOT sealForCloud (client-sealed cannot be polled server-side).
         const p = partial as Partial<MailAccount> & {
           sessionCookies?: MailAccount['sessionCookies']
           sessionMeta?: MailAccount['sessionMeta']
           apiKey?: string
         }
+        const syncEnabled = Boolean(opts.syncEnabled)
         const body = toCreateBody(
           {
             ...partial,
@@ -782,10 +742,7 @@ export const useAccountsStore = defineStore('accounts', () => {
             sessionCookies: p.sessionCookies,
             sessionMeta: p.sessionMeta,
           },
-          {
-            syncEnabled: clientSealed ? false : opts.syncEnabled,
-            clientSealed: clientSealed || undefined,
-          },
+          { syncEnabled },
         )
         if (checked?.status === 'error') {
           // still allow save; mark after
@@ -801,8 +758,7 @@ export const useAccountsStore = defineStore('accounts', () => {
             /* ignore status patch */
           }
         }
-        // Dual-write local vault: client-sealed cloud rows cannot be fetched
-        // without browser secrets after reload.
+        // Dual-write local vault so browser keeps secrets + serverId link
         const localIdx = localAccounts.value.findIndex(
           (a) => a.email.toLowerCase() === emailKey,
         )
@@ -814,7 +770,8 @@ export const useAccountsStore = defineStore('accounts', () => {
             id: prev.id,
             storage: 'local',
             serverId: row.id,
-            clientSealed: Boolean(clientSealed),
+            clientSealed: false,
+            syncEnabled,
             status: checked?.status ?? prev.status,
             lastError: checked?.lastError,
             groupId: partial.groupId || prev.groupId || gid,
@@ -823,7 +780,8 @@ export const useAccountsStore = defineStore('accounts', () => {
         } else {
           const loc = createAccountFromParsed(partial, { groupId: gid })
           loc.serverId = row.id
-          loc.clientSealed = Boolean(clientSealed)
+          loc.clientSealed = false
+          loc.syncEnabled = syncEnabled
           if (checked) {
             loc.status = checked.status
             loc.lastError = checked.lastError
@@ -842,7 +800,8 @@ export const useAccountsStore = defineStore('accounts', () => {
           rawLine: partial.rawLine || partial.email,
           groupId: partial.groupId || gid,
           lastError: checked?.lastError,
-          clientSealed: Boolean(clientSealed),
+          clientSealed: false,
+          syncEnabled,
         } as MailAccount)
         mapped.groupId = partial.groupId || gid
         if (checked) {

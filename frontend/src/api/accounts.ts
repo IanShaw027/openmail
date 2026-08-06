@@ -322,7 +322,8 @@ export function toCreateBody(
   opts: { syncEnabled?: boolean; clientSealed?: string | null } = {},
 ): AccountCreateBody {
   const provider = partial.type === 'unknown' ? 'cookie' : partial.type
-  // Prefer client-sealed: no plaintext secrets leave browser in a form server can use
+  // Optional client-sealed backup only (explicit advanced path). Poll path must
+  // send server-decryptable fields so SyncWorker can fetch — never seal by default.
   if (opts.clientSealed) {
     return {
       email: partial.email,

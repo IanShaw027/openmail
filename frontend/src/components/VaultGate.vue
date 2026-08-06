@@ -5,6 +5,7 @@ import { useVaultStore } from '@/stores/vault'
 import { useAccountsStore } from '@/stores/accounts'
 import { useTwoFaStore } from '@/stores/twofa'
 import { useMailCacheStore } from '@/stores/mailCache'
+import { useCloudSyncStore } from '@/stores/cloudSync'
 import { VaultCryptoError } from '@/utils/cryptoVault'
 import { copyText } from '@/utils/clipboard'
 import { useToast } from '@/composables/useToast'
@@ -14,6 +15,7 @@ const vault = useVaultStore()
 const accounts = useAccountsStore()
 const twofa = useTwoFaStore()
 const mailCache = useMailCacheStore()
+const cloudSync = useCloudSyncStore()
 const { flashMsg } = useToast()
 
 const password = ref('')
@@ -39,6 +41,8 @@ async function hydrateStores() {
   await twofa.hydrateFromVault()
   await mailCache.hydrateFromVault()
   void accounts.loadServerAccounts()
+  void cloudSync.pullCloudMailDelta()
+  cloudSync.startCloudDeltaPolling()
 }
 
 async function onCreate() {

@@ -494,11 +494,13 @@ export default {
     tableDeselect: 'Deselect',
     tableBatchFetch: 'Batch fetch',
     uploadCloud: 'Upload to cloud poll',
-    uploadCloudHint: 'Upload checked local accounts to cloud with server hourly poll; mail still reads local cache first',
+    uploadCloudHint:
+      'Upload checked local accounts so the server can decrypt credentials (master-key) and poll mail hourly. Local vault keeps secrets; list still prefers local cache and merges cloud mail later via sync.',
     uploadCloudResult: 'Cloud upload: {ok} ok · {fail} failed',
     needLocalForCloud: 'Select local accounts to upload',
     storageLocalHint: 'Local: credentials and mail cache stay in this browser',
-    storageCloudHint: 'Cloud: server stores encrypted credentials and polls; list still prefers local cache',
+    storageCloudHint:
+      'Cloud: server master-key encrypts credentials and polls; list still prefers local cache, then merges from cloud sync',
     tableDelete: 'Delete selected',
     oauthPasswordDisabledHint: 'OAuth cannot change mailbox password here; Microsoft password change invalidates refresh_token — re-import tokens.',
     exportCredentials: 'Export credentials TXT',
@@ -532,7 +534,8 @@ export default {
     importTargetLocal: 'This browser (default, local mail cache)',
     importTargetCloud: 'Cloud (this device, for server poll)',
     importCloudPoll: 'Enable server hourly poll',
-    importCloudPollHint: 'Cloud accounts are synced hourly by the server; viewing still prefers local cache. Or import local then batch “Upload to cloud poll”.',
+    importCloudPollHint:
+      'Server stores decryptable credentials and polls hourly when checked. Local vault still keeps a copy of secrets; viewing prefers local cache, then merges cloud mail via sync. Or import local then batch “Upload to cloud poll”.',
     editFailedRow: 'Edit',
     editPassword: 'Password / auth code',
     quotaLocalBar: 'Local accounts {used}/{max}',

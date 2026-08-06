@@ -5,6 +5,38 @@ import { ref, watch } from 'vue'
 import type { MailMessage } from '@/api/accounts'
 import { useVaultStore } from '@/stores/vault'
 import { useSettingsStore } from '@/stores/settings'
+import {
+  computeMailStableId,
+  isWeakStableId,
+  type MailIdentityInput,
+} from '@/utils/mailStableId'
+
+/**
+ * Delta row from GET /api/sync/delta (or equivalent).
+ * Merge by (email, folder, stable_id); LWW updated_at; prefer body if other empty.
+ */
+export type DeltaMailItem = {
+  email: string
+  folder?: string | null
+  stable_id?: string | null
+  id?: string | null
+  subject?: string | null
+  from?: string | null
+  from_addr?: string | null
+  to?: string | string[] | null
+  to_addrs?: string[] | null
+  date?: string | null
+  preview?: string | null
+  body_preview?: string | null
+  verification_code?: string | null
+  body_text?: string | null
+  body_html?: string | null
+  deleted?: boolean | null
+  updated_at?: string | null
+  message_id?: string | null
+  provider_id?: string | null
+  uidvalidity?: number | null
+}
 
 /**
  * Lightweight client-side OTP re-parse (aligned with backend heuristics).
@@ -593,9 +625,16 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     return `${f}|${subj}|${from}|${bucket}`
   }
 
+  /** Folder-scoped stable_id key for soft merge (aligns with server UNIQUE). */
+  function stableDedupeKey(m: MailMessage): string {
+    const f = normalizeFolder(m.folder || 'inbox')
+    return `${f}::${computeMailStableId(m as MailIdentityInput)}`
+  }
+
   /**
-   * Collapse duplicates by cache key; optional soft fingerprint for same-second
-   * re-fetches with different ids. Newest-first sort.
+   * Collapse duplicates by cache key; soft merge by strong content fingerprint,
+   * then by stable_id when fingerprint is weak/null (same rules as cloud delta).
+   * Newest-first sort.
    */
   function dedupeAndSortMessages(list: MailMessage[]): MailMessage[] {
     const byKey = new Map<string, MailMessage>()
@@ -621,7 +660,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       byKey.set(k, preferRicherMessage(prev, withFolder))
     }
 
-    // Soft pass: only merge when fingerprint is strong (non-null)
+    // Soft pass 1: only merge when content fingerprint is strong (non-null)
     const byFp = new Map<string, MailMessage>()
     const noFp: MailMessage[] = []
     for (const m of byKey.values()) {
@@ -638,8 +677,40 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       byFp.set(fp, preferRicherMessage(prev, m))
     }
 
+    // Soft pass 2: stable_id merge (provider/message-id strong; weak when no better key).
+    // Prefer stable_id when content fingerprint was weak so local fetch + cloud delta
+    // share the same identity rules without collapsing unrelated bulk mail.
+    const bySid = new Map<string, MailMessage>()
+    const leftover: MailMessage[] = []
+    for (const m of [...byFp.values(), ...noFp]) {
+      const sid = computeMailStableId(m as MailIdentityInput)
+      // Skip ultra-weak empty fingerprints (no from/date/subject/size material)
+      if (!sid || (isWeakStableId(sid) && !contentFingerprint(m) && approxIdentityEmpty(m))) {
+        leftover.push(m)
+        continue
+      }
+      const k = `${normalizeFolder(m.folder || 'inbox')}::${sid}`
+      const prev = bySid.get(k)
+      if (!prev) {
+        bySid.set(k, m)
+        continue
+      }
+      bySid.set(k, preferRicherMessage(prev, m))
+    }
+
     // Always newest-first so list + load-more (older appends visually at bottom) stay consistent
-    return [...byFp.values(), ...noFp].sort(compareMailDateDesc)
+    return [...bySid.values(), ...leftover].sort(compareMailDateDesc)
+  }
+
+  /** True when message has no useful identity material for weak stable_id. */
+  function approxIdentityEmpty(
+    m: Pick<MailMessage, 'subject' | 'from' | 'from_address' | 'date' | 'body_preview'>,
+  ): boolean {
+    const from = String(m.from_address || m.from || '').trim()
+    const subj = String(m.subject || '').trim()
+    const date = m.date == null || m.date === '' ? '' : String(m.date).trim()
+    const prev = String(m.body_preview || '').trim()
+    return !from && !subj && !date && !prev
   }
 
   function preferRicherMessage(a: MailMessage, b: MailMessage): MailMessage {
@@ -688,6 +759,21 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     }
   }
 
+  /**
+   * Find an existing map entry by cache key or stable_id (same folder).
+   * Used when soft identity matches but provider ids differ across paths.
+   */
+  function findByStableId(
+    map: Map<string, MailMessage>,
+    m: MailMessage,
+  ): { key: string; msg: MailMessage } | undefined {
+    const want = stableDedupeKey(m)
+    for (const [k, existing] of map) {
+      if (stableDedupeKey(existing) === want) return { key: k, msg: existing }
+    }
+    return undefined
+  }
+
   function merge(email: string, messages: MailMessage[], retentionDays?: number) {
     const key = email.toLowerCase()
     const prev = byEmail.value[key] || []
@@ -734,7 +820,15 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       if (!k) continue
       // Also absorb a legacy same-folder same-id entry when re-keying with uv
       const legacyKey = `${folder}::${String(m.id).trim()}`
-      const old = map.get(k) || (uidvalidity != null ? map.get(legacyKey) : undefined)
+      let old = map.get(k) || (uidvalidity != null ? map.get(legacyKey) : undefined)
+      // Soft match by stable_id when hard key misses (cloud / re-fetch id drift)
+      if (!old) {
+        const hit = findByStableId(map, withFolder)
+        if (hit) {
+          old = hit.msg
+          map.delete(hit.key)
+        }
+      }
       if (old && legacyKey !== k) map.delete(legacyKey)
       if (old) {
         map.set(k, preferRicherMessage(old, withFolder))
@@ -747,6 +841,285 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       merged = pruneByRetention(merged, retentionDays)
     }
     byEmail.value = { ...byEmail.value, [key]: capMailboxList(merged) }
+  }
+
+  function parseUpdatedAtMs(v?: string | null): number | null {
+    if (v == null || v === '') return null
+    const t = Date.parse(String(v))
+    return Number.isFinite(t) ? t : null
+  }
+
+  /** Map delta DTO → MailMessage for cache storage. */
+  function deltaItemToMessage(item: DeltaMailItem, folder: string): MailMessage {
+    const sid = String(item.stable_id || '').trim()
+    const providerRaw = String(item.provider_id || '').trim()
+    let id = String(item.id || '').trim()
+    if (!id && sid.startsWith('p:')) id = sid.slice(2)
+    if (!id && providerRaw) id = providerRaw
+    if (!id && sid) id = sid
+    if (!id) id = computeMailStableId(item as MailIdentityInput)
+
+    const from = item.from_addr || item.from || undefined
+    const toArr = item.to_addrs || (Array.isArray(item.to) ? item.to : null)
+    const to =
+      toArr && toArr.length
+        ? toArr.join(', ')
+        : typeof item.to === 'string'
+          ? item.to
+          : undefined
+    const preview = item.preview || item.body_preview || undefined
+
+    return {
+      id,
+      subject: item.subject || undefined,
+      from,
+      from_address: item.from_addr || item.from || undefined,
+      to,
+      date: item.date ?? null,
+      body_preview: preview,
+      body_text: item.body_text || undefined,
+      body_html: item.body_html || undefined,
+      folder,
+      verification_code:
+        item.verification_code != null && String(item.verification_code).trim() !== ''
+          ? String(item.verification_code)
+          : item.verification_code === null
+            ? null
+            : undefined,
+      ...(item.uidvalidity != null && Number.isFinite(Number(item.uidvalidity))
+        ? { uidvalidity: Number(item.uidvalidity) }
+        : {}),
+    }
+  }
+
+  /**
+   * Snapshot fields that affect UI/persist — used to skip no-op vault writes.
+   */
+  function messageSnapshot(m: MailMessage): string {
+    return JSON.stringify({
+      id: m.id,
+      subject: m.subject || '',
+      from: m.from || m.from_address || '',
+      to: m.to || '',
+      date: m.date || '',
+      folder: normalizeFolder(m.folder),
+      body_preview: m.body_preview || '',
+      body_text: m.body_text || '',
+      body_html: m.body_html || '',
+      verification_code: m.verification_code ?? null,
+      uidvalidity: m.uidvalidity ?? null,
+    })
+  }
+
+  /**
+   * LWW merge of two messages when both carry updated_at; otherwise prefer richer.
+   * Always fill empty body fields from the other side.
+   */
+  function mergeDeltaPair(
+    local: MailMessage,
+    remote: MailMessage,
+    localUpdatedAt?: string | null,
+    remoteUpdatedAt?: string | null,
+  ): MailMessage {
+    const lu = parseUpdatedAtMs(localUpdatedAt)
+    const ru = parseUpdatedAtMs(remoteUpdatedAt)
+    let base: MailMessage
+    let other: MailMessage
+    if (lu != null && ru != null) {
+      // LWW by updated_at
+      if (ru >= lu) {
+        base = remote
+        other = local
+      } else {
+        base = local
+        other = remote
+      }
+    } else if (ru != null && lu == null) {
+      base = remote
+      other = local
+    } else {
+      // No clocks: prefer richer (existing local-fetch semantics)
+      return preferRicherMessage(local, remote)
+    }
+    // Prefer body if the other side is empty
+    return {
+      ...other,
+      ...base,
+      folder: normalizeFolder(base.folder || other.folder || 'inbox'),
+      uidvalidity: base.uidvalidity ?? other.uidvalidity,
+      body_html: base.body_html || other.body_html,
+      body_text: base.body_text || other.body_text,
+      body_preview: base.body_preview || other.body_preview,
+      verification_code: (() => {
+        const b = base.verification_code
+        if (b != null && String(b).trim() !== '') return b
+        const o = other.verification_code
+        if (o != null && String(o).trim() !== '') return o
+        if (Object.prototype.hasOwnProperty.call(base, 'verification_code')) {
+          return base.verification_code ?? null
+        }
+        return other.verification_code
+      })(),
+      subject: base.subject || other.subject,
+      from: base.from || other.from,
+      from_address: base.from_address || other.from_address,
+      to: base.to || other.to,
+      date: base.date || other.date,
+    }
+  }
+
+  /**
+   * Merge cloud (or future remote) delta rows into mailCache.
+   * - Upsert by (email, folder, stable_id) or existing cache key
+   * - LWW by updated_at when present
+   * - Prefer body when the other side is empty
+   * - deleted → remove from cache
+   * - Skip write if nothing changed (avoid vault churn)
+   *
+   * @returns number of mailboxes that changed
+   */
+  function mergeDeltaMails(items: DeltaMailItem[]): number {
+    if (!items?.length) return 0
+
+    // Track updated_at per cache key so LWW works across delta pages
+    const updatedAtByKey = new Map<string, string>()
+
+    // Group by email for fewer byEmail copies
+    const byMailbox = new Map<string, DeltaMailItem[]>()
+    for (const item of items) {
+      const email = String(item.email || '')
+        .toLowerCase()
+        .trim()
+      if (!email) continue
+      const arr = byMailbox.get(email) || []
+      arr.push(item)
+      byMailbox.set(email, arr)
+    }
+
+    let mailboxesChanged = 0
+    const nextRoot: CacheMap = { ...byEmail.value }
+
+    for (const [email, batch] of byMailbox) {
+      const prev = nextRoot[email] || []
+      const map = new Map<string, MailMessage>()
+      // secondary index: folder::stable_id → cache key
+      const sidIndex = new Map<string, string>()
+
+      for (const m of prev) {
+        const k = messageCacheKey(m)
+        if (!k) continue
+        map.set(k, m)
+        sidIndex.set(stableDedupeKey(m), k)
+      }
+
+      let mailboxDirty = false
+
+      for (const item of batch) {
+        const folder = normalizeFolder(item.folder || 'inbox')
+        const identity: MailIdentityInput = {
+          id: item.id,
+          provider_id: item.provider_id,
+          message_id: item.message_id,
+          subject: item.subject,
+          from: item.from,
+          from_addr: item.from_addr,
+          date: item.date,
+          preview: item.preview || item.body_preview,
+          body_text: item.body_text,
+          body_html: item.body_html,
+          folder,
+          uidvalidity: item.uidvalidity,
+        }
+        const sid =
+          String(item.stable_id || '').trim() || computeMailStableId(identity)
+        const sidKey = `${folder}::${sid}`
+
+        if (item.deleted) {
+          // Remove by stable_id index or by id cache key
+          const hitKey = sidIndex.get(sidKey)
+          if (hitKey && map.has(hitKey)) {
+            map.delete(hitKey)
+            sidIndex.delete(sidKey)
+            mailboxDirty = true
+          } else {
+            // Fallback: match any row with same stable_id
+            for (const [k, m] of [...map.entries()]) {
+              if (stableDedupeKey(m) === sidKey) {
+                map.delete(k)
+                sidIndex.delete(sidKey)
+                mailboxDirty = true
+              }
+            }
+          }
+          continue
+        }
+
+        const remote = deltaItemToMessage({ ...item, stable_id: sid }, folder)
+        // Ensure id present for cache key
+        if (!remote.id) remote.id = sid
+
+        const cacheKey = messageCacheKey(remote)
+        if (!cacheKey) continue
+
+        const existingKey: string | undefined = map.has(cacheKey)
+          ? cacheKey
+          : sidIndex.get(sidKey)
+        const existing = existingKey ? map.get(existingKey) : undefined
+
+        if (!existing || !existingKey) {
+          map.set(cacheKey, remote)
+          sidIndex.set(sidKey, cacheKey)
+          if (item.updated_at) updatedAtByKey.set(`${email}::${cacheKey}`, item.updated_at)
+          mailboxDirty = true
+          continue
+        }
+
+        const localUa = updatedAtByKey.get(`${email}::${existingKey}`)
+        const merged = mergeDeltaPair(existing, remote, localUa, item.updated_at)
+        // Re-key if cache key changed (e.g. uv upgrade)
+        if (existingKey !== cacheKey) {
+          map.delete(existingKey)
+        }
+        const before = messageSnapshot(existing)
+        const after = messageSnapshot(merged)
+        if (before !== after) {
+          map.set(cacheKey, merged)
+          sidIndex.set(sidKey, cacheKey)
+          if (item.updated_at) updatedAtByKey.set(`${email}::${cacheKey}`, item.updated_at)
+          mailboxDirty = true
+        }
+      }
+
+      if (!mailboxDirty) continue
+
+      const mergedList = capMailboxList(dedupeAndSortMessages([...map.values()]))
+      // Final no-op guard vs previous list
+      const prevSnap = prev.map(messageSnapshot).join('\n')
+      const nextSnap = mergedList.map(messageSnapshot).join('\n')
+      if (prevSnap === nextSnap) continue
+
+      if (!mergedList.length) {
+        delete nextRoot[email]
+      } else {
+        nextRoot[email] = mergedList
+      }
+      mailboxesChanged += 1
+    }
+
+    if (mailboxesChanged > 0) {
+      byEmail.value = nextRoot
+    }
+    return mailboxesChanged
+  }
+
+  /** Alias for delta merge (docs / other agents). */
+  function mergeRemoteMail(items: DeltaMailItem[]): number {
+    return mergeDeltaMails(items)
+  }
+
+  /** Alias: merge mail items from remote into local cache. */
+  function mergeMailItems(items: DeltaMailItem[]): number {
+    return mergeDeltaMails(items)
   }
 
   /**
@@ -1012,6 +1385,9 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     listFor,
     normalizeFolder,
     merge,
+    mergeDeltaMails,
+    mergeRemoteMail,
+    mergeMailItems,
     reparseCodes,
     newestUtcIso,
     oldestUtcIso,

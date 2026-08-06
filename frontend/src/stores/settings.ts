@@ -5,6 +5,7 @@ import { useMailCacheStore } from '@/stores/mailCache'
 import { setDisplayTheme, setDisplayTimeZone } from '@/utils/displayPrefs'
 import { applyTheme, bindSystemThemeListener, normalizeTheme, type ThemeMode } from '@/utils/theme'
 import { DEFAULT_TIMEZONE, normalizeTimeZone } from '@/utils/timezones'
+import { clearSyncAck, getSyncAck, setSyncAck } from '@/utils/syncAck'
 
 const KEY = 'openmail.userSettings'
 /** Cap map keys so CF temp churn cannot blow localStorage (origin ~5MB shared). */
@@ -427,6 +428,10 @@ export const useSettingsStore = defineStore('settings', () => {
     loadPublicConfig,
     remainingLocalSlots,
     remainingCloudSlots,
+    /** Cloud delta water-mark (localStorage openmail.syncAck.v1). */
+    getSyncAck,
+    setSyncAck,
+    clearSyncAck,
     persistNow,
     flushPersist,
   }

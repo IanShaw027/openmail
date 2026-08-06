@@ -222,3 +222,61 @@ class SyncRun(Base):
     fail_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     trigger: Mapped[str] = mapped_column(String(32), default="scheduled", nullable=False)
+
+
+class SyncCursor(Base):
+    """Per account×folder water-mark for server-side poll (time/uid/delta)."""
+
+    __tablename__ = "sync_cursors"
+    __table_args__ = (
+        UniqueConstraint("account_id", "folder", name="uq_sync_cursors_account_folder"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("cur_"))
+    account_id: Mapped[str] = mapped_column(
+        String(40), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    folder: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), default="time", nullable=False)
+    cursor_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class MailItem(Base):
+    """Server-stored mail for cloud poll + device delta sync."""
+
+    __tablename__ = "mail_items"
+    __table_args__ = (
+        UniqueConstraint("account_id", "folder", "stable_id", name="uq_mail_items_account_folder_sid"),
+        Index("ix_mail_items_account_updated", "account_id", "updated_at"),
+        Index("ix_mail_items_account_folder_received", "account_id", "folder", "received_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("mid_"))
+    account_id: Mapped[str] = mapped_column(
+        String(40), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    folder: Mapped[str] = mapped_column(String(32), nullable=False)
+    stable_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    from_addr: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    to_addrs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subject: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verification_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    body_text_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_html_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    has_attachments: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

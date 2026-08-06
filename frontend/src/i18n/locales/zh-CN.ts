@@ -491,11 +491,13 @@ export default {
     tableDeselect: '取消',
     tableBatchFetch: '批量取件',
     uploadCloud: '上传云端轮询',
-    uploadCloudHint: '将勾选的本机账号上传到云端并开启服务端轮询取件；邮件仍优先读本机缓存',
+    uploadCloudHint:
+      '将勾选的本机账号上传到云端：服务端用主密钥加密凭证并可按小时轮询取件。本机保险库仍保留密钥；列表优先本机缓存，之后通过云端同步合并邮件。',
     uploadCloudResult: '上传云端：成功 {ok} · 失败 {fail}',
     needLocalForCloud: '请勾选本机账号再上传云端',
     storageLocalHint: '本机：凭证与邮件缓存都在浏览器',
-    storageCloudHint: '云端：服务端加密存凭证并轮询；列表仍优先读本机缓存',
+    storageCloudHint:
+      '云端：服务端主密钥加密凭证并轮询；列表优先本机缓存，再经云端同步合并',
     tableDelete: '删除选中',
     oauthPasswordDisabledHint: 'OAuth（微软等）不支持在此改邮箱登录密码。改微软密码会使 refresh_token 失效，需重新导入 token。',
     exportCredentials: '导出凭证 TXT',
@@ -529,7 +531,8 @@ export default {
     importTargetLocal: '本机浏览器（默认，邮件缓存本地）',
     importTargetCloud: '云端（本设备，用于服务端轮询）',
     importCloudPoll: '开启服务端轮询收件',
-    importCloudPollHint: '云端账号由服务器按小时同步；日常查看仍优先本机缓存。也可导入到本机后在列表批量「上传云端轮询」。',
+    importCloudPollHint:
+      '勾选后服务端可解密凭证并按小时轮询收件。本机保险库仍保留密钥副本；日常查看优先本机缓存，再经云端同步合并。也可导入到本机后在列表批量「上传云端轮询」。',
     editFailedRow: '编辑',
     editPassword: '密码 / 授权码',
     quotaLocalBar: '本机账号 {used}/{max}',
