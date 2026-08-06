@@ -47,19 +47,40 @@ def _safe_err(msg: str | None) -> str:
     return redact_text(msg)
 
 
-def _try_file_lock() -> Any:
-    """Cross-process lock so multiple workers/replicas don't sync the same accounts.
+def _default_sync_lock_path() -> str:
+    """Prefer shared data volume so lock survives cwd differences.
 
-    Returns a held lock object, or None if lock unavailable / already held.
+    Order:
+    1. OPENMAIL_SYNC_LOCK env
+    2. /data/sync_worker.lock (compose volume)
+    3. ./data/sync_worker.lock under cwd
     """
     import os
     from pathlib import Path
 
-    path = Path(os.environ.get("OPENMAIL_SYNC_LOCK", "data/sync_worker.lock"))
+    env = os.environ.get("OPENMAIL_SYNC_LOCK", "").strip()
+    if env:
+        return env
+    data_root = Path(os.environ.get("OPENMAIL_DATA_DIR", "/data"))
+    if data_root.is_dir() or str(data_root) == "/data":
+        return str(data_root / "sync_worker.lock")
+    return str(Path("data") / "sync_worker.lock")
+
+
+def _try_file_lock() -> Any:
+    """Cross-process lock so multiple workers/replicas don't sync the same accounts.
+
+    Returns a held lock object, or None if lock unavailable / already held.
+    Stale lock *files* are fine: flock is released when the holder process exits.
+    """
+    from pathlib import Path
+
+    path = Path(_default_sync_lock_path())
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fh = open(path, "a+", encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        logger.warning("SyncWorker: cannot open lock %s: %s", path, exc)
         return None
     try:
         import fcntl
@@ -67,15 +88,27 @@ def _try_file_lock() -> Any:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fh.seek(0)
         fh.truncate()
-        fh.write(f"pid={os.getpid()}\n")
+        fh.write(f"pid={__import__('os').getpid()}\npath={path}\n")
         fh.flush()
+        logger.info("SyncWorker: acquired lock %s", path)
         return fh
     except BlockingIOError:
+        # Read holder pid for diagnostics
+        try:
+            fh.seek(0)
+            holder = (fh.read() or "").strip().replace("\n", " ")
+        except Exception:
+            holder = "?"
         fh.close()
-        logger.info("SyncWorker: another process holds the lock; idle")
+        logger.info(
+            "SyncWorker: another process holds the lock (%s); idle. holder=%s",
+            path,
+            holder or "unknown",
+        )
         return None
-    except Exception:
+    except Exception as exc:
         # Windows or no fcntl — fall back to in-process only
+        logger.warning("SyncWorker: flock unavailable (%s); in-process only", exc)
         try:
             fh.close()
         except Exception:

@@ -79,6 +79,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         load_registry()
     except Exception:
         pass
+    # After master-key rotation: re-encrypt rows decryptable via FALLBACKS
+    try:
+        from app.db import SessionLocal
+        from app.services.crypto_migrate import migrate_reencrypt_all
+
+        db = SessionLocal()
+        try:
+            migrate_reencrypt_all(db)
+        finally:
+            db.close()
+    except Exception:
+        # Non-fatal: worker can still decrypt via fallbacks until migrate succeeds
+        pass
     # Background hourly sync (daemon thread); no-op if already running
     start_sync_worker()
     try:

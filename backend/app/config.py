@@ -20,6 +20,14 @@ class Settings(BaseSettings):
         validation_alias="OPENMAIL_MASTER_KEY",
         description="AES-256 key: base64 (32 bytes) or 64 hex chars",
     )
+    openmail_master_key_fallbacks: str = Field(
+        default="",
+        validation_alias="OPENMAIL_MASTER_KEY_FALLBACKS",
+        description=(
+            "Optional previous OPENMAIL_MASTER_KEY values (comma or newline separated). "
+            "Used only for decrypt after key rotation; encrypt always uses primary."
+        ),
+    )
     admin_password: str = Field(
         default="change-me-admin",
         validation_alias="ADMIN_PASSWORD",
