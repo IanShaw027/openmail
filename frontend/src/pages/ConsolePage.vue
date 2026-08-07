@@ -2952,6 +2952,19 @@ onUnmounted(() => {
 
     <!-- Right -->
     <section class="main-col">
+      <!-- Mobile: open left import drawer (desktop uses collapsed rail) -->
+      <div v-if="isNarrow" class="mobile-import-bar">
+        <button
+          type="button"
+          class="btn btn-primary btn-sm mobile-import-btn"
+          :aria-expanded="!importCollapsed"
+          @click="importCollapsed = false"
+        >
+          <span class="mobile-import-btn-icon" aria-hidden="true">＋</span>
+          {{ t('console.openImport') }}
+        </button>
+      </div>
+
       <div class="filter-bar glass">
         <input
           v-model="accounts.filterQuery"
@@ -5565,6 +5578,9 @@ th.col-act.sticky-act {
     display: none !important;
   }
 }
+.mobile-import-bar {
+  display: none;
+}
 .import-backdrop {
   display: none;
 }
@@ -5842,6 +5858,7 @@ th.col-act.sticky-act {
   }
   .console.import-open .sidebar {
     transform: translateX(0);
+    pointer-events: auto;
   }
   .console.import-collapsed .sidebar {
     display: flex !important;
@@ -5849,10 +5866,29 @@ th.col-act.sticky-act {
     pointer-events: none;
   }
 
+  .mobile-import-bar {
+    display: flex;
+    flex-shrink: 0;
+    width: 100%;
+  }
+  .mobile-import-btn {
+    width: 100%;
+    justify-content: center;
+    min-height: 44px;
+    font-weight: 600;
+    gap: 6px;
+  }
+  .mobile-import-btn-icon {
+    font-size: 16px;
+    line-height: 1;
+  }
+
   .import-rail,
   .splitter-v,
   .splitter-h,
-  .import-expand,
+  .import-expand {
+    display: none !important;
+  }
   .main-col {
     display: flex !important;
     flex-direction: column !important;

@@ -333,7 +333,7 @@ export default {
     retryFetch: 'Retry fetch',
     collapseImport: 'Collapse import',
     expandImport: 'Import accounts',
-    openImport: 'Import',
+    openImport: 'Import accounts',
     storageFilterAll: 'All locations',
     storageFilterLocal: 'Local only',
     storageFilterLinked: 'Local+cloud',

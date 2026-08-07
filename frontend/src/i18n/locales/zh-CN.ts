@@ -330,7 +330,7 @@ export default {
     retryFetch: '重试取件',
     collapseImport: '收起导入',
     expandImport: '导入账号',
-    openImport: '导入',
+    openImport: '导入邮箱',
     storageFilterAll: '全部位置',
     storageFilterLocal: '仅本机',
     storageFilterLinked: '本机+云端',
