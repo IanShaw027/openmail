@@ -174,6 +174,16 @@ onUnmounted(() => {
   </div>
   <VaultGate v-else-if="!showApp" />
   <template v-else>
+    <div
+      v-if="vault.deviceStatus === 'pending'"
+      class="device-pending-banner"
+      role="status"
+    >
+      {{ t('vault.devicePendingBanner') }}
+      <button type="button" class="banner-refresh" @click="vault.refreshDeviceStatus()">
+        {{ t('vault.devicePendingRefresh') }}
+      </button>
+    </div>
     <AppShell>
       <RouterView />
     </AppShell>
@@ -194,5 +204,26 @@ onUnmounted(() => {
 .boot-mark {
   opacity: 0.7;
   font-size: 14px;
+}
+.device-pending-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  background: color-mix(in srgb, var(--warn, #b45309) 14%, var(--bg, #eef1f8));
+  color: var(--text, #1a2333);
+  font-size: 13px;
+  border-bottom: 1px solid color-mix(in srgb, var(--warn, #b45309) 35%, transparent);
+}
+.banner-refresh {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
 }
 </style>

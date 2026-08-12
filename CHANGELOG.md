@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Device admission is first-trust by default.** The first vault device that
+  registers with a server is trusted automatically; later devices land as
+  `pending` and cannot call privileged APIs until a trusted device approves
+  them. Set `OPENMAIL_DEVICE_ADMISSION=open` to restore the previous open
+  registration behaviour. Existing registry entries without a status are
+  treated as trusted on upgrade so multi-device installs are not locked out.
+
 ### Fixed
 
 - **Upgrade from a root-run install no longer crash-loops.** Images before this

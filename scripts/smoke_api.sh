@@ -86,8 +86,10 @@ REG_JSON="$(printf '{"public_id":"%s","secret_b64":"%s"}' "$PUBLIC_ID" "$SECRET_
 HTTP_CODE="$(curl -sS -m 10 -o "$BODY" -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" -d "$REG_JSON" \
   "${BASE_URL}/api/device/register" 2>/dev/null || echo 000)"
+DEVICE_STATUS=""
 if [[ "$HTTP_CODE" == "200" ]]; then
-  log_pass "device register (${PUBLIC_ID})"
+  DEVICE_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$BODY" 2>/dev/null || true)"
+  log_pass "device register (${PUBLIC_ID} status=${DEVICE_STATUS:-?})"
 elif [[ "$HTTP_CODE" == "503" ]]; then
   log_skip "device register" "master key not configured (HTTP 503) — set OPENMAIL_MASTER_KEY"
 else
@@ -96,7 +98,12 @@ fi
 
 # ── 4. HMAC-signed GET /api/accounts (path-only form is valid for GET) ──
 # Signed message: {ts}.{METHOD}.{path}
-if [[ "$PUBLIC_ID" == vk_* ]]; then
+# Under first_trust, a throwaway device is only trusted when the registry was
+# empty; against a populated install it lands pending and must not be treated
+# as a smoke failure of HMAC itself.
+if [[ "$PUBLIC_ID" == vk_* && "$DEVICE_STATUS" == "pending" ]]; then
+  log_skip "signed GET /api/accounts" "device pending approval (first_trust; registry already has a trusted device)"
+elif [[ "$PUBLIC_ID" == vk_* ]]; then
   TS="$(date +%s)"
   ACC_PATH="/api/accounts"
   MSG="${TS}.GET.${ACC_PATH}"

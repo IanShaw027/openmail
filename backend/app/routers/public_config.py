@@ -74,6 +74,7 @@ def public_config(
     return {
         "ok": True,
         "auth_ui_enabled": settings.auth_ui_enabled,
+        "device_admission": settings.device_admission,
         "fetch_concurrency": settings.fetch_concurrency,
         "fetch_lookback_days": settings.fetch_default_lookback_days,
         "mail_retention_days": settings.mail_retention_days,

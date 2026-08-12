@@ -42,10 +42,17 @@ logger = logging.getLogger("openmail.device_auth")
 
 _registry: dict[str, str] = {}
 _secrets: dict[str, bytes] = {}
+# public_id → "trusted" | "pending". Missing on disk means trusted (upgrade path).
+_status: dict[str, str] = {}
+_created_at: dict[str, float] = {}
 _lock = Lock()
 _loaded = False
 
 _MAX_SKEW_SEC = 300
+STATUS_TRUSTED = "trusted"
+STATUS_PENDING = "pending"
+_ADMISSION_OPEN = "open"
+_ADMISSION_FIRST_TRUST = "first_trust"
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -75,6 +82,22 @@ def _b64decode_secret(raw: str) -> bytes:
         return base64.b64decode(text + pad)
 
 
+def _admission_mode() -> str:
+    try:
+        return get_settings().device_admission
+    except Exception:
+        return _ADMISSION_FIRST_TRUST
+
+
+def _normalize_status(raw: object) -> str:
+    s = str(raw or "").strip().lower()
+    if s == STATUS_PENDING:
+        return STATUS_PENDING
+    # Missing / unknown / legacy → trusted so upgrades do not lock out
+    # devices that were already using the instance under open registration.
+    return STATUS_TRUSTED
+
+
 def _read_registry_file_unlocked(*, strict: bool = False) -> None:
     """Merge the current on-disk registry into this worker's cache."""
     path = _registry_path()
@@ -96,6 +119,11 @@ def _read_registry_file_unlocked(*, strict: bool = False) -> None:
                 continue
             _secrets[pid] = secret
             _registry[pid] = _sha256_hex(secret)
+            _status[pid] = _normalize_status(ent.get("status"))
+            try:
+                _created_at[pid] = float(ent.get("created_at") or 0) or time.time()
+            except (TypeError, ValueError):
+                _created_at[pid] = time.time()
     except Exception as exc:
         logger.exception("failed to load device registry")
         if strict:
@@ -131,7 +159,7 @@ def _persist_unlocked() -> None:
     path = _registry_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        entries: list[dict[str, str]] = []
+        entries: list[dict[str, object]] = []
         for pid, secret in _secrets.items():
             secret_b64 = base64.urlsafe_b64encode(secret).decode("ascii").rstrip("=")
             try:
@@ -144,9 +172,11 @@ def _persist_unlocked() -> None:
                     "public_id": pid,
                     "secret_enc": enc,
                     "hash": _registry.get(pid) or _sha256_hex(secret),
+                    "status": _status.get(pid) or STATUS_TRUSTED,
+                    "created_at": _created_at.get(pid) or time.time(),
                 }
             )
-        payload = {"v": 1, "entries": entries}
+        payload = {"v": 2, "entries": entries}
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(path)
@@ -195,6 +225,103 @@ def is_registered(public_id: str | None) -> bool:
         return public_id in _secrets
 
 
+def device_status(public_id: str | None) -> str | None:
+    """Return trusted/pending for a registered device, or None if unknown."""
+    load_registry()
+    pid = (public_id or "").strip()
+    if not pid:
+        return None
+    with _lock:
+        if pid not in _secrets:
+            _read_registry_file_unlocked()
+        if pid not in _secrets:
+            return None
+        return _status.get(pid) or STATUS_TRUSTED
+
+
+def list_devices() -> list[dict[str, object]]:
+    """Return registry rows without secrets (caller must already be trusted)."""
+    load_registry()
+    with _lock:
+        _read_registry_file_unlocked()
+        rows = []
+        for pid in sorted(_secrets.keys(), key=lambda p: _created_at.get(p, 0)):
+            rows.append(
+                {
+                    "public_id": pid,
+                    "status": _status.get(pid) or STATUS_TRUSTED,
+                    "created_at": _created_at.get(pid) or 0,
+                }
+            )
+        return rows
+
+
+def _count_trusted_unlocked() -> int:
+    return sum(1 for pid in _secrets if (_status.get(pid) or STATUS_TRUSTED) == STATUS_TRUSTED)
+
+
+def approve_device(target_id: str, *, actor_id: str) -> str:
+    """Mark a pending device trusted. Actor must itself be trusted."""
+    load_registry()
+    target = (target_id or "").strip()
+    actor = (actor_id or "").strip()
+    if not target.startswith("vk_") or not actor.startswith("vk_"):
+        raise ValueError("vault device id required")
+    with _lock, _registry_file_lock():
+        _read_registry_file_unlocked(strict=True)
+        if (_status.get(actor) or STATUS_TRUSTED) != STATUS_TRUSTED or actor not in _secrets:
+            raise ValueError("only a trusted device can approve")
+        if target not in _secrets:
+            raise ValueError("device not found")
+        _status[target] = STATUS_TRUSTED
+        _persist_unlocked()
+    return STATUS_TRUSTED
+
+
+def reject_device(target_id: str, *, actor_id: str) -> None:
+    """Remove a pending registration. Actor must be trusted."""
+    load_registry()
+    target = (target_id or "").strip()
+    actor = (actor_id or "").strip()
+    with _lock, _registry_file_lock():
+        _read_registry_file_unlocked(strict=True)
+        if (_status.get(actor) or STATUS_TRUSTED) != STATUS_TRUSTED or actor not in _secrets:
+            raise ValueError("only a trusted device can reject")
+        if target not in _secrets:
+            raise ValueError("device not found")
+        if (_status.get(target) or STATUS_TRUSTED) != STATUS_PENDING:
+            raise ValueError("only pending devices can be rejected; revoke a trusted device instead")
+        if target == actor:
+            raise ValueError("cannot reject self")
+        _secrets.pop(target, None)
+        _registry.pop(target, None)
+        _status.pop(target, None)
+        _created_at.pop(target, None)
+        _persist_unlocked()
+
+
+def revoke_device(target_id: str, *, actor_id: str) -> None:
+    """Remove a trusted device. Refuses to remove the last trusted device."""
+    load_registry()
+    target = (target_id or "").strip()
+    actor = (actor_id or "").strip()
+    with _lock, _registry_file_lock():
+        _read_registry_file_unlocked(strict=True)
+        if (_status.get(actor) or STATUS_TRUSTED) != STATUS_TRUSTED or actor not in _secrets:
+            raise ValueError("only a trusted device can revoke")
+        if target not in _secrets:
+            raise ValueError("device not found")
+        if (_status.get(target) or STATUS_TRUSTED) == STATUS_PENDING:
+            raise ValueError("use reject for pending devices")
+        if _count_trusted_unlocked() <= 1 and (_status.get(target) or STATUS_TRUSTED) == STATUS_TRUSTED:
+            raise ValueError("cannot revoke the last trusted device")
+        _secrets.pop(target, None)
+        _registry.pop(target, None)
+        _status.pop(target, None)
+        _created_at.pop(target, None)
+        _persist_unlocked()
+
+
 def register_device_secret(public_id: str, secret_b64: str) -> str:
     """Register device. public_id MUST equal vk_ + sha256(raw_secret)[:40].
 
@@ -202,6 +329,13 @@ def register_device_secret(public_id: str, secret_b64: str) -> str:
     - Never alias a mismatched client public_id (prevents takeover of other devices).
     - If canonical id already registered with a *different* secret → reject.
     - Same secret re-register is idempotent (OK).
+
+    Admission (``OPENMAIL_DEVICE_ADMISSION``):
+    - ``open``: every successful register is trusted (previous behaviour).
+    - ``first_trust`` (default): the first device on an empty registry is
+      trusted; later devices land as ``pending`` until a trusted device
+      approves them. Existing on-disk entries without a status are treated
+      as trusted so upgrades do not brick multi-device installs.
     """
     load_registry()
     pid = (public_id or "").strip()
@@ -229,9 +363,23 @@ def register_device_secret(public_id: str, secret_b64: str) -> str:
         existing = _secrets.get(expected)
         if existing is not None and existing != secret:
             raise ValueError("device already registered")
+        if existing is not None:
+            # Idempotent re-register: keep the existing status.
+            return expected
+
+        mode = _admission_mode()
+        if mode == _ADMISSION_OPEN:
+            status = STATUS_TRUSTED
+        else:
+            # first_trust: empty registry → bootstrap; otherwise wait for approval.
+            status = STATUS_TRUSTED if _count_trusted_unlocked() == 0 else STATUS_PENDING
+
         _secrets[expected] = secret
         _registry[expected] = sh
+        _status[expected] = status
+        _created_at[expected] = time.time()
         _persist_unlocked()
+        logger.info("device registered %s status=%s admission=%s", expected[:16], status, mode)
     return expected
 
 
@@ -254,6 +402,7 @@ def verify_request(
     path: str,
     *,
     require_hmac: bool = True,
+    require_trusted: bool = True,
     body_sha256: str | None = None,
 ) -> tuple[bool, str | None]:
     """Verify device identity.
@@ -261,6 +410,8 @@ def verify_request(
     When require_hmac=True (default for cloud ops):
       - Only vk_* registered devices with valid HMAC are accepted.
       - Forgeable legacy dev_* IDs are rejected.
+      - When require_trusted=True (default), pending devices are rejected so
+        first-trust admission actually gates privileged APIs.
       - Signed message is ``{ts}.{METHOD}.{path}.{body_sha256}`` when
         ``body_sha256`` is provided (from X-Device-Body-Sha256 after server
         match against raw body bytes).
@@ -287,6 +438,7 @@ def verify_request(
         if secret is None:
             _read_registry_file_unlocked()
             secret = _secrets.get(pid)
+        status = _status.get(pid) or STATUS_TRUSTED if secret is not None else None
 
     if secret is None:
         return False, "device not registered; POST /api/device/register"
@@ -323,6 +475,9 @@ def verify_request(
     sig = signature.strip()
     if not hmac.compare_digest(expected, sig.lower()) and not hmac.compare_digest(expected, sig):
         return False, "invalid device signature"
+
+    if require_trusted and status == STATUS_PENDING:
+        return False, "device pending approval from a trusted device"
     return True, None
 
 
@@ -334,6 +489,7 @@ def require_device(
     method: str,
     path: str,
     require_hmac: bool = True,
+    require_trusted: bool = True,
     body_sha256: str | None = None,
 ) -> str:
     """Return device id or raise ValueError with message."""
@@ -344,6 +500,7 @@ def require_device(
         method=method,
         path=path,
         require_hmac=require_hmac,
+        require_trusted=require_trusted,
         body_sha256=body_sha256,
     )
     if not ok:

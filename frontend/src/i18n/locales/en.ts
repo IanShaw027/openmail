@@ -83,6 +83,26 @@ export default {
     securityTitle: 'Security & vault',
     securityHint:
       'Local accounts, 2FA, and mail cache use AES-256-GCM. Cloud credentials are client-sealed so admins cannot read plaintext.',
+    devicesTitle: 'Trusted devices',
+    devicesHint:
+      'The first vault that registers with this server is trusted automatically. Later devices wait here until you approve them — cloud sync and server APIs stay blocked until then.',
+    devicesRefresh: 'Refresh device list',
+    devicesEmpty: 'No other devices registered yet.',
+    devicePendingBanner:
+      'This device is waiting for approval from a trusted device. Open Settings on a trusted device to approve it.',
+    devicePendingRefresh: 'Check again',
+    deviceStatusTrusted: 'Trusted',
+    deviceStatusPending: 'Pending',
+    deviceThisDevice: 'This device',
+    deviceApprove: 'Approve',
+    deviceReject: 'Reject',
+    deviceRevoke: 'Revoke',
+    deviceApproveConfirm: 'Approve this device to use cloud APIs on this server?',
+    deviceRejectConfirm: 'Reject and remove this pending device?',
+    deviceRevokeConfirm: 'Revoke this trusted device? It will need approval again to return.',
+    deviceApproved: 'Device approved',
+    deviceRejected: 'Device rejected',
+    deviceRevoked: 'Device revoked',
     keysGuideTitle: 'Vault password vs recovery key',
     enableRecovery: 'Recovery key',
     enableRecoveryHint:

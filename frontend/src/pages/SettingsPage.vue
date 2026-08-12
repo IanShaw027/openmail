@@ -22,6 +22,65 @@ const twofa = useTwoFaStore()
 const mailCache = useMailCacheStore()
 const { flashMsg } = useToast()
 
+type DeviceRow = { public_id: string; status: string; created_at?: number }
+const devices = ref<DeviceRow[]>([])
+const devicesBusy = ref(false)
+const devicesErr = ref('')
+
+const selfDeviceId = computed(() => {
+  const hex = vault.devicePublicId
+  return hex ? `vk_${hex.slice(0, 40)}` : ''
+})
+
+async function loadDevices() {
+  if (vault.deviceStatus === 'pending') {
+    devices.value = []
+    return
+  }
+  devicesBusy.value = true
+  devicesErr.value = ''
+  try {
+    devices.value = await vault.listDevices()
+  } catch (e) {
+    devicesErr.value = e instanceof Error ? e.message : String(e)
+    devices.value = []
+  } finally {
+    devicesBusy.value = false
+  }
+}
+
+async function onApproveDevice(pid: string) {
+  try {
+    await vault.approveDevice(pid)
+    flashMsg(t('vault.deviceApproved'))
+    await loadDevices()
+  } catch (e) {
+    flashMsg(e instanceof Error ? e.message : String(e), 'danger')
+  }
+}
+
+async function onRejectDevice(pid: string) {
+  if (!window.confirm(t('vault.deviceRejectConfirm'))) return
+  try {
+    await vault.rejectDevice(pid)
+    flashMsg(t('vault.deviceRejected'))
+    await loadDevices()
+  } catch (e) {
+    flashMsg(e instanceof Error ? e.message : String(e), 'danger')
+  }
+}
+
+async function onRevokeDevice(pid: string) {
+  if (!window.confirm(t('vault.deviceRevokeConfirm'))) return
+  try {
+    await vault.revokeDevice(pid)
+    flashMsg(t('vault.deviceRevoked'))
+    await loadDevices()
+  } catch (e) {
+    flashMsg(e instanceof Error ? e.message : String(e), 'danger')
+  }
+}
+
 const isZh = computed(() => String(locale.value).toLowerCase().startsWith('zh'))
 
 const timeZoneOptions = computed<UiSelectOption[]>(() =>
@@ -213,6 +272,7 @@ onMounted(() => {
   // only when key was never customized? Keep stored value as-is.
   lockMin.value = vault.lockMinutes
   void loadConfig()
+  void loadDevices()
 })
 </script>
 
@@ -301,6 +361,68 @@ onMounted(() => {
             {{ t('vault.lockNow') }}
           </button>
         </div>
+
+        <div class="field" style="margin-top: 18px">
+          <label class="label">{{ t('vault.devicesTitle') }}</label>
+          <p class="hint">{{ t('vault.devicesHint') }}</p>
+          <p v-if="vault.deviceStatus === 'pending'" class="hint" style="color: var(--warn, #b45309)">
+            {{ t('vault.devicePendingBanner') }}
+          </p>
+          <template v-else>
+            <div class="btn-row" style="margin-bottom: 8px">
+              <button
+                type="button"
+                class="btn btn-outline btn-sm"
+                :disabled="devicesBusy"
+                @click="loadDevices"
+              >
+                {{ t('vault.devicesRefresh') }}
+              </button>
+            </div>
+            <p v-if="devicesErr" class="hint" style="color: var(--danger)">{{ devicesErr }}</p>
+            <ul v-if="devices.length" class="device-list">
+              <li v-for="d in devices" :key="d.public_id" class="device-row">
+                <div class="device-meta">
+                  <code class="device-id">{{ d.public_id.slice(0, 18) }}…</code>
+                  <span class="device-status" :data-status="d.status">{{
+                    d.status === 'pending' ? t('vault.deviceStatusPending') : t('vault.deviceStatusTrusted')
+                  }}</span>
+                  <span v-if="d.public_id === selfDeviceId" class="device-self">{{
+                    t('vault.deviceThisDevice')
+                  }}</span>
+                </div>
+                <div class="btn-row">
+                  <button
+                    v-if="d.status === 'pending'"
+                    type="button"
+                    class="btn btn-primary btn-sm"
+                    @click="onApproveDevice(d.public_id)"
+                  >
+                    {{ t('vault.deviceApprove') }}
+                  </button>
+                  <button
+                    v-if="d.status === 'pending'"
+                    type="button"
+                    class="btn btn-ghost btn-sm"
+                    @click="onRejectDevice(d.public_id)"
+                  >
+                    {{ t('vault.deviceReject') }}
+                  </button>
+                  <button
+                    v-if="d.status === 'trusted' && d.public_id !== selfDeviceId"
+                    type="button"
+                    class="btn btn-ghost btn-sm"
+                    @click="onRevokeDevice(d.public_id)"
+                  >
+                    {{ t('vault.deviceRevoke') }}
+                  </button>
+                </div>
+              </li>
+            </ul>
+            <p v-else-if="!devicesBusy" class="hint">{{ t('vault.devicesEmpty') }}</p>
+          </template>
+        </div>
+
         <div class="field" style="margin-top: 14px">
           <p class="hint">
             {{ vault.hasRecovery ? t('vault.hasRecoveryYes') : t('vault.hasRecoveryNo') }}
@@ -562,5 +684,47 @@ onMounted(() => {
 }
 .quota .ok {
   color: var(--success);
+}
+.device-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.device-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.device-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.device-id {
+  font-size: 12px;
+  word-break: break-all;
+}
+.device-status[data-status='pending'] {
+  color: var(--warn, #b45309);
+  font-size: 12px;
+  font-weight: 600;
+}
+.device-status[data-status='trusted'] {
+  color: var(--success, #15803d);
+  font-size: 12px;
+  font-weight: 600;
+}
+.device-self {
+  font-size: 11px;
+  color: var(--muted);
 }
 </style>

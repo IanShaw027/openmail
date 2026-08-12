@@ -100,3 +100,37 @@ async def device_id_quota(
         x_device_sign=x_device_sign,
         x_device_body_sha256=x_device_body_sha256,
     )
+
+
+async def device_id_any(
+    request: Request,
+    x_device_id: str | None = Header(default=None, alias="X-Device-Id"),
+    x_device_ts: str | None = Header(default=None, alias="X-Device-Ts"),
+    x_device_sign: str | None = Header(default=None, alias="X-Device-Sign"),
+    x_device_body_sha256: str | None = Header(default=None, alias="X-Device-Body-Sha256"),
+) -> str:
+    """Registered vault device with valid HMAC — trusted or still pending.
+
+    Used by ``GET /api/device/me`` so a waiting device can learn its status
+    without being able to call privileged APIs.
+    """
+    try:
+        body_sha256 = await _body_sha256_for_request(request, x_device_body_sha256)
+        path = request.url.path
+        if request.url.query:
+            path = f"{path}?{request.url.query}"
+        return _require_device(
+            public_id=x_device_id,
+            ts=x_device_ts,
+            signature=x_device_sign,
+            method=request.method,
+            path=path,
+            require_hmac=True,
+            require_trusted=False,
+            body_sha256=body_sha256,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+        ) from e

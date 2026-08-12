@@ -451,11 +451,20 @@ export const useVaultStore = defineStore('vault', () => {
     pendingRecoveryKey.value = null
   }
 
+  /** Admission status from the server after register /me. */
+  const deviceStatus = ref<'trusted' | 'pending' | 'unknown' | null>(null)
+  const deviceAdmission = ref<'first_trust' | 'open' | null>(null)
+
   async function registerDeviceWithServer(): Promise<void> {
     if (!deviceSecret.value || !devicePublicId.value) return
     try {
       const public_id = `vk_${devicePublicId.value.slice(0, 40)}`
-      const res = await apiRequest<{ ok?: boolean; public_id?: string }>('/api/device/register', {
+      const res = await apiRequest<{
+        ok?: boolean
+        public_id?: string
+        status?: string
+        admission?: string
+      }>('/api/device/register', {
         method: 'POST',
         body: {
           public_id,
@@ -470,11 +479,72 @@ export const useVaultStore = defineStore('vault', () => {
           setVaultDeviceIdentity(devicePublicId.value, deviceSecret.value)
         }
       }
+      if (res?.status === 'pending' || res?.status === 'trusted') {
+        deviceStatus.value = res.status
+      } else {
+        deviceStatus.value = 'unknown'
+      }
+      if (res?.admission === 'first_trust' || res?.admission === 'open') {
+        deviceAdmission.value = res.admission
+      }
     } catch (e) {
       console.warn('device register failed', e)
       // Cloud rows are owned by this identity. A transient registration
       // failure must never rotate the persisted secret and orphan those rows.
     }
+  }
+
+  async function refreshDeviceStatus(): Promise<'trusted' | 'pending' | 'unknown' | null> {
+    if (!unlocked.value || !deviceSecret.value) return null
+    try {
+      const res = await apiRequest<{ status?: string; admission?: string }>('/api/device/me', {
+        timeoutMs: 10_000,
+      })
+      if (res?.status === 'pending' || res?.status === 'trusted') {
+        deviceStatus.value = res.status
+      } else {
+        deviceStatus.value = 'unknown'
+      }
+      if (res?.admission === 'first_trust' || res?.admission === 'open') {
+        deviceAdmission.value = res.admission
+      }
+      return deviceStatus.value
+    } catch {
+      return deviceStatus.value
+    }
+  }
+
+  type DeviceRow = { public_id: string; status: string; created_at?: number }
+
+  async function listDevices(): Promise<DeviceRow[]> {
+    const res = await apiRequest<{ devices?: DeviceRow[] }>('/api/device/list', {
+      timeoutMs: 10_000,
+    })
+    return Array.isArray(res?.devices) ? res.devices : []
+  }
+
+  async function approveDevice(publicId: string): Promise<void> {
+    await apiRequest('/api/device/approve', {
+      method: 'POST',
+      body: { public_id: publicId },
+      timeoutMs: 10_000,
+    })
+  }
+
+  async function rejectDevice(publicId: string): Promise<void> {
+    await apiRequest('/api/device/reject', {
+      method: 'POST',
+      body: { public_id: publicId },
+      timeoutMs: 10_000,
+    })
+  }
+
+  async function revokeDevice(publicId: string): Promise<void> {
+    await apiRequest('/api/device/revoke', {
+      method: 'POST',
+      body: { public_id: publicId },
+      timeoutMs: 10_000,
+    })
   }
 
   async function unlock(password: string): Promise<void> {
@@ -579,6 +649,8 @@ export const useVaultStore = defineStore('vault', () => {
     unlocked.value = false
     deviceSecret.value = null
     devicePublicId.value = null
+    deviceStatus.value = null
+    deviceAdmission.value = null
     pendingRecoveryKey.value = null
     savedRecoveryKey.value = null
     clearSessionWrap()
@@ -721,6 +793,8 @@ export const useVaultStore = defineStore('vault', () => {
     lockMinutes,
     deviceSecret,
     devicePublicId,
+    deviceStatus,
+    deviceAdmission,
     pendingRecoveryKey,
     savedRecoveryKey,
     hasRecovery,
@@ -748,5 +822,11 @@ export const useVaultStore = defineStore('vault', () => {
     openFromCloud,
     getVaultKey,
     ensureDeviceSecret,
+    registerDeviceWithServer,
+    refreshDeviceStatus,
+    listDevices,
+    approveDevice,
+    rejectDevice,
+    revokeDevice,
   }
 })

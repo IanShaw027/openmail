@@ -55,6 +55,8 @@ def vault_device(client: TestClient, monkeypatch, tmp_path):
     da._loaded = False
     da._secrets.clear()
     da._registry.clear()
+    da._status.clear()
+    da._created_at.clear()
 
     secret, b64, pid = _pair()
     out = da.register_device_secret(pid, b64)

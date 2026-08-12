@@ -245,6 +245,7 @@ Copy [`.env.example`](.env.example) → `.env`. Most important:
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `OPENMAIL_MASTER_KEY` | **yes** | 32-byte AES key (base64/hex). Device registry + server wraps. |
+| `OPENMAIL_DEVICE_ADMISSION` | no | `first_trust` (default): first device auto-trusted, later need approval; `open`: every register is trusted |
 | `OPENMAIL_IMAGE` | no | Compose image override (default `ianshaw027/openmail:v0.1.0`) |
 | `OPENMAIL_PORT` | no | Host port (default `8000`) |
 | `OPENMAIL_DATABASE_URL` | no | Default SQLite on `/data` |

@@ -20,6 +20,9 @@ def vault_device(client: TestClient, monkeypatch, tmp_path):
     key = base64.b64encode(os.urandom(32)).decode()
     monkeypatch.setenv("OPENMAIL_MASTER_KEY", key)
     monkeypatch.setenv("OPENMAIL_DEVICE_REGISTRY_PATH", str(tmp_path / "reg.json"))
+    # These tests exercise transfer isolation, not admission — keep open so a
+    # second "stranger" device can still present a valid HMAC.
+    monkeypatch.setenv("OPENMAIL_DEVICE_ADMISSION", "open")
     import app.config as cfg
 
     cfg.get_settings.cache_clear()
@@ -30,6 +33,8 @@ def vault_device(client: TestClient, monkeypatch, tmp_path):
     da._loaded = False
     da._secrets.clear()
     da._registry.clear()
+    da._status.clear()
+    da._created_at.clear()
 
     secret = os.urandom(32)
     b64 = base64.urlsafe_b64encode(secret).decode().rstrip("=")
@@ -65,6 +70,15 @@ def _register_second(secret: bytes | None = None) -> tuple[str, bytes]:
     b64 = base64.urlsafe_b64encode(secret).decode().rstrip("=")
     pid = "vk_" + hashlib.sha256(secret).hexdigest()[:40]
     out = da.register_device_secret(pid, b64)
+    # Under first_trust a second device is pending; transfer tests need a
+    # cryptographically valid *trusted* peer, so approve it from any trusted row.
+    if da.device_status(out) == da.STATUS_PENDING:
+        actor = next(
+            (p for p, st in da._status.items() if st == da.STATUS_TRUSTED),
+            None,
+        )
+        if actor:
+            da.approve_device(out, actor_id=actor)
     return out, secret
 
 

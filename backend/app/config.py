@@ -173,6 +173,24 @@ class Settings(BaseSettings):
         validation_alias="AUTH_UI_ENABLED",
         description="Show login/register/admin in frontend when true",
     )
+    device_admission: str = Field(
+        default="first_trust",
+        validation_alias="OPENMAIL_DEVICE_ADMISSION",
+        description=(
+            "How new vault devices are admitted: "
+            "'first_trust' (default) auto-trusts the first device and requires "
+            "approval for later ones; 'open' admits every successful register "
+            "(previous behaviour)."
+        ),
+    )
+
+    @field_validator("device_admission")
+    @classmethod
+    def _normalize_device_admission(cls, v: str) -> str:
+        low = (v or "first_trust").strip().lower().replace("-", "_")
+        if low not in {"first_trust", "open"}:
+            raise ValueError("OPENMAIL_DEVICE_ADMISSION must be 'first_trust' or 'open'")
+        return low
 
     @field_validator("proxy_sid_strategy")
     @classmethod

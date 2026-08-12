@@ -29,6 +29,8 @@ def da(tmp_path, monkeypatch):
     module._loaded = False
     module._secrets.clear()
     module._registry.clear()
+    module._status.clear()
+    module._created_at.clear()
     yield module
     cfg.get_settings.cache_clear()
 
@@ -280,5 +282,7 @@ def test_unknown_device_reloads_registry_written_by_another_worker(da):
     da.register_device_secret(pid, b64)
     da._secrets.clear()
     da._registry.clear()
+    da._status.clear()
+    da._created_at.clear()
     da._loaded = True
     assert da.is_registered(pid) is True

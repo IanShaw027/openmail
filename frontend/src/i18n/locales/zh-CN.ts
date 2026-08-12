@@ -79,6 +79,26 @@ export default {
     securityTitle: '安全与保险库',
     securityHint:
       '本机账号、2FA、邮件缓存用 AES-256-GCM 加密；云端凭证由客户端封装，管理员看不到明文。',
+    devicesTitle: '受信任设备',
+    devicesHint:
+      '第一个向本服务器注册的保险库会自动信任；之后的设备需在此批准后才能使用云端同步与服务端 API。',
+    devicesRefresh: '刷新设备列表',
+    devicesEmpty: '尚未有其他设备注册。',
+    devicePendingBanner:
+      '此设备正在等待受信任设备批准。请在已信任的设备上打开「设置」完成批准。',
+    devicePendingRefresh: '重新检查',
+    deviceStatusTrusted: '已信任',
+    deviceStatusPending: '待批准',
+    deviceThisDevice: '本机',
+    deviceApprove: '批准',
+    deviceReject: '拒绝',
+    deviceRevoke: '撤销',
+    deviceApproveConfirm: '批准此设备使用本服务器的云端 API？',
+    deviceRejectConfirm: '拒绝并移除此待批准设备？',
+    deviceRevokeConfirm: '撤销此受信任设备？它再次接入时需要重新批准。',
+    deviceApproved: '已批准设备',
+    deviceRejected: '已拒绝设备',
+    deviceRevoked: '已撤销设备',
     keysGuideTitle: '库主密码 vs 恢复密钥',
     enableRecovery: '生成 / 查看恢复能力',
     enableRecoveryHint:
