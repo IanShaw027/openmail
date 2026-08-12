@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import bindparam, create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -34,7 +34,9 @@ def _make_engine():
             cursor = dbapi_conn.cursor()
             try:
                 cursor.execute("PRAGMA foreign_keys=ON")
-                # Wait instead of failing immediately when another writer holds the lock.
+                # Matches pysqlite's own default timeout of 5s rather than
+                # changing behaviour — kept explicit so the wait is visible here
+                # and survives a driver whose default differs.
                 cursor.execute("PRAGMA busy_timeout=5000")
                 if not is_memory:
                     # WAL lets readers proceed during a write → fewer "database is
@@ -294,6 +296,34 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
                 logger.exception("migrate: failed to add fetch_lock_state.lease_token")
 
 
+# Runtime overrides for settings that no longer exist. `admin_password` is the
+# reason this list exists: dropping it from OVERRIDABLE_KEYS stopped anything
+# reading the row, which left a credential sitting in app_settings as plaintext
+# JSON that no code path would ever touch again.
+_DEAD_SETTING_KEYS = (
+    "admin_password",
+    "session_cookie_name",
+    "admin_cookie_name",
+    "session_max_age_seconds",
+    "cookie_secure",
+    "cookie_samesite",
+)
+
+
+def _purge_dead_settings_overrides(conn, tables: set[str]) -> None:  # type: ignore[no-untyped-def]
+    if "app_settings" not in tables:
+        return
+    try:
+        conn.execute(
+            text("DELETE FROM app_settings WHERE key IN :keys").bindparams(
+                bindparam("keys", expanding=True)
+            ),
+            {"keys": list(_DEAD_SETTING_KEYS)},
+        )
+    except Exception:
+        logger.debug("migrate: could not purge dead app_settings overrides", exc_info=True)
+
+
 def _sqlite_migrate(conn) -> None:  # type: ignore[no-untyped-def]
     """SQLite migration body. Runs inside a transaction with FKs already off."""
     tables = {
@@ -323,6 +353,8 @@ def _sqlite_migrate(conn) -> None:  # type: ignore[no-untyped-def]
     for tbl in ("user_sessions", "admin_sessions", "mail_index", "users"):
         if tbl in tables:
             conn.exec_driver_sql(f"DROP TABLE IF EXISTS {tbl}")
+
+    _purge_dead_settings_overrides(conn, tables)
 
     # After users dropped, rebuild accounts if legacy FK still points at users
     tables = {
@@ -371,6 +403,7 @@ def migrate_schema() -> None:
         with engine.begin() as conn:
             _generic_add_missing_columns(conn)
             _ensure_account_owner_email_unique(conn)
+            _purge_dead_settings_overrides(conn, set(inspect(conn).get_table_names()))
     except Exception:
         logger.exception("migrate_schema: non-sqlite migration failed")
         raise

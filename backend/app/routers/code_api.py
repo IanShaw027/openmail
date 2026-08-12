@@ -59,6 +59,10 @@ def _enforce(outcome: tuple[bool, str | None]) -> None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=err or "rate limit exceeded",
+            # The window is a rolling hour, so the earliest a slot can free up is
+            # when the oldest event ages out. Without a hint, clients retry in a
+            # tight loop against a limit they cannot see.
+            headers={"Retry-After": "60"},
         )
 
 

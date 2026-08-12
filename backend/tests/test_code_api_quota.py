@@ -81,6 +81,25 @@ def test_unknown_token_requests_are_throttled_per_ip(db_session):
     assert check_code_api_miss_quota("198.51.100.4", settings=s, db=db_session)[0]
 
 
+def test_blocked_refresh_does_not_spend_the_base_budget(db_session):
+    # Refresh is capped tighter, so a rejected refresh must not also burn one of
+    # the plain fetches the caller is still entitled to.
+    s = _settings(fetch_limit=10, refresh_limit=1)
+    token = "tok_budget"
+
+    assert check_code_api_quota(token, refresh=True, settings=s, db=db_session)[0]
+    for _ in range(5):
+        assert not check_code_api_quota(token, refresh=True, settings=s, db=db_session)[0]
+
+    # One refresh was charged; the five rejected ones spent nothing.
+    remaining = 0
+    while check_code_api_quota(token, settings=s, db=db_session)[0]:
+        remaining += 1
+        if remaining > 20:
+            break
+    assert remaining == 9
+
+
 def test_miss_quota_does_not_consume_the_per_token_budget(db_session):
     # Enumeration attempts must not be able to exhaust a real token's quota.
     s = _settings(fetch_limit=2, refresh_limit=10)

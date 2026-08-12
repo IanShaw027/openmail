@@ -226,3 +226,4 @@ class HealthOut(BaseModel):
     service: str = "openmail"
     version: str
     master_key_configured: bool
+    database_writable: bool = True

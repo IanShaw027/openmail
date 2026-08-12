@@ -36,20 +36,11 @@ class Settings(BaseSettings):
         default="http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000",
         validation_alias="CORS_ORIGINS",
     )
-    session_cookie_name: str = Field(
-        default="openmail_session",
-        validation_alias="SESSION_COOKIE_NAME",
-    )
-    admin_cookie_name: str = Field(
-        default="openmail_admin",
-        validation_alias="ADMIN_COOKIE_NAME",
-    )
-    session_max_age_seconds: int = Field(
-        default=604800,
-        validation_alias="SESSION_MAX_AGE_SECONDS",
-    )
-    cookie_secure: bool = Field(default=False, validation_alias="COOKIE_SECURE")
-    cookie_samesite: str = Field(default="lax", validation_alias="COOKIE_SAMESITE")
+    # No cookie/session settings live here any more: the app authenticates with
+    # device HMAC and never issues a Set-Cookie. SESSION_COOKIE_NAME,
+    # ADMIN_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, COOKIE_SECURE and
+    # COOKIE_SAMESITE were read by nothing — COOKIE_SECURE in particular was
+    # documented as a production hardening step it could not perform.
     public_base_url: str = Field(
         default="http://127.0.0.1:8000",
         validation_alias="PUBLIC_BASE_URL",
@@ -172,15 +163,6 @@ class Settings(BaseSettings):
         validation_alias="AUTH_UI_ENABLED",
         description="Show login/register/admin in frontend when true",
     )
-
-    @field_validator("cookie_samesite")
-    @classmethod
-    def _normalize_samesite(cls, v: str) -> str:
-        allowed = {"lax", "strict", "none"}
-        low = (v or "lax").lower()
-        if low not in allowed:
-            raise ValueError(f"COOKIE_SAMESITE must be one of {allowed}")
-        return low
 
     @field_validator("proxy_sid_strategy")
     @classmethod

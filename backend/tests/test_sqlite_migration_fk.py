@@ -21,6 +21,13 @@ CREATE TABLE user_sessions (
     id VARCHAR(40) NOT NULL PRIMARY KEY,
     user_id VARCHAR(40) REFERENCES users(id)
 );
+CREATE TABLE app_settings (
+    key VARCHAR(64) NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT INTO app_settings (key, value) VALUES ('admin_password', '"hunter2"');
+INSERT INTO app_settings (key, value) VALUES ('cookie_secure', 'true');
+INSERT INTO app_settings (key, value) VALUES ('sync_concurrency', '4');
 CREATE TABLE accounts (
     id VARCHAR(40) NOT NULL PRIMARY KEY,
     email VARCHAR(255) NOT NULL,
@@ -89,3 +96,23 @@ def test_migration_drops_legacy_users_table_with_referencing_rows(tmp_path, monk
     # Enforcement is restored for connections handed out after the migration.
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+
+def test_migration_purges_overrides_for_settings_that_no_longer_exist(tmp_path, monkeypatch):
+    """A stored admin password must not outlive the setting that used it."""
+    db_path = tmp_path / "legacy.db"
+    _make_legacy_db(db_path)
+    monkeypatch.setattr(db_mod, "engine", _engine_with_fk_on(db_path))
+
+    db_mod.migrate_schema()
+
+    con = sqlite3.connect(db_path)
+    try:
+        keys = {r[0] for r in con.execute("SELECT key FROM app_settings")}
+    finally:
+        con.close()
+
+    assert "admin_password" not in keys
+    assert "cookie_secure" not in keys
+    # Live overrides are untouched.
+    assert "sync_concurrency" in keys

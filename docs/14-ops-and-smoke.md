@@ -163,7 +163,7 @@ Manual:
 
 | Step | Expect |
 |------|--------|
-| `GET /api/health` | `ok: true` |
+| `GET /api/health` | `200` with `ok: true`. Returns `503` + `database_writable: false` when the data directory has become unwritable, so the container healthcheck fails instead of serving traffic it cannot handle |
 | Open UI | Vault gate, not login form |
 | Unlock vault | Console loads local accounts |
 | Single proxy fetch | Messages or clear error; no hang forever |

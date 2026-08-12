@@ -111,6 +111,10 @@ def _mount_spa(application: FastAPI) -> None:
     if not index.is_file():
         return
 
+    # Fixed for the process lifetime; resolving it per request only re-walked
+    # the same symlinks on every 404.
+    static_root = STATIC_DIR.resolve()
+
     assets_dir = STATIC_DIR / "assets"
     if assets_dir.is_dir():
         application.mount(
@@ -136,7 +140,6 @@ def _mount_spa(application: FastAPI) -> None:
 
         if full_path:
             try:
-                static_root = STATIC_DIR.resolve()
                 candidate = (static_root / full_path).resolve()
                 # Reject any path that escapes the static root (e.g. `%2e%2e/.env`).
                 if candidate == static_root or static_root in candidate.parents:

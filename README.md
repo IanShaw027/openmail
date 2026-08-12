@@ -252,7 +252,8 @@ Copy [`.env.example`](.env.example) → `.env`. Most important:
 | `PROXY_POOL` | no | SOCKS/HTTP exits (`\|` or newlines) |
 | `SYNC_*` | no | Background sync interval / folders |
 | `PUBLIC_BASE_URL` | no | Public origin for legacy code-token URLs |
-| `COOKIE_SECURE` | prod | Set `true` behind HTTPS |
+| `CODE_API_MAX_FETCH_PER_HOUR` | no | Public code-API cap per token per hour; `0` = no limit |
+| `CODE_API_MAX_REFRESH_PER_HOUR` | no | Stricter cap for `refresh=1`; `0` = no limit |
 
 Generate master key:
 

@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import logging
 import time
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
@@ -267,13 +268,28 @@ def check_event_quota(
     limit: int,
     db: Session | None = None,
 ) -> tuple[bool, str | None]:
-    """Generic durable hourly rate limit for an arbitrary namespaced ``key``.
+    """Generic durable hourly rate limit for an arbitrary namespaced ``key``."""
+    return check_event_quotas([(key, limit)], db=db)
+
+
+def check_event_quotas(
+    buckets: Sequence[tuple[str, int]],
+    *,
+    db: Session | None = None,
+) -> tuple[bool, str | None]:
+    """Charge several hourly counters, all-or-nothing.
 
     Reuses the ``device_poll_events`` table (and per-key state row as a mutex)
     so multi-worker deployments share the same counter. Used for public
     endpoints that have no device/license identity (e.g. the code API token).
+
+    Every bucket is counted before any is incremented, so a request rejected by
+    one limit does not spend budget from another. Charging them one at a time
+    meant a blocked ``refresh=1`` still consumed the caller's base allowance.
     """
-    limit = max(1, int(limit))
+    if not buckets:
+        return True, None
+    checked = [(key, max(1, int(limit))) for key, limit in buckets]
     now = _utcnow()
     since = now - timedelta(hours=1)
     prune_before = now - timedelta(hours=2)
@@ -283,15 +299,17 @@ def check_event_quota(
     try:
         if own_session:
             _begin_immediate_if_sqlite(session)
-        _ensure_poll_state_locked(session, key)
-        used = _count_polls(session, key, since=since)
-        if used >= limit:
-            if own_session:
-                session.rollback()
-            return False, f"rate limit exceeded ({limit}/hour)"
-        session.add(DevicePollEvent(device_id=key, ts=now))
+        for key, limit in checked:
+            _ensure_poll_state_locked(session, key)
+            if _count_polls(session, key, since=since) >= limit:
+                if own_session:
+                    session.rollback()
+                return False, f"rate limit exceeded ({limit}/hour)"
+        for key, _limit in checked:
+            session.add(DevicePollEvent(device_id=key, ts=now))
         session.commit()
-        if (hash(key) ^ int(now.timestamp())) % 32 == 0:
+        first_key = checked[0][0]
+        if (hash(first_key) ^ int(now.timestamp())) % 32 == 0:
             _prune_old(session, older_than=prune_before)
         return True, None
     except Exception:
@@ -333,18 +351,17 @@ def check_code_api_quota(
     sub-limit so a leaked token cannot hammer upstream providers.
     """
     s = settings or get_settings()
-    base_limit = _hourly_limit(getattr(s, "code_api_max_fetch_per_hour", None), 60)
     key = "codeapi:" + hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:40]
+    buckets: list[tuple[str, int]] = []
+
+    base_limit = _hourly_limit(getattr(s, "code_api_max_fetch_per_hour", None), 60)
     if base_limit is not None:
-        allowed, err = check_event_quota(key, limit=base_limit, db=db)
-        if not allowed:
-            return allowed, err
+        buckets.append((key, base_limit))
     if refresh:
         refresh_limit = _hourly_limit(getattr(s, "code_api_max_refresh_per_hour", None), 15)
-        if refresh_limit is None:
-            return True, None
-        return check_event_quota(key + ":refresh", limit=refresh_limit, db=db)
-    return True, None
+        if refresh_limit is not None:
+            buckets.append((key + ":refresh", refresh_limit))
+    return check_event_quotas(buckets, db=db)
 
 
 def check_code_api_miss_quota(

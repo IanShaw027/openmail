@@ -233,7 +233,8 @@ docker compose up -d --build
 | `OPENMAIL_PORT` | 否 | 端口，默认 `8000` |
 | `LICENSE_TOKENS` | 否 | 解除客户端配额 |
 | `PROXY_POOL` | 否 | 出站代理池 |
-| `COOKIE_SECURE` | 生产建议 | HTTPS 下设 `true` |
+| `CODE_API_MAX_FETCH_PER_HOUR` | 否 | 公开 code API 每 token 每小时上限；`0` = 不限流 |
+| `CODE_API_MAX_REFRESH_PER_HOUR` | 否 | `refresh=1` 的更严上限；`0` = 不限流 |
 
 生成密钥：`./scripts/gen-master-key.sh`  
 完整注释见 [`.env.example`](.env.example)。
