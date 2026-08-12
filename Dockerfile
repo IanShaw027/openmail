@@ -33,9 +33,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt ./
-# Production: skip test-only packages
+# Production: skip test-only packages (pytest, pytest-asyncio, httpx2)
 RUN pip install --no-cache-dir \
-    $(grep -vE '^(pytest|pytest-asyncio)' requirements.txt | grep -vE '^#|^$')
+    $(grep -vE '^(pytest|pytest-asyncio|httpx2)' requirements.txt | grep -vE '^#|^$')
 
 COPY backend/app ./app
 COPY --from=frontend /frontend/dist/ ./app/static/
