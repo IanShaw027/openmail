@@ -26,11 +26,21 @@ def _make_engine():
     engine = create_engine(url, connect_args=connect_args, future=True)
 
     if url.startswith("sqlite"):
+        # WAL only applies to on-disk databases; in-memory test DBs stay default.
+        is_memory = url in ("sqlite://", "sqlite:///:memory:") or ":memory:" in url
 
         @event.listens_for(engine, "connect")
         def _sqlite_pragma(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            # Wait instead of failing immediately when another writer holds the lock.
+            cursor.execute("PRAGMA busy_timeout=5000")
+            if not is_memory:
+                # WAL lets readers proceed during a write → fewer "database is
+                # locked" errors with the API + SyncWorker + fetch lease writing
+                # concurrently. NORMAL sync is the recommended WAL companion.
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.close()
 
     return engine
