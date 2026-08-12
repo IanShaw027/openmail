@@ -131,6 +131,16 @@ class Settings(BaseSettings):
         validation_alias="QUOTA_MAX_POLL_PER_HOUR",
         description="Max upstream fetches per device per hour (unlicensed)",
     )
+    code_api_max_fetch_per_hour: int = Field(
+        default=60,
+        validation_alias="CODE_API_MAX_FETCH_PER_HOUR",
+        description="Max public code-API fetches per token per hour (abuse control)",
+    )
+    code_api_max_refresh_per_hour: int = Field(
+        default=15,
+        validation_alias="CODE_API_MAX_REFRESH_PER_HOUR",
+        description="Stricter cap for code-API refresh=1 (force upstream) per token per hour",
+    )
     # Comma-separated pre-issued license tokens (unlimited quota when presented)
     license_tokens: str = Field(
         default="",

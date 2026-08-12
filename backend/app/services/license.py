@@ -261,6 +261,72 @@ def check_poll_quota(
             session.close()
 
 
+def check_event_quota(
+    key: str,
+    *,
+    limit: int,
+    db: Session | None = None,
+) -> tuple[bool, str | None]:
+    """Generic durable hourly rate limit for an arbitrary namespaced ``key``.
+
+    Reuses the ``device_poll_events`` table (and per-key state row as a mutex)
+    so multi-worker deployments share the same counter. Used for public
+    endpoints that have no device/license identity (e.g. the code API token).
+    """
+    limit = max(1, int(limit))
+    now = _utcnow()
+    since = now - timedelta(hours=1)
+    prune_before = now - timedelta(hours=2)
+
+    own_session = db is None
+    session = db or _session_factory()()
+    try:
+        if own_session:
+            _begin_immediate_if_sqlite(session)
+        _ensure_poll_state_locked(session, key)
+        used = _count_polls(session, key, since=since)
+        if used >= limit:
+            if own_session:
+                session.rollback()
+            return False, f"rate limit exceeded ({limit}/hour)"
+        session.add(DevicePollEvent(device_id=key, ts=now))
+        session.commit()
+        if (hash(key) ^ int(now.timestamp())) % 32 == 0:
+            _prune_old(session, older_than=prune_before)
+        return True, None
+    except Exception:
+        session.rollback()
+        logger.exception("event quota check failed; denying request")
+        return False, "rate limit unavailable"
+    finally:
+        if own_session:
+            session.close()
+
+
+def check_code_api_quota(
+    token: str,
+    *,
+    refresh: bool = False,
+    settings: Settings | None = None,
+    db: Session | None = None,
+) -> tuple[bool, str | None]:
+    """Per-token hourly rate limit for the public code API.
+
+    ``refresh=True`` (force upstream fetch) is charged against a stricter
+    sub-limit so a leaked token cannot hammer upstream providers.
+    """
+    s = settings or get_settings()
+    base_limit = max(1, int(getattr(s, "code_api_max_fetch_per_hour", None) or 60))
+    key = "codeapi:" + hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:40]
+    allowed, err = check_event_quota(key, limit=base_limit, db=db)
+    if not allowed:
+        return allowed, err
+    if refresh:
+        refresh_limit = max(1, int(getattr(s, "code_api_max_refresh_per_hour", None) or 15))
+        return check_event_quota(key + ":refresh", limit=refresh_limit, db=db)
+    return True, None
+
+
 def poll_used_in_hour(
     device_id: str | None,
     *,

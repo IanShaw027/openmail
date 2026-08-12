@@ -6,7 +6,6 @@ Create/rotate/delete of tokens for stored server accounts is disabled
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
@@ -18,6 +17,7 @@ from app.deps import DbDep, SettingsDep
 from app.models import Account, CodeApiToken
 from app.schemas import CodeApiOut, CodeFetchJsonResult
 from app.services.fetch_service import FetchServiceResult, fetch_account
+from app.services.license import check_code_api_quota
 
 router = APIRouter(tags=["code-api"])
 
@@ -75,6 +75,17 @@ def public_code_fetch(
     acc = db.get(Account, row.account_id)
     if acc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account not found")
+
+    # Public endpoint (token-only auth): rate limit per token to stop a leaked
+    # URL from hammering upstream providers / draining the proxy pool.
+    allowed, quota_err = check_code_api_quota(
+        token, refresh=refresh == 1, settings=settings, db=db
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=quota_err or "rate limit exceeded",
+        )
 
     row.last_used_at = datetime.now(timezone.utc)
     db.commit()
