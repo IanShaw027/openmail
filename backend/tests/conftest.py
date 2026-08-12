@@ -14,7 +14,6 @@ from sqlalchemy.pool import StaticPool
 
 # Configure env before app imports settings cache
 os.environ["OPENMAIL_MASTER_KEY"] = base64.b64encode(os.urandom(32)).decode()
-os.environ["ADMIN_PASSWORD"] = "test-admin-password"
 os.environ["OPENMAIL_DATABASE_URL"] = "sqlite://"
 os.environ["COOKIE_SECURE"] = "false"
 # Keep background sync quiet / short interval in tests (worker still starts)

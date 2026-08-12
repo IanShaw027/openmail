@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 mkdir -p data/warp/{1..10}
 if [[ ! -f .env ]]; then
-  echo "Missing .env — copy .env.example and set OPENMAIL_MASTER_KEY / ADMIN_PASSWORD"
+  echo "Missing .env — copy .env.example and set OPENMAIL_MASTER_KEY"
   exit 1
 fi
 # Ensure tun exists

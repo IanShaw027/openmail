@@ -26,7 +26,7 @@ OpenMail ──socks5://warp-N:1080──► warp-1 … warp-10 ──WARP──
 ```bash
 cd /opt/openmail   # 或本仓库路径
 cp -n .env.example .env
-# 填好 OPENMAIL_MASTER_KEY / ADMIN_PASSWORD / PUBLIC_BASE_URL
+# 填好 OPENMAIL_MASTER_KEY / PUBLIC_BASE_URL
 
 # 推荐一键（创建 data/warp/* + profile warp）
 ./scripts/up-with-warp.sh

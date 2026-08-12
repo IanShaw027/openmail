@@ -28,10 +28,6 @@ class Settings(BaseSettings):
             "Used only for decrypt after key rotation; encrypt always uses primary."
         ),
     )
-    admin_password: str = Field(
-        default="change-me-admin",
-        validation_alias="ADMIN_PASSWORD",
-    )
     openmail_database_url: str = Field(
         default="sqlite:///./openmail.db",
         validation_alias="OPENMAIL_DATABASE_URL",

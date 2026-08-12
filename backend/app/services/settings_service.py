@@ -23,7 +23,6 @@ OVERRIDABLE_KEYS = frozenset(
         "proxy_sid_strategy",
         "sync_folders",
         "fetch_concurrency",
-        "admin_password",
     }
 )
 
@@ -49,7 +48,6 @@ class EffectiveSettings:
     proxy_sid_strategy: str
     sync_folders: str
     fetch_concurrency: int = 5
-    admin_password: str = ""
     # Passthrough of non-overridable env settings used by fetch
     fetch_min_interval_seconds: float = 3.0
     openmail_master_key: str = ""
@@ -89,7 +87,7 @@ def _coerce_value(key: str, raw: Any) -> Any:
                 f"proxy_sid_strategy must be one of {sorted(_SID_STRATEGIES)}"
             )
         return s
-    if key in ("proxy_template", "proxy_pool", "sync_folders", "admin_password"):
+    if key in ("proxy_template", "proxy_pool", "sync_folders"):
         return str(raw)
     if key == "fetch_concurrency":
         return int(raw)
@@ -149,9 +147,6 @@ def get_effective_settings(
                 getattr(base, "fetch_concurrency", 5) or 5,
             )
         ),
-        admin_password=str(
-            overrides.get("admin_password", base.admin_password) or base.admin_password
-        ),
         fetch_min_interval_seconds=float(base.fetch_min_interval_seconds),
         openmail_master_key=base.openmail_master_key,
         public_base_url=base.public_base_url,
@@ -186,10 +181,6 @@ def set_overrides(
             c = int(coerced)
             if c < 1 or c > 32:
                 raise ValueError("fetch_concurrency must be 1..32")
-        if key == "admin_password":
-            pw = str(coerced)
-            if len(pw) < 8:
-                raise ValueError("admin_password must be at least 8 characters")
         row = db.get(AppSetting, key)
         encoded = json.dumps(coerced)
         if row is None:
@@ -223,5 +214,4 @@ def as_settings_compatible(eff: EffectiveSettings, base: Settings | None = None)
         data["fetch_concurrency"] = eff.fetch_concurrency
     else:
         data["fetch_concurrency"] = eff.fetch_concurrency
-    data["admin_password"] = eff.admin_password or s.admin_password
     return Settings(**data)
