@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# OpenMail API smoke checks (curl + cookie jar).
-# Usage: BASE_URL=http://127.0.0.1:8000 ./scripts/smoke_api.sh
-# Fails gracefully if the server is down (non-zero exit, clear message).
+# OpenMail API smoke checks for the local-first / vault-device model.
+#   BASE_URL=http://127.0.0.1:8000 ./scripts/smoke_api.sh
+#
+# Flow: health → public config → device register → HMAC-signed GET /api/accounts
+#       → unsigned GET /api/accounts must be rejected (401).
+# There is no user registration / login (that system was removed).
+#
+# Requires: curl, openssl, od (all standard). Fails gracefully if server is down.
 
 set -uo pipefail
 
@@ -18,63 +23,37 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-log_pass() {
-  PASS=$((PASS + 1))
-  RESULTS+=("PASS: $1")
-  printf "${GREEN}PASS${NC}  %s\n" "$1"
-}
+log_pass() { PASS=$((PASS + 1)); RESULTS+=("PASS: $1"); printf "${GREEN}PASS${NC}  %s\n" "$1"; }
+log_fail() { FAIL=$((FAIL + 1)); RESULTS+=("FAIL: $1 — $2"); printf "${RED}FAIL${NC}  %s — %s\n" "$1" "$2"; }
+log_skip() { SKIP=$((SKIP + 1)); RESULTS+=("SKIP: $1 — $2"); printf "${YELLOW}SKIP${NC}  %s — %s\n" "$1" "$2"; }
 
-log_fail() {
-  FAIL=$((FAIL + 1))
-  RESULTS+=("FAIL: $1 — $2")
-  printf "${RED}FAIL${NC}  %s — %s\n" "$1" "$2"
-}
-
-log_skip() {
-  SKIP=$((SKIP + 1))
-  RESULTS+=("SKIP: $1 — $2")
-  printf "${YELLOW}SKIP${NC}  %s — %s\n" "$1" "$2"
-}
-
-# Temp cookie jars (cleaned on exit)
-JAR_USER="$(mktemp "${TMPDIR:-/tmp}/openmail_smoke_user.XXXXXX")"
-JAR_GUEST="$(mktemp "${TMPDIR:-/tmp}/openmail_smoke_guest.XXXXXX")"
 BODY="$(mktemp "${TMPDIR:-/tmp}/openmail_smoke_body.XXXXXX")"
-cleanup() {
-  rm -f "$JAR_USER" "$JAR_GUEST" "$BODY"
-}
+cleanup() { rm -f "$BODY" "${BODY}.err"; }
 trap cleanup EXIT
 
-curl_json() {
-  # curl_json METHOD PATH [jar] [json_body]
-  # sets: HTTP_CODE, BODY content in $BODY
-  local method="$1"
-  local path="$2"
-  local jar="${3:-}"
-  local data="${4:-}"
+# curl_code METHOD PATH [header...] — sets HTTP_CODE, writes response to $BODY
+curl_code() {
+  local method="$1" path="$2"; shift 2
   local args=(-sS -m 10 -o "$BODY" -w "%{http_code}" -X "$method")
-  if [[ -n "$jar" ]]; then
-    args+=(-b "$jar" -c "$jar")
-  fi
-  if [[ -n "$data" ]]; then
-    args+=(-H "Content-Type: application/json" -d "$data")
-  fi
-  # shellcheck disable=SC2086
+  local h
+  for h in "$@"; do args+=(-H "$h"); done
   HTTP_CODE="$(curl "${args[@]}" "${BASE_URL}${path}" 2>"${BODY}.err" || true)"
   if [[ -z "$HTTP_CODE" || "$HTTP_CODE" == "000" ]]; then
     HTTP_CODE="000"
-    if [[ -s "${BODY}.err" ]]; then
-      cat "${BODY}.err" >"$BODY" 2>/dev/null || true
-    fi
+    [[ -s "${BODY}.err" ]] && cat "${BODY}.err" >"$BODY" 2>/dev/null || true
   fi
-  rm -f "${BODY}.err"
 }
 
 echo "OpenMail smoke → ${BASE_URL}"
 echo "----------------------------------------"
 
+if ! command -v openssl >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1; then
+  echo "Missing openssl/od — cannot sign device requests."
+  exit 1
+fi
+
 # ── 1. Health ──────────────────────────────────────────────────────────
-curl_json GET /health
+curl_code GET /api/health
 if [[ "$HTTP_CODE" == "000" ]]; then
   log_fail "health" "server unreachable at ${BASE_URL} (is it running?)"
   echo "----------------------------------------"
@@ -82,89 +61,72 @@ if [[ "$HTTP_CODE" == "000" ]]; then
   echo "Hint: start backend (make dev-backend) then re-run make smoke"
   exit 1
 fi
-
-if [[ "$HTTP_CODE" == "200" ]] && grep -q '"ok"[[:space:]]*:[[:space:]]*true' "$BODY" 2>/dev/null; then
+if [[ "$HTTP_CODE" == "200" ]] && grep -q '"ok"[[:space:]]*:[[:space:]]*true' "$BODY"; then
   log_pass "health (HTTP 200, ok=true)"
 else
   log_fail "health" "HTTP ${HTTP_CODE} body=$(head -c 200 "$BODY")"
 fi
 
-# ── 2. Register random user ────────────────────────────────────────────
-RAND="$(date +%s)-${RANDOM}"
-USER="smoke_${RAND}"
-# username max 64; keep alnum/._-
-USER="$(echo "$USER" | tr -cd 'a-zA-Z0-9._-' | cut -c1-64)"
-PASSWD="SmokeTest1_${RANDOM}"
-
-REG_JSON=$(printf '{"username":"%s","password":"%s","accepted_privacy":true,"accepted_terms":true,"display_name":"Smoke"}' "$USER" "$PASSWD")
-curl_json POST /api/auth/register "$JAR_USER" "$REG_JSON"
-if [[ "$HTTP_CODE" == "201" ]]; then
-  log_pass "register ($USER)"
-else
-  log_fail "register" "HTTP ${HTTP_CODE} body=$(head -c 300 "$BODY")"
-fi
-
-# ── 3. Me (session from register) ─────────────────────────────────────
-curl_json GET /api/auth/me "$JAR_USER"
-if [[ "$HTTP_CODE" == "200" ]] && grep -q "\"username\"" "$BODY" 2>/dev/null; then
-  log_pass "me after register"
-else
-  log_fail "me after register" "HTTP ${HTTP_CODE} body=$(head -c 200 "$BODY")"
-fi
-
-# ── 4. Logout + Login ─────────────────────────────────────────────────
-curl_json POST /api/auth/logout "$JAR_USER"
-# clear jar and login fresh
-: >"$JAR_USER"
-LOGIN_JSON=$(printf '{"username":"%s","password":"%s"}' "$USER" "$PASSWD")
-curl_json POST /api/auth/login "$JAR_USER" "$LOGIN_JSON"
+# ── 2. Public config (no auth) ─────────────────────────────────────────
+curl_code GET /api/config/public
 if [[ "$HTTP_CODE" == "200" ]]; then
-  log_pass "login"
+  log_pass "public config (HTTP 200)"
 else
-  log_fail "login" "HTTP ${HTTP_CODE} body=$(head -c 200 "$BODY")"
+  log_fail "public config" "HTTP ${HTTP_CODE} body=$(head -c 200 "$BODY")"
 fi
 
-curl_json GET /api/auth/me "$JAR_USER"
+# ── 3. Register a throwaway vault device ───────────────────────────────
+# Secret: 32 random bytes. Canonical id = vk_<sha256(raw_secret)[:40]>.
+SECRET_B64="$(openssl rand -base64 32)"
+RAW_HEX="$(printf '%s' "$SECRET_B64" | openssl base64 -d -A | od -An -v -tx1 | tr -d ' \n')"
+SHA="$(printf '%s' "$SECRET_B64" | openssl base64 -d -A | openssl dgst -sha256 | awk '{print $NF}')"
+PUBLIC_ID="vk_${SHA:0:40}"
+
+REG_JSON="$(printf '{"public_id":"%s","secret_b64":"%s"}' "$PUBLIC_ID" "$SECRET_B64")"
+HTTP_CODE="$(curl -sS -m 10 -o "$BODY" -w "%{http_code}" -X POST \
+  -H "Content-Type: application/json" -d "$REG_JSON" \
+  "${BASE_URL}/api/device/register" 2>/dev/null || echo 000)"
 if [[ "$HTTP_CODE" == "200" ]]; then
-  log_pass "me after login"
-else
-  log_fail "me after login" "HTTP ${HTTP_CODE} body=$(head -c 200 "$BODY")"
-fi
-
-# ── 5. Guest cannot search (expect 403) ────────────────────────────────
-# Empty jar = guest
-: >"$JAR_GUEST"
-curl_json GET /api/me/mails/search "$JAR_GUEST"
-if [[ "$HTTP_CODE" == "403" ]]; then
-  log_pass "guest search forbidden (403)"
-elif [[ "$HTTP_CODE" == "401" ]]; then
-  # Some deps may return 401; product docs say 403 — accept 401 as soft pass note
-  log_pass "guest search forbidden (HTTP ${HTTP_CODE})"
-else
-  log_fail "guest search" "expected 403, got HTTP ${HTTP_CODE} body=$(head -c 200 "$BODY")"
-fi
-
-# ── 6. Create stub account (http_api; fetch may fail — create is enough) ─
-ACC_JSON=$(printf '{"email":"smoke-%s@example.com","provider":"http_api","credential":{"api_url":"https://example.com/openmail-smoke"},"sync_enabled":false,"tag":"smoke"}' "$RAND")
-curl_json POST /api/accounts "$JAR_USER" "$ACC_JSON"
-if [[ "$HTTP_CODE" == "201" ]]; then
-  log_pass "create stub account (http_api)"
+  log_pass "device register (${PUBLIC_ID})"
 elif [[ "$HTTP_CODE" == "503" ]]; then
-  log_skip "create stub account" "master key not configured (HTTP 503) — set OPENMAIL_MASTER_KEY"
+  log_skip "device register" "master key not configured (HTTP 503) — set OPENMAIL_MASTER_KEY"
 else
-  log_fail "create stub account" "HTTP ${HTTP_CODE} body=$(head -c 300 "$BODY")"
+  log_fail "device register" "HTTP ${HTTP_CODE} body=$(head -c 300 "$BODY")"
+fi
+
+# ── 4. HMAC-signed GET /api/accounts (path-only form is valid for GET) ──
+# Signed message: {ts}.{METHOD}.{path}
+if [[ "$PUBLIC_ID" == vk_* ]]; then
+  TS="$(date +%s)"
+  ACC_PATH="/api/accounts"
+  MSG="${TS}.GET.${ACC_PATH}"
+  SIG="$(printf '%s' "$MSG" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${RAW_HEX}" | awk '{print $NF}')"
+
+  curl_code GET "$ACC_PATH" \
+    "X-Device-Id: ${PUBLIC_ID}" \
+    "X-Device-Ts: ${TS}" \
+    "X-Device-Sign: ${SIG}"
+  if [[ "$HTTP_CODE" == "200" ]]; then
+    log_pass "signed GET /api/accounts (HTTP 200)"
+  else
+    log_fail "signed GET /api/accounts" "HTTP ${HTTP_CODE} body=$(head -c 300 "$BODY")"
+  fi
+
+  # ── 5. Unsigned request must be rejected ─────────────────────────────
+  curl_code GET "$ACC_PATH"
+  if [[ "$HTTP_CODE" == "401" ]]; then
+    log_pass "unsigned GET /api/accounts rejected (401)"
+  else
+    log_fail "unsigned GET /api/accounts" "expected 401, got HTTP ${HTTP_CODE}"
+  fi
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────
 echo "----------------------------------------"
 echo "Results:"
-for line in "${RESULTS[@]}"; do
-  echo "  $line"
-done
+for line in "${RESULTS[@]}"; do echo "  $line"; done
 echo "----------------------------------------"
 printf "Summary: %d passed, %d failed, %d skipped\n" "$PASS" "$FAIL" "$SKIP"
 
-if [[ "$FAIL" -gt 0 ]]; then
-  exit 1
-fi
+[[ "$FAIL" -gt 0 ]] && exit 1
 exit 0

@@ -155,6 +155,10 @@ make smoke
 BASE_URL=http://127.0.0.1:8000 ./scripts/smoke_api.sh
 ```
 
+Automated checks: health → public config → `POST /api/device/register` → HMAC-signed
+`GET /api/accounts` (200) → unsigned `GET /api/accounts` rejected (401). Requires `curl`,
+`openssl`, and `od`.
+
 Manual:
 
 | Step | Expect |
