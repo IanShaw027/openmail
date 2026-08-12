@@ -5,6 +5,9 @@
 *.db
 *.sqlite
 *.sqlite3
+# Matches data/ at any depth, including backend/data/ which holds the device
+# registry. data/.gitkeep is force-added so a clone still has the bind-mount
+# target; a tracked file is not subject to these rules.
 data/
 cache/
 storage/

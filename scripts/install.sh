@@ -47,14 +47,37 @@ else
   echo "==> OPENMAIL_MASTER_KEY already set"
 fi
 
-IMAGE="${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.3.6}"
-echo "==> image: $IMAGE"
+# The container runs as a non-root user and ./data is a bind mount, so the host
+# directory has to be writable by that uid. Left to Docker, a missing ./data is
+# created as root:root and the very first start fails to create the database.
+# (macOS is immune because Docker Desktop maps uids, so this only bites Linux.)
+mkdir -p data
+if [[ "$(uname -s)" == "Linux" ]]; then
+  host_uid="$(id -u)"
+  host_gid="$(id -g)"
+  if [[ "$host_uid" == "0" ]]; then
+    # Installing as root: hand the directory to the image user rather than
+    # running the container as root just to make the mount writable.
+    chown -R 10001:10001 data 2>/dev/null \
+      && echo "==> data/ owned by 10001:10001 (container user)" \
+      || echo "warn: could not chown data/ — container may fail to write /data" >&2
+  else
+    # Otherwise run the container as the invoking user, who already owns ./data.
+    grep -q '^OPENMAIL_UID=' .env || printf 'OPENMAIL_UID=%s\n' "$host_uid" >> .env
+    grep -q '^OPENMAIL_GID=' .env || printf 'OPENMAIL_GID=%s\n' "$host_gid" >> .env
+    echo "==> container will run as ${host_uid}:${host_gid} to match ./data"
+  fi
+fi
+
+# Export so `pull` and `up` cannot disagree about which image they act on.
+export OPENMAIL_IMAGE="${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.3.6}"
+echo "==> image: $OPENMAIL_IMAGE"
 # Prefer pull of published image; fall back to local build if pull fails (offline / private).
-if docker compose pull openmail 2>/dev/null; then
+if docker compose pull openmail; then
   echo "==> docker compose up -d (pulled)"
-  OPENMAIL_IMAGE="$IMAGE" docker compose up -d
+  docker compose up -d
 else
-  echo "==> pull failed or skipped — building locally"
+  echo "==> pull failed (see above) — building locally"
   docker compose up -d --build
 fi
 
@@ -62,7 +85,7 @@ echo
 echo "Done."
 echo "  UI/API:  http://127.0.0.1:8000"
 echo "  Health:  curl -s http://127.0.0.1:8000/api/health"
-echo "  Image:   $IMAGE  (Docker Hub / override OPENMAIL_IMAGE)"
+echo "  Image:   $OPENMAIL_IMAGE  (Docker Hub / override OPENMAIL_IMAGE)"
 echo "  Demo:    https://mail.clomio.ai"
 echo
 echo "First visit: create vault password → save recovery key → import accounts."
