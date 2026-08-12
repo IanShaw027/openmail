@@ -1,0 +1,29 @@
+# Normalize all text to LF in the repository and on checkout, so Windows
+# contributors cannot reintroduce CRLF-only diffs (see backend/app/services/proxy.py).
+* text=auto eol=lf
+
+# Shell scripts and Dockerfiles break outright with CRLF — pin them explicitly
+# rather than relying on content detection.
+*.sh text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf
+
+# Binary: never apply EOL conversion or attempt a text diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+
+# Lockfiles are generated: collapse them by default and keep them out of
+# language stats, but leave diffs readable — a lockfile diff is how a silent
+# dependency substitution gets caught.
+backend/uv.lock linguist-generated
+frontend/package-lock.json linguist-generated
