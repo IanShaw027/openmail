@@ -47,10 +47,11 @@ const SESSION_WRAP_KEY = 'openmail.vault.session.v1'
 
 /**
  * Default auto-lock after idle (minutes).
- * 0 = never auto-lock — normal daily use stays unlocked until explicit lock
- * or browser clears sessionStorage (tab/window close).
+ * A non-zero default limits exposure if a device is left unattended while the
+ * vault (and its decrypted secrets) is unlocked. Users may set 0 = never in
+ * Settings, which is still honored.
  */
-const DEFAULT_LOCK_MINUTES = 0
+const DEFAULT_LOCK_MINUTES = 30
 
 export type VaultStatus = 'unavailable' | 'setup' | 'locked' | 'unlocked'
 
@@ -90,15 +91,6 @@ export const useVaultStore = defineStore('vault', () => {
         return DEFAULT_LOCK_MINUTES
       }
       const n = Number(raw)
-      // One-time: previous product default was 30; treat as "never" for daily UX
-      // unless user already customized (migration flag set after any save).
-      if (
-        n === 30 &&
-        localStorage.getItem('openmail.vault.lockCustom') !== '1'
-      ) {
-        localStorage.setItem(LOCK_MINUTES_KEY, '0')
-        return 0
-      }
       return Number.isFinite(n) && n >= 0 ? n : DEFAULT_LOCK_MINUTES
     })(),
   )
