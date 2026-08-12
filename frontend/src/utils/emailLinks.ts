@@ -297,6 +297,8 @@ export function handleLandingRedirectConfirm(confirmNavigate: (url: string) => b
 export type EmailLinkClickOptions = {
   /** Confirm message factory; return false to cancel */
   confirmNavigate: (url: string) => boolean
+  /** Told when a link was blocked, so the click is not silently swallowed. */
+  onBlocked?: (href: string) => void
 }
 
 /**
@@ -332,7 +334,9 @@ export function onEmailHtmlClick(ev: MouseEvent, opts: EmailLinkClickOptions): v
     typeof location !== 'undefined' ? location.href : undefined,
   )
   if (!dest) {
-    // Nothing safe to open
+    // Nothing safe to open. The default was already prevented, so without this
+    // the click just does nothing and the link looks broken rather than blocked.
+    opts.onBlocked?.(href)
     return
   }
   if (!opts.confirmNavigate(dest)) return

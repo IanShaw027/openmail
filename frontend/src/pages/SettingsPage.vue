@@ -87,15 +87,26 @@ function saveLicense() {
 const lookbackDraft = ref(settings.s.lookbackDays)
 const retentionDraft = ref(settings.s.retentionDays)
 const concDraft = ref(settings.s.batchConcurrency)
+// Drafted too, purely for consistency: it sits in the same panel behind the same
+// Save button, and a checkbox that applies instantly next to three inputs that
+// do not is a confusing affordance.
+const precheckDraft = ref(settings.s.importPrecheck)
 
 // Keep drafts in step with the store when it changes from elsewhere (vault
 // hydration, system snapshot import) rather than stranding a stale edit.
 watch(
-  () => [settings.s.lookbackDays, settings.s.retentionDays, settings.s.batchConcurrency] as const,
-  ([lookback, retention, conc]) => {
+  () =>
+    [
+      settings.s.lookbackDays,
+      settings.s.retentionDays,
+      settings.s.batchConcurrency,
+      settings.s.importPrecheck,
+    ] as const,
+  ([lookback, retention, conc, precheck]) => {
     lookbackDraft.value = lookback
     retentionDraft.value = retention
     concDraft.value = conc
+    precheckDraft.value = precheck
   },
 )
 
@@ -103,16 +114,22 @@ function clampInt(v: unknown, lo: number, hi: number, fallback: number): number 
   // An empty field means "leave this alone". Without this, Number('') === 0
   // would clamp to the lower bound — turning a cleared retention box into a
   // drastic shrink.
-  if (v === '' || v === null || v === undefined) return fallback
+  //
+  // The fallback goes through the same clamp because it is read from the store,
+  // and an imported snapshot can put `undefined` there. An unclamped fallback
+  // then returns `undefined`, `undefined < undefined` skips the confirm, and
+  // retention ends up silently disabled while the box renders empty.
+  const safeFallback = Math.min(hi, Math.max(lo, Math.trunc(Number(fallback)) || lo))
+  if (v === '' || v === null || v === undefined) return safeFallback
   const n = Math.trunc(Number(v))
-  if (!Number.isFinite(n)) return fallback
+  if (!Number.isFinite(n)) return safeFallback
   return Math.min(hi, Math.max(lo, n))
 }
 
 function saveRetention() {
   let nextRetention = clampInt(retentionDraft.value, 7, 365, settings.s.retentionDays)
   if (nextRetention < settings.s.retentionDays) {
-    const doomed = mailCache.countPrunedBy(nextRetention)
+    const doomed = mailCache.countPrunedBy(nextRetention, settings.s.retentionDays)
     // null = cache still encrypted, so the exact count is unknown. Warn anyway
     // rather than skipping the prompt for a change that does delete mail later.
     const prompt =
@@ -129,6 +146,7 @@ function saveRetention() {
   }
   settings.s.lookbackDays = clampInt(lookbackDraft.value, 1, 30, settings.s.lookbackDays)
   settings.s.batchConcurrency = clampInt(concDraft.value, 1, 32, settings.s.batchConcurrency)
+  settings.s.importPrecheck = precheckDraft.value
   settings.s.retentionDays = nextRetention
   // Reflect any clamping back into the inputs
   lookbackDraft.value = settings.s.lookbackDays
@@ -222,7 +240,7 @@ onMounted(() => {
         </div>
         <div class="field">
           <label class="toggle">
-            <input v-model="settings.s.importPrecheck" type="checkbox" />
+            <input v-model="precheckDraft" type="checkbox" />
             <span class="toggle-track" aria-hidden="true" />
             <span>{{ t('settings.importPrecheck') }}</span>
           </label>

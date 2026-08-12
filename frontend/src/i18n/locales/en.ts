@@ -506,8 +506,11 @@ export default {
     tableDelete: 'Delete selected',
     batchDeleteConfirm:
       'Delete {n} selected account(s)? {cloud} of them also have a cloud copy that will be deleted on the server. Cached mail for these mailboxes is removed too. This cannot be undone.',
+    batchDeleteConfirmLocal:
+      'Delete {n} selected account(s)? Cached mail for these mailboxes is removed too. This cannot be undone.',
     batchDeleteDone: 'Deleted {n} account(s)',
-    batchDeletePartial: '{fail} account(s) kept — the cloud copy could not be deleted',
+    batchDeletePartial:
+      'Deleted {ok} account(s); {fail} kept — the cloud copy could not be deleted',
     oauthPasswordDisabledHint: 'OAuth cannot change mailbox password here; Microsoft password change invalidates refresh_token — re-import tokens.',
     exportCredentials: 'Export credentials TXT',
     exportSystem: 'Export system snapshot',
@@ -648,6 +651,7 @@ export default {
     mailShowing: 'Showing {n} / {total}',
     openLinkConfirm:
       'Open this external link in a new tab?\n\n{url}\n\nFull URL:\n{full}',
+    openLinkBlocked: 'Link blocked — it does not point anywhere safe to open',
     mailClearRefetch: 'Clear & refetch',
     mailClearHint: 'After success, clear this folder cache and fetch the latest 20 (list kept while loading)',
     mailClearConfirm: 'On success, clear this folder’s local cache and write the latest 20. Continue?',
@@ -712,7 +716,7 @@ export default {
     lookbackHint: 'After first full fetch, only request last N days',
     retentionDays: 'Local retention (days)',
     retentionHint:
-      'Local mail older than this is pruned on load, after fetch merge, and when you save. Unparseable dates are kept.',
+      'Local mail older than this is pruned on load, after fetch merge, and when you save. Per-mailbox caps also apply, and messages with an unreadable date are dropped first when a cap is hit.',
     retentionShrinkConfirm:
       'Saving a {days}-day window will permanently delete {n} cached message(s). Local mail is the only copy — this cannot be undone. Continue?',
     retentionShrinkConfirmUnknown:

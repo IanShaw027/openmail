@@ -199,10 +199,14 @@ async function applySnapshotOverwrite(snap: SystemSnapshot) {
     mailCache.replaceAll(snap.mailCache as never, snap.settings?.retentionDays)
   }
   if (snap.settings) {
-    userSettings.s.retentionDays = snap.settings.retentionDays
-    userSettings.s.lookbackDays = snap.settings.lookbackDays
+    userSettings.s.retentionDays = snap.settings.retentionDays ?? 90
+    userSettings.s.lookbackDays = snap.settings.lookbackDays ?? 3
     userSettings.s.firstFullDone = { ...snap.settings.firstFullDone }
   }
+  // Unconditional: a snapshot carrying `settings` but no `mailCache` shrinks the
+  // window and would otherwise leave the existing cache holding mail that is now
+  // out of range, which the retention hint promises never happens.
+  mailCache.pruneAll(userSettings.s.retentionDays)
   // Snapshot overwrite must hit vault before any refresh
   await accounts.flushPersist()
   await twofa.flushPersist()

@@ -136,6 +136,7 @@ function onMailHtmlClick(ev: MouseEvent) {
   onEmailHtmlClick(ev, {
     confirmNavigate: (url) =>
       window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url })),
+    onBlocked: () => flashMsg(t('console.openLinkBlocked'), 'danger'),
   })
 }
 

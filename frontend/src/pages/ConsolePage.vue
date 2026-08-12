@@ -428,6 +428,7 @@ function onMailHtmlClick(ev: MouseEvent) {
   onEmailHtmlClick(ev, {
     confirmNavigate: (url) =>
       window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url })),
+    onBlocked: () => flashMsg(t('console.openLinkBlocked'), 'danger'),
   })
 }
 
@@ -1178,6 +1179,10 @@ function onImportSystemFile(e: Event) {
             userSettings.s.retentionDays,
           )
         }
+        // Unconditional: a snapshot carrying `settings` but no `mailCache`
+        // shrinks the window while leaving the existing cache untouched, so the
+        // retention hint's "pruned on load" promise would briefly be false.
+        mailCache.pruneAll(userSettings.s.retentionDays)
         await accounts.flushPersist()
         await mailCache.flushPersist()
         await twofa.flushPersist()
@@ -2224,15 +2229,26 @@ async function onBatchDelete() {
     return
   }
   const cloud = rows.filter((a) => a.serverId).length
-  if (!window.confirm(t('console.batchDeleteConfirm', { n: rows.length, cloud }))) return
+  const confirmText = cloud
+    ? t('console.batchDeleteConfirm', { n: rows.length, cloud })
+    : t('console.batchDeleteConfirmLocal', { n: rows.length })
+  if (!window.confirm(confirmText)) return
   batchBusy.value = true
   try {
     await accounts.removeSelected()
     // removeSelected leaves the still-selected ids as the ones whose cloud twin
     // could not be deleted, so anything left over is a partial failure.
     const kept = accounts.selectedIds.size
-    if (kept) flashMsg(t('console.batchDeletePartial', { fail: kept }), 'danger')
-    else flashMsg(t('console.batchDeleteDone', { n: rows.length }))
+    if (kept) {
+      // Report the successes too: "5 kept" out of 20 left the user with no idea
+      // whether the other 15 are gone.
+      flashMsg(
+        t('console.batchDeletePartial', { ok: rows.length - kept, fail: kept }),
+        'danger',
+      )
+    } else {
+      flashMsg(t('console.batchDeleteDone', { n: rows.length }))
+    }
     if (!selected.value) messages.value = []
   } catch (e) {
     flashMsg(errorMessage(e, t('console.tableDelete')), 'danger')
@@ -2699,6 +2715,15 @@ function onKeydown(e: KeyboardEvent) {
       showImportHelp.value = false
       return
     }
+  }
+
+  // Everything below acts on the console behind the modal. Escape is handled
+  // above precisely so a modal can still be dismissed; the rest must not fire,
+  // or `e` opens the edit drawer and `i` toggles the import panel underneath
+  // whatever the user is currently filling in.
+  if (showSend.value || showGroupManage.value || showImportHelp.value) return
+
+  if (e.key === 'Escape') {
     if (isNarrow.value && !importCollapsed.value) {
       importCollapsed.value = true
       return

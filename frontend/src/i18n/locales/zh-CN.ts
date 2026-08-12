@@ -502,8 +502,10 @@ export default {
     tableDelete: '删除选中',
     batchDeleteConfirm:
       '确认删除选中的 {n} 个账号？其中 {cloud} 个在云端有副本，将一并从服务端删除；这些邮箱的本机缓存邮件也会被清除。此操作无法撤销。',
+    batchDeleteConfirmLocal:
+      '确认删除选中的 {n} 个账号？这些邮箱的本机缓存邮件也会被清除。此操作无法撤销。',
     batchDeleteDone: '已删除 {n} 个账号',
-    batchDeletePartial: '{fail} 个账号未删除——云端副本删除失败',
+    batchDeletePartial: '已删除 {ok} 个账号；{fail} 个未删除——云端副本删除失败',
     oauthPasswordDisabledHint: 'OAuth（微软等）不支持在此改邮箱登录密码。改微软密码会使 refresh_token 失效，需重新导入 token。',
     exportCredentials: '导出凭证 TXT',
     exportSystem: '导出系统快照',
@@ -644,6 +646,7 @@ export default {
     mailShowing: '显示 {n} / {total}',
     openLinkConfirm:
       '即将在新标签页打开外部链接：\n\n{url}\n\n完整地址：\n{full}\n\n确认跳转？',
+    openLinkBlocked: '链接已拦截——它没有指向可安全打开的地址',
     mailClearRefetch: '清空重拉',
     mailClearHint: '成功后清空当前文件夹缓存并重新拉取最近 20 封（请求中保留原列表）',
     mailClearConfirm: '成功取件后将清空当前文件夹本地缓存，并写入最新 20 封。确定继续？',
@@ -707,7 +710,7 @@ export default {
     lookbackHint: '首次全量后仅请求近 N 天邮件',
     retentionDays: '本地保留天数',
     retentionHint:
-      '超过保留天数的本机邮件会在加载、取件合并与保存时清理；无法解析日期的邮件会保留。',
+      '超过保留天数的本机邮件会在加载、取件合并与保存时清理；同时还有每邮箱数量上限，触顶时会优先丢弃日期无法解析的邮件。',
     retentionShrinkConfirm:
       '保存 {days} 天的保留窗口将永久删除 {n} 封已缓存邮件。本机邮件是唯一副本，删除后无法恢复。确认继续？',
     retentionShrinkConfirmUnknown:

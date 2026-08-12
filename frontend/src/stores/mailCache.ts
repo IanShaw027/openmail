@@ -1291,23 +1291,36 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     if (changed) byEmail.value = next
   }
 
-  /**
-   * How many cached messages `pruneAll(days)` would delete, or null when the
-   * count is unknowable because the cache has not been decrypted yet.
-   *
-   * Returning 0 in that state would be a lie that skips the confirmation: the
-   * in-memory map is empty only because it is still encrypted, and the mail
-   * gets deleted for real as soon as the vault hydrates and retention applies.
-   */
-  function countPrunedBy(retentionDays: number): number | null {
-    if (!vaultHydrated.value) return null
-    const days = Math.max(0, Number(retentionDays) || 0)
-    if (!days) return 0
+  /** Messages `pruneAll(days)` would remove, caps included. */
+  function _prunedCount(days: number): number {
     let n = 0
     for (const list of Object.values(byEmail.value)) {
       n += list.length - capMailboxList(pruneByRetention(list, days)).length
     }
     return n
+  }
+
+  /**
+   * How many extra messages moving retention to `retentionDays` would delete,
+   * or null when the count is unknowable because the cache is still encrypted.
+   *
+   * Returning 0 in that state would be a lie that skips the confirmation: the
+   * in-memory map is empty only because it is still encrypted, and the mail
+   * gets deleted for real as soon as the vault hydrates and retention applies.
+   *
+   * The number is a difference against the current window, not a raw prune
+   * count, because `pruneAll` also enforces the per-folder and per-mailbox
+   * caps. Counting those made a harmless save on an over-cap mailbox announce
+   * hundreds of doomed messages that the window had nothing to do with.
+   */
+  function countPrunedBy(retentionDays: number, currentDays?: number): number | null {
+    if (!vaultHydrated.value) return null
+    const days = Math.max(0, Number(retentionDays) || 0)
+    if (!days) return 0
+    const next = _prunedCount(days)
+    const current = Math.max(0, Number(currentDays) || 0)
+    if (!current) return next
+    return Math.max(0, next - _prunedCount(current))
   }
 
   /** Total cached messages (optional folder / email filter). For UI counts. */
