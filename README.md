@@ -275,6 +275,23 @@ curl -s http://127.0.0.1:8000/api/health
 
 Keep `./data` mounted across upgrades. Read [CHANGELOG.md](CHANGELOG.md) for breaking changes.
 
+### Upgrade notes: the app no longer runs as root
+
+Images up to `v0.3.6` ran as root, so an existing `./data` and `openmail.db` are
+owned by `root`. Newer images run the app as an unprivileged uid instead. You do
+**not** need to change anything: the container starts as root only long enough to
+fix ownership of the mounted data directory, then drops privileges. A
+bind-mounted `./data` keeps its current owner; only a `root`-owned directory is
+reassigned.
+
+Two things to be aware of:
+
+- If you pin `user:` in `docker-compose.yml` (or pass `--user`), the container
+  cannot repair ownership and will refuse to start unless that user already owns
+  `./data`. The error message names the uid and the `chown` to run.
+- `OPENMAIL_UID`/`OPENMAIL_GID` are no longer used. Leaving them in `.env` is
+  harmless.
+
 ---
 
 ## Troubleshooting
@@ -282,6 +299,7 @@ Keep `./data` mounted across upgrades. Read [CHANGELOG.md](CHANGELOG.md) for bre
 | Symptom | What to check |
 |---------|----------------|
 | `master_key_configured: false` | `OPENMAIL_MASTER_KEY` empty/invalid in `.env`; recreate container after fix |
+| `attempt to write a readonly database` / container restart loop | `./data` is not writable by the container. Upgrade to the latest image (it self-heals), or `sudo chown -R 10001:10001 ./data`. Remove any `user:` override that does not own `./data` |
 | Image pull fails on Apple Silicon | Image is **amd64-only** today — use a remote amd64 host, or `docker compose up --build` on arm (local build) |
 | IMAP SSL / cert errors | Fixed for DNS-pinned IP + SNI in recent builds; pull latest `v0.1.0+` |
 | IMAP `ascii codec` on folder names | Non-ASCII mailbox names need modified UTF-7 — use latest image |

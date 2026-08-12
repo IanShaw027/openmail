@@ -251,6 +251,20 @@ curl -s http://127.0.0.1:8000/api/health
 
 保留 `./data` 卷。变更见 [CHANGELOG.md](CHANGELOG.md)。
 
+### 升级提示：应用不再以 root 运行
+
+`v0.3.6` 及更早的镜像以 root 运行，因此存量的 `./data` 与 `openmail.db` 属主是
+`root`；新镜像改为以非特权 uid 运行应用。你**不需要**做任何手动操作：容器以 root
+启动后只做一件事——校正挂载数据目录的属主，随后立即降权。bind mount 的 `./data`
+会保留现有属主，只有属主是 `root` 的目录才会被改成内置账号。
+
+两点注意：
+
+- 如果你在 `docker-compose.yml` 里固定了 `user:`（或传了 `--user`），容器就无法自行
+  修复属主；若该用户并不拥有 `./data`，容器会拒绝启动，并在日志里给出具体 uid 和
+  需要执行的 `chown` 命令。
+- `OPENMAIL_UID`/`OPENMAIL_GID` 已不再使用，`.env` 里残留也无副作用。
+
 ---
 
 ## 排障

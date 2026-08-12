@@ -47,27 +47,10 @@ else
   echo "==> OPENMAIL_MASTER_KEY already set"
 fi
 
-# The container runs as a non-root user and ./data is a bind mount, so the host
-# directory has to be writable by that uid. Left to Docker, a missing ./data is
-# created as root:root and the very first start fails to create the database.
-# (macOS is immune because Docker Desktop maps uids, so this only bites Linux.)
+# Create the bind-mount target here so it belongs to the invoking user; left to
+# Docker it would appear as root:root. Ownership beyond that is the container
+# entrypoint's job — it adopts whatever uid owns this directory.
 mkdir -p data
-if [[ "$(uname -s)" == "Linux" ]]; then
-  host_uid="$(id -u)"
-  host_gid="$(id -g)"
-  if [[ "$host_uid" == "0" ]]; then
-    # Installing as root: hand the directory to the image user rather than
-    # running the container as root just to make the mount writable.
-    chown -R 10001:10001 data 2>/dev/null \
-      && echo "==> data/ owned by 10001:10001 (container user)" \
-      || echo "warn: could not chown data/ — container may fail to write /data" >&2
-  else
-    # Otherwise run the container as the invoking user, who already owns ./data.
-    grep -q '^OPENMAIL_UID=' .env || printf 'OPENMAIL_UID=%s\n' "$host_uid" >> .env
-    grep -q '^OPENMAIL_GID=' .env || printf 'OPENMAIL_GID=%s\n' "$host_gid" >> .env
-    echo "==> container will run as ${host_uid}:${host_gid} to match ./data"
-  fi
-fi
 
 # Export so `pull` and `up` cannot disagree about which image they act on.
 export OPENMAIL_IMAGE="${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.3.6}"

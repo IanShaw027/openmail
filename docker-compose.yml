@@ -56,9 +56,9 @@ services:
     build: .
     pull_policy: ${OPENMAIL_PULL_POLICY:-missing}
     container_name: openmail
-    # Non-root (matches image user). Bind-mounted ./data must be writable by
-    # this uid; override with OPENMAIL_UID/GID if your host dir differs.
-    user: "${OPENMAIL_UID:-10001}:${OPENMAIL_GID:-10001}"
+    # No `user:` on purpose: the entrypoint starts as root, reconciles ownership
+    # of the bind-mounted ./data, then drops to an unprivileged uid. Pinning a
+    # user here would skip that step and break on a root-owned data dir.
     security_opt:
       - no-new-privileges:true
     ports:

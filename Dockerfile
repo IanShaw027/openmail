@@ -46,23 +46,25 @@ RUN if [ -n "$OPENMAIL_VERSION" ]; then \
     fi
 
 # Persistent SQLite lives here (compose mounts ./data → /data)
-# Run as a non-root user; own the writable paths so the app can create the DB.
-# For bind mounts (compose ./data:/data) the host dir must be writable by this
-# uid — either chown it to 10001 or run compose with matching `user:`.
+# The app itself runs as uid 10001; the entrypoint starts as root only long
+# enough to reconcile ownership of the mounted data dir, then drops privileges.
 RUN mkdir -p /data ./app/static \
     && groupadd --gid 10001 openmail \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin openmail \
     && chown -R openmail:openmail /data /app
 
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 LABEL org.opencontainers.image.title="OpenMail" \
       org.opencontainers.image.description="Local-first multi-source mail console" \
       org.opencontainers.image.source="https://github.com/IanShaw027/openmail"
-
-USER openmail
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

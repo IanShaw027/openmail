@@ -43,5 +43,6 @@ data
 
 # Misc
 scripts
+!scripts/docker-entrypoint.sh
 docker-compose*.yml
 Dockerfile

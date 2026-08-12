@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Upgrade from a root-run install no longer crash-loops.** Images before this
+  change ran as root and created `data/openmail.db` as `root:root`; the switch to
+  an unprivileged uid then made SQLite fail with `attempt to write a readonly
+  database` (WAL writes at connect time, so even reads failed) with nothing in
+  the logs pointing at ownership. The container now starts as root only long
+  enough to reconcile ownership of the mounted data directory, then drops to an
+  unprivileged uid before running the app.
+- A bind-mounted `./data` keeps its existing owner instead of being reassigned to
+  uid 10001, so the host user who created the directory can still read it.
+- Enabling WAL is best-effort: a non-writable database directory now logs a
+  warning and falls back to the rollback journal instead of preventing startup.
+- Pinning `user:`/`--user` on a data directory that user does not own now fails
+  with an explicit message naming the uid and the `chown` to run, rather than an
+  opaque SQLite error.
+
+### Changed
+
+- `docker-compose.yml` no longer sets `user:`; the entrypoint decides which uid
+  to run as. `OPENMAIL_UID`/`OPENMAIL_GID` are no longer consulted (harmless if
+  still present in your `.env`). Pin `user:` yourself only if you also own
+  `./data` — see "Upgrade notes" in the README.
+
 ## [0.3.6] — 2026-08-06
 
 ### Added

@@ -32,16 +32,30 @@ def _make_engine():
         @event.listens_for(engine, "connect")
         def _sqlite_pragma(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]
             cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            # Wait instead of failing immediately when another writer holds the lock.
-            cursor.execute("PRAGMA busy_timeout=5000")
-            if not is_memory:
-                # WAL lets readers proceed during a write → fewer "database is
-                # locked" errors with the API + SyncWorker + fetch lease writing
-                # concurrently. NORMAL sync is the recommended WAL companion.
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+                # Wait instead of failing immediately when another writer holds the lock.
+                cursor.execute("PRAGMA busy_timeout=5000")
+                if not is_memory:
+                    # WAL lets readers proceed during a write → fewer "database is
+                    # locked" errors with the API + SyncWorker + fetch lease writing
+                    # concurrently. NORMAL sync is the recommended WAL companion.
+                    #
+                    # Switching to WAL is itself a write and needs a writable
+                    # *directory* for the -wal/-shm sidecars. If that fails, keep
+                    # the connection on the rollback journal rather than turning a
+                    # permissions problem into an unbootable app.
+                    try:
+                        cursor.execute("PRAGMA journal_mode=WAL")
+                        cursor.execute("PRAGMA synchronous=NORMAL")
+                    except Exception as exc:  # pragma: no cover - environment-specific
+                        logger.warning(
+                            "could not enable WAL (%s); falling back to the default "
+                            "journal. Check that the database directory is writable.",
+                            exc,
+                        )
+            finally:
+                cursor.close()
 
     return engine
 
