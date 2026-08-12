@@ -18,7 +18,8 @@
 # Docs: docs/14-ops-and-smoke.md · docs/16-warp-proxy-pool.md · docs/17-release.md
 
 x-warp-common: &warp-common
-  image: caomingjun/warp:latest
+  # Pin a specific tag/digest in prod, e.g. WARP_IMAGE=caomingjun/warp@sha256:...
+  image: ${WARP_IMAGE:-caomingjun/warp:latest}
   restart: unless-stopped
   profiles: ["warp"]
   cap_add:
