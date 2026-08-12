@@ -303,6 +303,23 @@ def check_event_quota(
             session.close()
 
 
+def _hourly_limit(raw: Any, default: int) -> int | None:
+    """Resolve a configured hourly cap. ``None`` means unlimited.
+
+    ``0`` (and any negative value) turns the limit off, which is what an
+    operator setting the knob to zero means. Only an unset/unparsable value
+    falls back to the default — substituting the default for an explicit 0
+    would silently enforce a limit nobody asked for.
+    """
+    if raw is None:
+        return default if default > 0 else None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return default if default > 0 else None
+    return None if n <= 0 else n
+
+
 def check_code_api_quota(
     token: str,
     *,
@@ -316,15 +333,39 @@ def check_code_api_quota(
     sub-limit so a leaked token cannot hammer upstream providers.
     """
     s = settings or get_settings()
-    base_limit = max(1, int(getattr(s, "code_api_max_fetch_per_hour", None) or 60))
+    base_limit = _hourly_limit(getattr(s, "code_api_max_fetch_per_hour", None), 60)
     key = "codeapi:" + hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:40]
-    allowed, err = check_event_quota(key, limit=base_limit, db=db)
-    if not allowed:
-        return allowed, err
+    if base_limit is not None:
+        allowed, err = check_event_quota(key, limit=base_limit, db=db)
+        if not allowed:
+            return allowed, err
     if refresh:
-        refresh_limit = max(1, int(getattr(s, "code_api_max_refresh_per_hour", None) or 15))
+        refresh_limit = _hourly_limit(getattr(s, "code_api_max_refresh_per_hour", None), 15)
+        if refresh_limit is None:
+            return True, None
         return check_event_quota(key + ":refresh", limit=refresh_limit, db=db)
     return True, None
+
+
+def check_code_api_miss_quota(
+    client_ip: str,
+    *,
+    settings: Settings | None = None,
+    db: Session | None = None,
+) -> tuple[bool, str | None]:
+    """Throttle *failed* code-API token lookups.
+
+    Keyed by client IP rather than by the attempted token: an unknown token must
+    not get a counter row of its own, or enumerating tokens would grow the event
+    table without bound. Without this, the token-not-found path is the one way
+    to hit the public endpoint at unlimited rate.
+    """
+    s = settings or get_settings()
+    limit = _hourly_limit(getattr(s, "code_api_max_fetch_per_hour", None), 60)
+    if limit is None:
+        return True, None
+    digest = hashlib.sha256((client_ip or "unknown").encode("utf-8")).hexdigest()[:40]
+    return check_event_quota("codeapi-miss:" + digest, limit=limit, db=db)
 
 
 def poll_used_in_hour(

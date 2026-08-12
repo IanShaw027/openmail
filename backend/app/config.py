@@ -130,12 +130,18 @@ class Settings(BaseSettings):
     code_api_max_fetch_per_hour: int = Field(
         default=60,
         validation_alias="CODE_API_MAX_FETCH_PER_HOUR",
-        description="Max public code-API fetches per token per hour (abuse control)",
+        description=(
+            "Max public code-API fetches per token per hour (abuse control); "
+            "0 disables the limit. Also caps unknown-token requests per client IP."
+        ),
     )
     code_api_max_refresh_per_hour: int = Field(
         default=15,
         validation_alias="CODE_API_MAX_REFRESH_PER_HOUR",
-        description="Stricter cap for code-API refresh=1 (force upstream) per token per hour",
+        description=(
+            "Stricter cap for code-API refresh=1 (force upstream) per token per hour; "
+            "0 disables the limit"
+        ),
     )
     # Comma-separated pre-issued license tokens (unlimited quota when presented)
     license_tokens: str = Field(

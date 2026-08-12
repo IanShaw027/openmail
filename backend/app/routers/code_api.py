@@ -17,7 +17,7 @@ from app.deps import DbDep, SettingsDep
 from app.models import Account, CodeApiToken
 from app.schemas import CodeApiOut, CodeFetchJsonResult
 from app.services.fetch_service import FetchServiceResult, fetch_account
-from app.services.license import check_code_api_quota
+from app.services.license import check_code_api_miss_quota, check_code_api_quota
 
 router = APIRouter(tags=["code-api"])
 
@@ -38,6 +38,28 @@ def create_or_return_code_api(account_id: str) -> CodeApiOut:
         status_code=status.HTTP_410_GONE,
         detail="code-api create removed — use local fetch; token URLs already issued still work",
     )
+
+
+def _client_ip(request: Request) -> str:
+    """Peer address of the request.
+
+    Intentionally ignores X-Forwarded-For: it is attacker-controlled unless a
+    trusted proxy is known to overwrite it, and honouring it here would let a
+    single client bypass the limit by rotating the header. Behind a reverse
+    proxy every miss therefore shares one bucket, which is acceptable for a path
+    that only legitimate clients never hit.
+    """
+    client = request.client
+    return client.host if client and client.host else "unknown"
+
+
+def _enforce(outcome: tuple[bool, str | None]) -> None:
+    allowed, err = outcome
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=err or "rate limit exceeded",
+        )
 
 
 def _result_to_json(result: FetchServiceResult) -> CodeFetchJsonResult:
@@ -70,6 +92,10 @@ def public_code_fetch(
 ) -> Response:
     row = db.query(CodeApiToken).filter(CodeApiToken.token == token).one_or_none()
     if row is None or not row.enabled:
+        # Throttle misses too, by IP: the per-token limit below can only charge
+        # tokens that exist, so without this the not-found path is an unmetered
+        # way to hit the endpoint (and to enumerate tokens).
+        _enforce(check_code_api_miss_quota(_client_ip(request), settings=settings))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="token not found")
 
     acc = db.get(Account, row.account_id)
@@ -78,14 +104,12 @@ def public_code_fetch(
 
     # Public endpoint (token-only auth): rate limit per token to stop a leaked
     # URL from hammering upstream providers / draining the proxy pool.
-    allowed, quota_err = check_code_api_quota(
-        token, refresh=refresh == 1, settings=settings, db=db
-    )
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=quota_err or "rate limit exceeded",
-        )
+    #
+    # Deliberately not on this request's session: the quota needs its own
+    # BEGIN IMMEDIATE to serialize the count-then-insert, and SQLite ignores the
+    # SELECT ... FOR UPDATE that would otherwise guard it. Sharing the session
+    # skips that and lets concurrent requests all read "under the limit".
+    _enforce(check_code_api_quota(token, refresh=refresh == 1, settings=settings))
 
     row.last_used_at = datetime.now(timezone.utc)
     db.commit()

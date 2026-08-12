@@ -1,0 +1,91 @@
+"""Regression: the SQLite migration must actually run with foreign keys off.
+
+`PRAGMA foreign_keys` is a silent no-op inside a transaction, so issuing it
+after `engine.begin()` left enforcement ON while the migration dropped the
+legacy `users` table that `accounts.owner_user_id` still referenced.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+import app.db as db_mod
+from sqlalchemy import create_engine, event
+
+LEGACY_SCHEMA = """
+CREATE TABLE users (
+    id VARCHAR(40) NOT NULL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL
+);
+CREATE TABLE user_sessions (
+    id VARCHAR(40) NOT NULL PRIMARY KEY,
+    user_id VARCHAR(40) REFERENCES users(id)
+);
+CREATE TABLE accounts (
+    id VARCHAR(40) NOT NULL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    provider VARCHAR(32) NOT NULL,
+    pool VARCHAR(32) NOT NULL,
+    owner_user_id VARCHAR(128) REFERENCES users(id),
+    status VARCHAR(32) NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+INSERT INTO users (id, email) VALUES ('u1', 'owner@example.com');
+INSERT INTO user_sessions (id, user_id) VALUES ('s1', 'u1');
+INSERT INTO accounts (id, email, provider, pool, owner_user_id, status, created_at, updated_at)
+VALUES ('a1', 'box@example.com', 'imap', 'default', 'u1', 'active',
+        '2026-01-01 00:00:00', '2026-01-01 00:00:00');
+"""
+
+
+def _make_legacy_db(path) -> None:
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(LEGACY_SCHEMA)
+        con.commit()
+    finally:
+        con.close()
+
+
+def _engine_with_fk_on(path):
+    """Mirror the real engine: every connection starts with foreign keys ON."""
+    engine = create_engine(f"sqlite:///{path}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _pragma(dbapi_conn, _record):  # type: ignore[no-untyped-def]
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    return engine
+
+
+def test_migration_drops_legacy_users_table_with_referencing_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "legacy.db"
+    _make_legacy_db(db_path)
+    engine = _engine_with_fk_on(db_path)
+    monkeypatch.setattr(db_mod, "engine", engine)
+
+    db_mod.migrate_schema()
+
+    con = sqlite3.connect(db_path)
+    try:
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "users" not in tables
+        assert "user_sessions" not in tables
+        assert "accounts" in tables
+
+        # The account row survived the rebuild, owner id intact.
+        row = con.execute("SELECT id, email, owner_user_id FROM accounts").fetchone()
+        assert row == ("a1", "box@example.com", "u1")
+
+        # No dangling FK to the dropped table.
+        fks = con.execute("PRAGMA foreign_key_list(accounts)").fetchall()
+        assert not any(str(f[2]).lower() == "users" for f in fks), fks
+    finally:
+        con.close()
+
+    # Enforcement is restored for connections handed out after the migration.
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1

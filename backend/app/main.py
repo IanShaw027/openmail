@@ -135,12 +135,18 @@ def _mount_spa(application: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="Not Found")
 
         if full_path:
-            static_root = STATIC_DIR.resolve()
-            candidate = (static_root / full_path).resolve()
-            # Reject any path that escapes the static root (e.g. `%2e%2e/.env`).
-            if candidate == static_root or static_root in candidate.parents:
-                if candidate.is_file():
-                    return FileResponse(candidate)
+            try:
+                static_root = STATIC_DIR.resolve()
+                candidate = (static_root / full_path).resolve()
+                # Reject any path that escapes the static root (e.g. `%2e%2e/.env`).
+                if candidate == static_root or static_root in candidate.parents:
+                    if candidate.is_file():
+                        return FileResponse(candidate)
+            except (OSError, ValueError):
+                # Paths the filesystem refuses to even parse (embedded null byte,
+                # over-long component) are not routes; serve the SPA rather than
+                # turning a malformed URL into a 500.
+                pass
         return FileResponse(index)
 
 

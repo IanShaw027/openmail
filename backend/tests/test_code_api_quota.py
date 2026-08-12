@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.services.license import check_code_api_quota
+from app.services.license import check_code_api_miss_quota, check_code_api_quota
 
 
 def _settings(fetch_limit: int, refresh_limit: int) -> SimpleNamespace:
@@ -48,3 +48,45 @@ def test_code_api_quota_is_per_token(db_session):
     assert check_code_api_quota("token_b", settings=s, db=db_session)[0]
     # token_a is now exhausted.
     assert not check_code_api_quota("token_a", settings=s, db=db_session)[0]
+
+
+def test_zero_disables_the_limit_instead_of_falling_back_to_the_default(db_session):
+    # A falsy 0 used to be read as "unset" and silently replaced by 60/hour.
+    s = _settings(fetch_limit=0, refresh_limit=0)
+
+    for _ in range(70):
+        assert check_code_api_quota("tok_unlimited", settings=s, db=db_session)[0]
+    for _ in range(20):
+        assert check_code_api_quota("tok_unlimited", refresh=True, settings=s, db=db_session)[0]
+
+
+def test_zero_refresh_limit_still_charges_the_base_limit(db_session):
+    s = _settings(fetch_limit=2, refresh_limit=0)
+
+    assert check_code_api_quota("tok_mixed", refresh=True, settings=s, db=db_session)[0]
+    assert check_code_api_quota("tok_mixed", refresh=True, settings=s, db=db_session)[0]
+    assert not check_code_api_quota("tok_mixed", refresh=True, settings=s, db=db_session)[0]
+
+
+def test_unknown_token_requests_are_throttled_per_ip(db_session):
+    s = _settings(fetch_limit=2, refresh_limit=10)
+
+    assert check_code_api_miss_quota("203.0.113.7", settings=s, db=db_session)[0]
+    assert check_code_api_miss_quota("203.0.113.7", settings=s, db=db_session)[0]
+    allowed, err = check_code_api_miss_quota("203.0.113.7", settings=s, db=db_session)
+    assert not allowed
+    assert "rate limit" in (err or "")
+
+    # A different client is unaffected.
+    assert check_code_api_miss_quota("198.51.100.4", settings=s, db=db_session)[0]
+
+
+def test_miss_quota_does_not_consume_the_per_token_budget(db_session):
+    # Enumeration attempts must not be able to exhaust a real token's quota.
+    s = _settings(fetch_limit=2, refresh_limit=10)
+
+    assert check_code_api_miss_quota("203.0.113.9", settings=s, db=db_session)[0]
+    assert check_code_api_miss_quota("203.0.113.9", settings=s, db=db_session)[0]
+
+    assert check_code_api_quota("real_token", settings=s, db=db_session)[0]
+    assert check_code_api_quota("real_token", settings=s, db=db_session)[0]

@@ -35,3 +35,18 @@ def test_spa_fallback_rejects_path_traversal(tmp_path, monkeypatch):
     # Legitimate asset and SPA route still work.
     assert client.get("/app.js").text == "console.log('real asset')"
     assert "<html>spa</html>" in client.get("/some/client/route").text
+
+
+def test_spa_fallback_survives_unparsable_paths(tmp_path, monkeypatch):
+    """A path the filesystem cannot parse is a bad route, not a server error."""
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html>spa</html>")
+
+    monkeypatch.setattr(main_mod, "STATIC_DIR", static_dir)
+    client = TestClient(main_mod.create_app())
+
+    for path in ("/%00", "/foo%00.js", "/" + "a" * 5000):
+        resp = client.get(path)
+        assert resp.status_code == 200, (path, resp.status_code)
+        assert "<html>spa</html>" in resp.text, path

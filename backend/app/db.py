@@ -154,8 +154,11 @@ def _sqlite_accounts_has_users_fk(conn) -> bool:  # type: ignore[no-untyped-def]
 
 
 def _sqlite_rebuild_accounts_drop_users_fk(conn) -> None:  # type: ignore[no-untyped-def]
-    """Recreate accounts without FK to users so device_id can be stored in owner_user_id."""
-    conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    """Recreate accounts without FK to users so device_id can be stored in owner_user_id.
+
+    Assumes the caller already disabled foreign keys: toggling them here would be
+    a no-op, because this runs inside the migration transaction.
+    """
     conn.exec_driver_sql(
         """
         CREATE TABLE IF NOT EXISTS accounts_new (
@@ -202,7 +205,6 @@ def _sqlite_rebuild_accounts_drop_users_fk(conn) -> None:  # type: ignore[no-unt
     conn.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS ix_accounts_pool ON accounts (pool)"
     )
-    conn.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
 # Columns that may be missing on upgraded installs (create_all does not ALTER).
@@ -292,6 +294,49 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
                 logger.exception("migrate: failed to add fetch_lock_state.lease_token")
 
 
+def _sqlite_migrate(conn) -> None:  # type: ignore[no-untyped-def]
+    """SQLite migration body. Runs inside a transaction with FKs already off."""
+    tables = {
+        str(r[0])
+        for r in conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "accounts" in tables:
+        for col, col_type in (
+            ("owner_user_id", "VARCHAR(128)"),
+            ("last_sync_at", "DATETIME"),
+            ("last_sync_error", "VARCHAR(512)"),
+            ("sync_enabled", "BOOLEAN DEFAULT 0"),
+            ("proxy", "VARCHAR(512)"),
+            ("latest_verification_code", "VARCHAR(64)"),
+            ("latest_code_at", "DATETIME"),
+            ("latest_code_folder", "VARCHAR(32)"),
+            ("last_fetch_at", "DATETIME"),
+            ("last_error", "VARCHAR(512)"),
+        ):
+            _sqlite_add_column(conn, "accounts", col, col_type)
+    if "fetch_lock_state" in tables:
+        _sqlite_add_column(conn, "fetch_lock_state", "lease_token", "VARCHAR(36)")
+
+    # Drop user system (no longer used)
+    for tbl in ("user_sessions", "admin_sessions", "mail_index", "users"):
+        if tbl in tables:
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS {tbl}")
+
+    # After users dropped, rebuild accounts if legacy FK still points at users
+    tables = {
+        str(r[0])
+        for r in conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "accounts" in tables and _sqlite_accounts_has_users_fk(conn):
+        _sqlite_rebuild_accounts_drop_users_fk(conn)
+    if "accounts" in tables:
+        _ensure_account_owner_email_unique(conn)
+
+
 def migrate_schema() -> None:
     """Apply lightweight upgrades create_all cannot do.
 
@@ -300,53 +345,25 @@ def migrate_schema() -> None:
     """
     url = str(engine.url)
     if url.startswith("sqlite"):
-        with engine.begin() as conn:
-            tables = {
-                str(r[0])
-                for r in conn.exec_driver_sql(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            if "accounts" in tables:
-                for col, col_type in (
-                    ("owner_user_id", "VARCHAR(128)"),
-                    ("last_sync_at", "DATETIME"),
-                    ("last_sync_error", "VARCHAR(512)"),
-                    ("sync_enabled", "BOOLEAN DEFAULT 0"),
-                    ("proxy", "VARCHAR(512)"),
-                    ("latest_verification_code", "VARCHAR(64)"),
-                    ("latest_code_at", "DATETIME"),
-                    ("latest_code_folder", "VARCHAR(32)"),
-                    ("last_fetch_at", "DATETIME"),
-                    ("last_error", "VARCHAR(512)"),
-                ):
-                    _sqlite_add_column(conn, "accounts", col, col_type)
-            if "fetch_lock_state" in tables:
-                _sqlite_add_column(conn, "fetch_lock_state", "lease_token", "VARCHAR(36)")
-
-            # Drop user system (no longer used)
+        # Foreign keys must be disabled for the legacy table drops and the
+        # accounts rebuild. `PRAGMA foreign_keys` is a silent no-op inside a
+        # transaction, so it has to be issued before the migration's BEGIN —
+        # hence AUTOCOMMIT plus an explicit transaction, rather than
+        # engine.begin(), which would open one first and make the pragma do
+        # nothing. The explicit BEGIN/COMMIT keeps the rebuild atomic.
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
-            for tbl in (
-                "user_sessions",
-                "admin_sessions",
-                "mail_index",
-                "users",
-            ):
-                if tbl in tables:
-                    conn.exec_driver_sql(f"DROP TABLE IF EXISTS {tbl}")
-            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
-
-            # After users dropped, rebuild accounts if legacy FK still points at users
-            tables = {
-                str(r[0])
-                for r in conn.exec_driver_sql(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            if "accounts" in tables and _sqlite_accounts_has_users_fk(conn):
-                _sqlite_rebuild_accounts_drop_users_fk(conn)
-            if "accounts" in tables:
-                _ensure_account_owner_email_unique(conn)
+            try:
+                conn.exec_driver_sql("BEGIN")
+                try:
+                    _sqlite_migrate(conn)
+                    conn.exec_driver_sql("COMMIT")
+                except Exception:
+                    conn.exec_driver_sql("ROLLBACK")
+                    raise
+            finally:
+                # Restore before the connection goes back to the pool.
+                conn.exec_driver_sql("PRAGMA foreign_keys=ON")
         return
 
     # Non-SQLite
