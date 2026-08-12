@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.providers.base import Message, filter_messages_by_time
 from app.schemas import SendMailRequest
 from app.services.fetch_service import FetchServiceResult
@@ -66,13 +68,27 @@ def test_fetch_service_result_carries_uidvalidity():
 
 
 def test_send_mail_request_accepts_proxy():
-    body = SendMailRequest(
-        to=["a@example.com"],
-        email="from@example.com",
-        password="secret",
-        proxy="socks5://127.0.0.1:1080",
-    )
-    assert body.proxy == "socks5://127.0.0.1:1080"
+    from unittest.mock import patch
+
+    from pydantic import ValidationError
+
+    # Loopback is rejected: a client-supplied proxy is an SSRF surface.
+    with pytest.raises(ValidationError):
+        SendMailRequest(
+            to=["a@example.com"],
+            email="from@example.com",
+            password="secret",
+            proxy="socks5://127.0.0.1:1080",
+        )
+
+    with patch("app.services.ssrf.pick_safe_ip", return_value="93.184.216.34"):
+        body = SendMailRequest(
+            to=["a@example.com"],
+            email="from@example.com",
+            password="secret",
+            proxy="socks5://proxy.example.com:1080",
+        )
+    assert body.proxy == "socks5://proxy.example.com:1080"
     body_none = SendMailRequest(to=["a@example.com"])
     assert body_none.proxy is None
 

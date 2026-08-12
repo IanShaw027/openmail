@@ -14,6 +14,32 @@ class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+def _validate_client_proxy(v: str | None) -> str | None:
+    """Reject a client-supplied proxy that points into the server's own network.
+
+    The SSRF policy only ever inspected the destination URL, but a proxy is an
+    outbound connection of its own: `http://127.0.0.1:9200` makes the server
+    open a socket to a loopback service and write a request line to it. Many
+    internal services answer, and the difference between refused, accepted and
+    timed out is a working port scan either way.
+
+    Only request-supplied proxies pass through here. PROXY_POOL / PROXY_TEMPLATE
+    are operator configuration and are intentionally left alone, since the
+    bundled WARP sidecars live on private addresses.
+    """
+    if v is None:
+        return None
+    raw = v.strip()
+    if not raw:
+        return None
+    from app.services.ssrf import SsrfError, validate_proxy_url
+
+    try:
+        return validate_proxy_url(raw)
+    except SsrfError as exc:
+        raise ValueError(str(exc)) from exc
+
+
 # ── Accounts ──────────────────────────────────────────────────────────
 
 
@@ -35,6 +61,8 @@ class AccountCreate(BaseModel):
         description="Base64 JSON CipherPackage from browser vault",
     )
 
+    _check_proxy = field_validator("proxy")(_validate_client_proxy)
+
 
 class AccountUpdate(BaseModel):
     email: str | None = None
@@ -48,6 +76,8 @@ class AccountUpdate(BaseModel):
     status: AccountStatus | None = None
     cookies: list[dict[str, Any]] | None = None
     client_sealed: str | None = Field(default=None, max_length=2_000_000)
+
+    _check_proxy = field_validator("proxy")(_validate_client_proxy)
 
 
 class AccountOut(ORMModel):
@@ -150,6 +180,8 @@ class ProxyFetchRequest(BaseModel):
     # Force full recent window (ignore since)
     full: bool = False
 
+    _check_proxy = field_validator("proxy")(_validate_client_proxy)
+
 
 class SendMailRequest(BaseModel):
     """Send mail — only for local/private credentials, not public pool abuse."""
@@ -165,6 +197,8 @@ class SendMailRequest(BaseModel):
     credential: dict[str, Any] | None = None
     # Optional fixed egress proxy for this send
     proxy: str | None = None
+
+    _check_proxy = field_validator("proxy")(_validate_client_proxy)
 
 
 class SendMailResponse(BaseModel):

@@ -204,6 +204,53 @@ def pin_url_to_ip(url: str) -> tuple[str, str, dict[str, str]]:
     return pinned, host, headers
 
 
+# Schemes httpx understands for the `proxy=` argument.
+_PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+
+
+def validate_proxy_url(proxy: str, *, allow_private: bool | None = None) -> str:
+    """Validate an outbound proxy URL against the same policy as a target URL.
+
+    The SSRF checks only ever looked at the destination, but the proxy is just
+    as much an outbound connection: pointing it at ``http://127.0.0.1:9200``
+    makes the server open a socket to a loopback service and send it a request
+    line. Many internal HTTP services answer that, and even when they do not,
+    the difference between refused, accepted and timed out is a working port
+    scan of the host network.
+
+    Self-hosted deployments legitimately proxy through a sidecar on a private
+    address (the bundled WARP pool does exactly that), so private targets are
+    allowed when configured — but only from server-side configuration, never
+    from a client-supplied credential.
+    """
+    raw = (proxy or "").strip()
+    if not raw:
+        raise SsrfError("Proxy URL required / 需要代理地址")
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _PROXY_SCHEMES:
+        raise SsrfError(f"Unsupported proxy scheme / 不支持的代理协议: {scheme or '(none)'}")
+    host = parsed.hostname
+    if not host:
+        raise SsrfError("Proxy host missing / 代理缺少主机名")
+    if parsed.port is not None and not (1 <= parsed.port <= 65535):
+        raise SsrfError("Invalid proxy port / 代理端口无效")
+
+    if allow_private is None:
+        from app.config import get_settings
+
+        allow_private = bool(getattr(get_settings(), "allow_private_proxy", False))
+    if allow_private:
+        return raw
+
+    _check_hostname_literal(host)
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pick_safe_ip(host)
+    return raw
+
+
 def is_safe_url(url: str, *, resolve_dns: bool = True) -> bool:
     try:
         validate_url(url, resolve_dns=resolve_dns)

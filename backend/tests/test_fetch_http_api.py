@@ -159,8 +159,12 @@ def test_http_api_filters_messages_by_mailbox_email() -> None:
 
 def test_http_api_fetch_success() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        # Must request hostname (not bare IP) so TLS SNI works for CF / workers.dev
-        assert "example.com" in str(request.url)
+        # Pin-to-IP closes the DNS-rebinding window: the TCP peer is the
+        # address we just validated, while Host + sni_hostname keep the
+        # original name so Cloudflare / workers.dev TLS still works.
+        assert "93.184.216.34" in str(request.url)
+        assert request.headers.get("host") == "example.com"
+        assert request.extensions.get("sni_hostname") == "example.com"
         return httpx.Response(
             200,
             json={
@@ -180,7 +184,6 @@ def test_http_api_fetch_success() -> None:
     account = SimpleNamespace(provider=ProviderType.http_api, email="u@example.com")
 
     with patch("app.services.ssrf._resolve_host", return_value=["93.184.216.34"]):
-        # SSRF still resolves DNS; request keeps original host for SNI
         result = provider.fetch(
             account,
             credentials={"api_url": "https://example.com/mail.json"},

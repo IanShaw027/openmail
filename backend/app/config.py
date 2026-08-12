@@ -91,6 +91,16 @@ class Settings(BaseSettings):
         validation_alias="PROXY_SID_STRATEGY",
         description="sticky_per_account | rotate_per_sync | rotate_on_error | round_robin",
     )
+    allow_private_proxy: bool = Field(
+        default=False,
+        validation_alias="ALLOW_PRIVATE_PROXY",
+        description=(
+            "Permit client-supplied proxy URLs that resolve to private/loopback "
+            "addresses. Off by default: such a proxy makes the server connect to "
+            "your internal network on request. PROXY_POOL / PROXY_TEMPLATE are "
+            "operator config and are never subject to this check."
+        ),
+    )
     fetch_concurrency: int = Field(
         default=5,
         validation_alias="FETCH_CONCURRENCY",

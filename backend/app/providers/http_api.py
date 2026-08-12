@@ -19,7 +19,13 @@ import httpx
 
 from app.providers.base import CredentialUpdates, FetchResult, HealthResult, Message
 from app.services.parser import annotate_message_code
-from app.services.ssrf import SsrfError, validate_redirect_target, validate_url
+from app.services.ssrf import (
+    SsrfError,
+    pin_url_to_ip,
+    validate_proxy_url,
+    validate_redirect_target,
+    validate_url,
+)
 
 _TIMEOUT = 20.0
 _MAX_REDIRECTS = 5
@@ -572,9 +578,18 @@ class HttpApiProvider:
     ) -> httpx.Response:
         """GET/POST url with SSRF validation including redirects.
 
-        SSRF: resolve DNS and block private/metadata IPs, then request the
-        **original hostname** so TLS SNI works (Cloudflare / workers.dev reject
-        bare-IP HTTPS with SSLV3_ALERT_HANDSHAKE_FAILURE when using pin-to-IP).
+        SSRF: resolve DNS once per hop, reject private/metadata addresses, then
+        connect to *that* resolved IP rather than re-resolving the hostname.
+
+        Validating a name and then letting httpx look it up again leaves a
+        check-then-connect window: an attacker's authoritative DNS answers with
+        a public address for the check and a private one for the connect, and
+        the SSRF gate becomes decorative. Since the response body comes back to
+        the caller as message content, that is a readable SSRF, not a blind one.
+
+        The hostname is preserved for TLS SNI, certificate verification and the
+        Host header, which is what the pin used to be avoided for — bare-IP
+        HTTPS does fail against Cloudflare, but only without the SNI override.
 
         Returns a streamed response opened via ``client.stream`` (caller must
         read/close the body). Body size limits are enforced by
@@ -586,8 +601,8 @@ class HttpApiProvider:
         stream_cm = None
         try:
             for _ in range(_MAX_REDIRECTS + 1):
-                # Re-check DNS / private ranges every hop without rewriting host
-                validate_url(current_orig, resolve_dns=True)
+                # Resolve and lock the address for this hop in one step.
+                connect_url, orig_host, host_headers = pin_url_to_ip(current_orig)
                 req_headers = dict(headers or {})
                 if _origin(current_orig) != _origin(url):
                     req_headers = {
@@ -595,13 +610,15 @@ class HttpApiProvider:
                         for k, v in req_headers.items()
                         if k.lower() not in _SENSITIVE_REDIRECT_HEADERS
                     }
+                req_headers.update(host_headers)
                 # httpx >=0.28: use client.stream() so the body is not fully
                 # buffered before our byte budget can run.
                 stream_cm = client.stream(
                     method.upper(),
-                    current_orig,
+                    connect_url,
                     headers=req_headers,
                     follow_redirects=False,
+                    extensions={"sni_hostname": orig_host},
                 )
                 resp = stream_cm.__enter__()
 

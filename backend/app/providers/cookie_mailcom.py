@@ -29,6 +29,26 @@ DEFAULT_SITE = "mail.com"
 MAIL_HOME_URL = "https://www.mail.com/"
 LIGHT_FOLDER_URL = "https://lightmailer.mail.com/folderlist"
 LIGHT_START_URL = "https://lightmailer.mail.com/start?device=desktop&ott={ott}"
+
+# This provider talks only to United Internet webmail properties. Without a host
+# allowlist, `site` and `session_meta.folder_url` are attacker-controlled outbound
+# targets: a public evil host receives the user's plaintext password on the login
+# POST, and a metadata IP (169.254.169.254) is a readable SSRF whose body is
+# parsed back as mail. Generic DNS SSRF checks alone cannot stop the password
+# exfiltration case — the host is public on purpose.
+_MAILCOM_HOST_SUFFIXES = (
+    "mail.com",
+    "gmx.com",
+    "gmx.net",
+    "gmx.de",
+    "gmx.at",
+    "gmx.ch",
+    "gmx.fr",
+    "gmx.es",
+    "gmx.co.uk",
+    "web.de",
+)
+
 # Keep single HTTP short — multi-step login × retries × WARP must stay under browser timeout
 DEFAULT_TIMEOUT = 12.0
 QUICK_LIMIT = 15
@@ -275,8 +295,90 @@ def apply_cookies(client: Any, cookies: list[dict[str, Any]]) -> None:
             pass
 
 
+def _host_allowed(hostname: str | None) -> bool:
+    host = (hostname or "").strip().lower().rstrip(".")
+    if not host:
+        return False
+    return any(host == suf or host.endswith("." + suf) for suf in _MAILCOM_HOST_SUFFIXES)
+
+
+def assert_mailcom_url(url: str, *, resolve_dns: bool = True) -> str:
+    """Reject any URL this provider is not allowed to contact.
+
+    Raises ``ValueError`` (safe to surface) rather than ``SsrfError`` so the
+    fetch path's existing error handling stays unchanged.
+
+    ``resolve_dns`` is on for live requests (defense in depth against a poisoned
+    mail.com record pointing at a private IP). Meta sanitization turns it off so
+    a stored legitimate URL is not dropped just because DNS is briefly unavailable.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        raise ValueError("mail.com URL required / 需要 mail.com URL")
+    parsed = urlparse(raw)
+    if (parsed.scheme or "").lower() != "https":
+        raise ValueError("mail.com URL must be https / mail.com URL 必须是 https")
+    if not _host_allowed(parsed.hostname):
+        raise ValueError(
+            f"URL host not a mail.com property / 非 mail.com 体系主机: {parsed.hostname}"
+        )
+    if not resolve_dns:
+        return raw
+    from app.services.ssrf import SsrfError, validate_url
+
+    try:
+        return validate_url(raw, resolve_dns=True)
+    except SsrfError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _sanitize_site(site: str | None) -> str:
+    """Return a safe site identifier (hostname or https origin)."""
+    raw = (site or DEFAULT_SITE).strip() or DEFAULT_SITE
+    if raw.startswith("http://") or raw.startswith("https://"):
+        # Full URL form — must itself be an allowed https origin.
+        if raw.startswith("http://"):
+            raise ValueError("mail.com URL must be https / mail.com URL 必须是 https")
+        assert_mailcom_url(raw, resolve_dns=False)
+        return raw.rstrip("/")
+    host = raw.lstrip(".").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not _host_allowed(host):
+        raise ValueError(f"Unsupported mail.com site / 不支持的站点: {host}")
+    return host
+
+
+def _sanitize_meta_urls(meta: dict[str, Any]) -> dict[str, Any]:
+    """Drop session_meta URLs that point outside the allowlist.
+
+    Poisoned meta is how a prior compromised restore persists: the attacker
+    writes ``folder_url=https://169.254.169.254/...`` back into credentials, and
+    every subsequent fetch becomes a readable SSRF. Stripping here means a bad
+    value can never be followed, even if it was stored before this check existed.
+    """
+    out = dict(meta)
+    for key in (
+        "folder_url",
+        "mailbox_url",
+        "lightmailer_url",
+        "light_url",
+        "start_url",
+        "navigator_url",
+        "compose_url",
+    ):
+        val = out.get(key)
+        if not val:
+            continue
+        try:
+            out[key] = assert_mailcom_url(str(val), resolve_dns=False)
+        except ValueError:
+            out.pop(key, None)
+    return out
+
+
 def _site_base(site: str) -> str:
-    site = (site or DEFAULT_SITE).strip()
+    site = _sanitize_site(site)
     if site.startswith("http://") or site.startswith("https://"):
         return site.rstrip("/")
     return f"https://www.{site.lstrip('.')}"
@@ -296,6 +398,10 @@ def _login_urls(site: str) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for u in urls:
+        try:
+            u = assert_mailcom_url(u, resolve_dns=False)
+        except ValueError:
+            continue
         if u not in seen:
             seen.add(u)
             out.append(u)
@@ -308,7 +414,10 @@ def _folder_urls(site: str, meta: dict[str, Any] | None = None) -> list[str]:
     if meta:
         for key in ("folder_url", "mailbox_url", "lightmailer_url", "start_url"):
             if meta.get(key):
-                urls.append(str(meta[key]))
+                try:
+                    urls.append(assert_mailcom_url(str(meta[key]), resolve_dns=False))
+                except ValueError:
+                    continue
     # Helper canonical entry
     if LIGHT_FOLDER_URL not in urls:
         urls.insert(0, LIGHT_FOLDER_URL)
@@ -321,6 +430,10 @@ def _folder_urls(site: str, meta: dict[str, Any] | None = None) -> list[str]:
         f"{base}/mail",
     ]
     for u in candidates:
+        try:
+            u = assert_mailcom_url(u, resolve_dns=False)
+        except ValueError:
+            continue
         if u not in urls:
             urls.append(u)
     return urls[: max(MAX_FOLDER_PROBES, 1) + (1 if meta and meta.get("folder_url") else 0)]
@@ -410,12 +523,18 @@ def _lightmailer_origin(meta: dict[str, Any] | None = None, site: str = DEFAULT_
         if not u:
             continue
         try:
-            p = urlparse(str(u))
+            safe = assert_mailcom_url(str(u), resolve_dns=False)
+            p = urlparse(safe)
             if p.scheme and p.netloc:
                 return f"{p.scheme}://{p.netloc}"
         except Exception:
             continue
-    bare = (site or DEFAULT_SITE).lstrip(".").removeprefix("www.")
+    bare = _sanitize_site(site)
+    if bare.startswith("https://"):
+        host = urlparse(bare).hostname or DEFAULT_SITE
+        bare = host[4:] if host.startswith("www.") else host
+    else:
+        bare = bare.lstrip(".").removeprefix("www.")
     return f"https://lightmailer.{bare}"
 
 
@@ -1514,8 +1633,25 @@ def collect_messagelist_with_paging(
 
 
 def _http_client(timeout: float, proxy: str | None = None):
-    """Prefer curl_cffi for TLS fingerprint; fall back to httpx."""
+    """Prefer curl_cffi for TLS fingerprint; fall back to httpx.
+
+    Every request is wrapped so a call site that forgets to pre-check a URL
+    still cannot leave the mail.com allowlist. Redirects are followed only
+    while the next Location stays on an allowed host — otherwise a public
+    page that 302s to a metadata IP would re-open the SSRF.
+    """
     proxies = proxy or None
+    if proxies:
+        from app.services.ssrf import SsrfError, validate_proxy_url
+
+        try:
+            # Client-supplied proxy on a cookie credential is the same SSRF
+            # surface as ProxyFetchRequest.proxy — never allow private targets
+            # here. Operator PROXY_POOL is applied upstream, not through this.
+            proxies = validate_proxy_url(proxies, allow_private=False)
+        except SsrfError as exc:
+            raise ValueError(str(exc)) from exc
+
     try:
         from curl_cffi import requests as curl_requests  # type: ignore
 
@@ -1524,7 +1660,7 @@ def _http_client(timeout: float, proxy: str | None = None):
         if proxies:
             session.proxies = {"http": proxies, "https": proxies}
         session.headers.update({"User-Agent": USER_AGENT})
-        return _CurlClientAdapter(session, timeout=timeout)
+        return _AllowlistedClient(_CurlClientAdapter(session, timeout=timeout))
     except Exception:
         pass
 
@@ -1532,12 +1668,13 @@ def _http_client(timeout: float, proxy: str | None = None):
 
     kwargs: dict[str, Any] = {
         "timeout": timeout,
-        "follow_redirects": True,
+        # Manual redirects so each hop is allowlist-checked.
+        "follow_redirects": False,
         "headers": {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
     }
     if proxies:
         kwargs["proxy"] = proxies
-    return httpx.Client(**kwargs)
+    return _AllowlistedClient(_HttpxClientAdapter(httpx.Client(**kwargs), timeout=timeout))
 
 
 class _CurlClientAdapter:
@@ -1550,17 +1687,94 @@ class _CurlClientAdapter:
 
     def get(self, url: str, **kwargs: Any) -> Any:
         kwargs.setdefault("timeout", self.timeout)
-        kwargs.setdefault("allow_redirects", True)
+        # Caller (_AllowlistedClient) follows redirects itself.
+        kwargs["allow_redirects"] = False
         return self._s.get(url, **kwargs)
 
     def post(self, url: str, **kwargs: Any) -> Any:
         kwargs.setdefault("timeout", self.timeout)
-        kwargs.setdefault("allow_redirects", True)
+        kwargs["allow_redirects"] = False
         return self._s.post(url, **kwargs)
 
     def close(self) -> None:
         try:
             self._s.close()
+        except Exception:
+            pass
+
+
+class _HttpxClientAdapter:
+    """Thin wrapper so httpx Client matches the curl adapter's surface."""
+
+    def __init__(self, client: Any, *, timeout: float) -> None:
+        self._c = client
+        self.timeout = timeout
+        self.cookies = client.cookies
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("timeout", self.timeout)
+        kwargs.setdefault("follow_redirects", False)
+        return self._c.get(url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("timeout", self.timeout)
+        kwargs.setdefault("follow_redirects", False)
+        return self._c.post(url, **kwargs)
+
+    def close(self) -> None:
+        try:
+            self._c.close()
+        except Exception:
+            pass
+
+
+class _AllowlistedClient:
+    """Gate every get/post through ``assert_mailcom_url``, including redirects."""
+
+    _MAX_REDIRECTS = 8
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.timeout = getattr(inner, "timeout", DEFAULT_TIMEOUT)
+        self.cookies = inner.cookies
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        return self._request("get", url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> Any:
+        return self._request("post", url, **kwargs)
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> Any:
+        current = assert_mailcom_url(url)
+        # Body/data only applies to the first hop; redirects become GET.
+        pending_kwargs = dict(kwargs)
+        for _ in range(self._MAX_REDIRECTS + 1):
+            resp = getattr(self._inner, method)(current, **pending_kwargs)
+            status = int(getattr(resp, "status_code", getattr(resp, "status", 0)) or 0)
+            if status not in (301, 302, 303, 307, 308):
+                return resp
+            headers = getattr(resp, "headers", {}) or {}
+            loc = None
+            try:
+                loc = headers.get("location") or headers.get("Location")
+            except Exception:
+                loc = None
+            if not loc:
+                return resp
+            nxt = urljoin(current, str(loc))
+            current = assert_mailcom_url(nxt)
+            if status in (302, 303) or method == "get":
+                method = "get"
+                # Drop body on redirect-as-GET
+                pending_kwargs = {
+                    k: v for k, v in pending_kwargs.items() if k not in ("data", "json", "content")
+                }
+            # 307/308 keep method + body
+        raise ValueError("Too many redirects / 重定向过多")
+
+    def close(self) -> None:
+        try:
+            self._inner.close()
         except Exception:
             pass
 
@@ -1864,15 +2078,19 @@ class MailcomCookieProvider:
         creds = dict(credentials or {})
         email_addr = (getattr(account, "email", None) or creds.get("email") or "").strip()
         password = creds.get("password") or getattr(account, "password", None) or ""
-        site = str(creds.get("site") or DEFAULT_SITE)
         cookies = cookies_to_jar_list(
             creds.get("cookies") or creds.get("session_cookies") or creds.get("session")
         )
-        meta = dict(creds.get("session_meta") or {})
         proxy = creds.get("proxy") or getattr(account, "proxy", None)
 
         if not email_addr:
             return FetchResult(ok=False, folder=folder, error="缺少邮箱地址")
+
+        try:
+            site = _sanitize_site(str(creds.get("site") or DEFAULT_SITE))
+            meta = _sanitize_meta_urls(dict(creds.get("session_meta") or {}))
+        except ValueError as exc:
+            return FetchResult(ok=False, folder=folder, error=str(exc))
 
         limit = QUICK_LIMIT if quick else FULL_LIMIT
         if limits and "max_messages" in limits:

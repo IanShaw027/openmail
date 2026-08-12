@@ -87,6 +87,41 @@ def _mailbox_select_variants(name: str) -> list[str]:
     return out
 
 
+# Control characters terminate an IMAP command line, and `%`/`*` are wildcards.
+_MAILBOX_UNSAFE_RE = re.compile(r'[\x00-\x1f\x7f%*]')
+
+
+def _quote_mailbox(name: str) -> str:
+    """Return an RFC 3501 quoted mailbox name, or raise on an unusable one.
+
+    imaplib does not quote or escape mailbox names: `_command` joins arguments
+    with spaces and writes `data + CRLF` straight to the socket. A folder name
+    containing CRLF therefore emits a second IMAP command in the same write —
+    verified against a real IMAP dialogue, where
+    `INBOX\\r\\nZ999 STORE 1:* +FLAGS (\\Deleted)` arrived as two commands. That
+    escapes the readonly=True (EXAMINE) semantics this module deliberately
+    chose, and desynchronises the tagged-response stream.
+
+    Folder names arrive from a query parameter with no enumeration, and
+    /api/fetch/proxy accepts an arbitrary host and credentials, so without this
+    the server is an authenticated IMAP command relay pointed at third parties.
+    """
+    if not name:
+        raise ValueError("empty mailbox name / 邮箱名为空")
+    if len(name) > 255:
+        raise ValueError("mailbox name too long / 邮箱名过长")
+    if _MAILBOX_UNSAFE_RE.search(name):
+        raise ValueError(f"invalid mailbox name / 非法邮箱名: {name!r}")
+    return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _has_control_chars(*values: str | None) -> bool:
+    """Any CR/LF/NUL in a credential would inject at the LOGIN stage."""
+    return any(
+        ch in (v or "") for v in values for ch in ("\r", "\n", "\x00")
+    )
+
+
 class _IMAP4SSLSni(imaplib.IMAP4_SSL):
     """IMAP4_SSL that verifies certificates against server_hostname, not connect IP.
 
@@ -616,6 +651,12 @@ class ImapProvider:
         password: str,
     ) -> imaplib.IMAP4 | None:
         """Connect and login; try full email then local-part (iCloud)."""
+        # imaplib sends LOGIN's username unquoted, and `_quote()` on the password
+        # escapes only `\` and `"` — neither handles CRLF, so a credential with
+        # control characters injects a command before authentication completes.
+        if _has_control_chars(email_addr, password):
+            raise ValueError("credential contains control characters / 凭据包含控制字符")
+
         candidates = [email_addr]
         if "@" in email_addr:
             local = email_addr.split("@", 1)[0].strip()
@@ -839,7 +880,12 @@ class ImapProvider:
         for name in candidates:
             for variant in _mailbox_select_variants(name):
                 try:
-                    typ, data = conn.select(variant, readonly=True)
+                    quoted = _quote_mailbox(variant)
+                except ValueError as exc:
+                    last_no = str(exc)
+                    continue
+                try:
+                    typ, data = conn.select(quoted, readonly=True)
                     if typ == "OK":
                         try:
                             conn._current_folder = variant  # type: ignore[attr-defined]
