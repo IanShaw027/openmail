@@ -499,6 +499,10 @@ export default {
     storageCloudHint:
       '云端：服务端主密钥加密凭证并轮询；列表优先本机缓存，再经云端同步合并',
     tableDelete: '删除选中',
+    batchDeleteConfirm:
+      '确认删除选中的 {n} 个账号？其中 {cloud} 个在云端有副本，将一并从服务端删除；这些邮箱的本机缓存邮件也会被清除。此操作无法撤销。',
+    batchDeleteDone: '已删除 {n} 个账号',
+    batchDeletePartial: '{fail} 个账号未删除——云端副本删除失败',
     oauthPasswordDisabledHint: 'OAuth（微软等）不支持在此改邮箱登录密码。改微软密码会使 refresh_token 失效，需重新导入 token。',
     exportCredentials: '导出凭证 TXT',
     exportSystem: '导出系统快照',

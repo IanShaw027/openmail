@@ -502,6 +502,10 @@ export default {
     storageCloudHint:
       'Cloud: server master-key encrypts credentials and polls; list still prefers local cache, then merges from cloud sync',
     tableDelete: 'Delete selected',
+    batchDeleteConfirm:
+      'Delete {n} selected account(s)? {cloud} of them also have a cloud copy that will be deleted on the server. Cached mail for these mailboxes is removed too. This cannot be undone.',
+    batchDeleteDone: 'Deleted {n} account(s)',
+    batchDeletePartial: '{fail} account(s) kept — the cloud copy could not be deleted',
     oauthPasswordDisabledHint: 'OAuth cannot change mailbox password here; Microsoft password change invalidates refresh_token — re-import tokens.',
     exportCredentials: 'Export credentials TXT',
     exportSystem: 'Export system snapshot',

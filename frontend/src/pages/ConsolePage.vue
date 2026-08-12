@@ -2204,6 +2204,32 @@ async function onBatchFetch() {
   }
 }
 
+async function onBatchDelete() {
+  const rows = [...accounts.selectedIds]
+    .map((id) => accounts.findById(id))
+    .filter(Boolean) as MailAccount[]
+  if (!rows.length) {
+    flashMsg(t('console.needCheckAccounts'), 'danger')
+    return
+  }
+  const cloud = rows.filter((a) => a.serverId).length
+  if (!window.confirm(t('console.batchDeleteConfirm', { n: rows.length, cloud }))) return
+  batchBusy.value = true
+  try {
+    await accounts.removeSelected()
+    // removeSelected leaves the still-selected ids as the ones whose cloud twin
+    // could not be deleted, so anything left over is a partial failure.
+    const kept = accounts.selectedIds.size
+    if (kept) flashMsg(t('console.batchDeletePartial', { fail: kept }), 'danger')
+    else flashMsg(t('console.batchDeleteDone', { n: rows.length }))
+    if (!selected.value) messages.value = []
+  } catch (e) {
+    flashMsg(errorMessage(e, t('console.tableDelete')), 'danger')
+  } finally {
+    batchBusy.value = false
+  }
+}
+
 /** Auto-detect accounts still in 未检测 (unknown): poll every 5s, few concurrent. */
 const AUTO_DETECT_INTERVAL_MS = 5_000
 const AUTO_DETECT_BATCH = 3
@@ -3042,11 +3068,11 @@ onUnmounted(() => {
             <button
               type="button"
               class="btn btn-danger btn-sm"
-              :disabled="!hasChecked"
+              :disabled="!hasChecked || batchBusy"
               :title="!hasChecked ? t('console.needCheckAccounts') : undefined"
-              @click="void accounts.removeSelected()"
+              @click="onBatchDelete"
             >
-              {{ t('console.tableDelete') }}
+              {{ batchBusy ? t('common.loading') : t('console.tableDelete') }}
             </button>
             <span v-if="!hasChecked" class="batch-hint">{{ t('console.needCheckAccounts') }}</span>
             <UiSelect
