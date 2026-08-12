@@ -1291,6 +1291,21 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     if (changed) byEmail.value = next
   }
 
+  /**
+   * How many cached messages `pruneAll(days)` would delete.
+   * Runs the same prune path rather than re-deriving the rule, so a confirmation
+   * prompt built on this cannot drift from what actually gets removed.
+   */
+  function countPrunedBy(retentionDays: number): number {
+    const days = Math.max(0, Number(retentionDays) || 0)
+    if (!days) return 0
+    let n = 0
+    for (const list of Object.values(byEmail.value)) {
+      n += list.length - capMailboxList(pruneByRetention(list, days)).length
+    }
+    return n
+  }
+
   /** Total cached messages (optional folder / email filter). For UI counts. */
   function totalCount(opts?: { email?: string; folder?: string }): number {
     let n = 0
@@ -1395,6 +1410,7 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     clearMailboxFolder,
     replaceFolder,
     pruneAll,
+    countPrunedBy,
     totalCount,
     search,
     replaceAll,

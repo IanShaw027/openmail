@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/settings'
 import { useVaultStore } from '@/stores/vault'
@@ -81,8 +81,50 @@ function saveLicense() {
   void loadConfig()
 }
 
+// Fetch-policy fields are edited as drafts and only committed on save. Binding
+// them straight to the store would push every intermediate keystroke through —
+// and shrinking retention deletes mail irreversibly.
+const lookbackDraft = ref(settings.s.lookbackDays)
+const retentionDraft = ref(settings.s.retentionDays)
+const concDraft = ref(settings.s.batchConcurrency)
+
+// Keep drafts in step with the store when it changes from elsewhere (vault
+// hydration, system snapshot import) rather than stranding a stale edit.
+watch(
+  () => [settings.s.lookbackDays, settings.s.retentionDays, settings.s.batchConcurrency] as const,
+  ([lookback, retention, conc]) => {
+    lookbackDraft.value = lookback
+    retentionDraft.value = retention
+    concDraft.value = conc
+  },
+)
+
+function clampInt(v: unknown, lo: number, hi: number, fallback: number): number {
+  // An empty field means "leave this alone". Without this, Number('') === 0
+  // would clamp to the lower bound — turning a cleared retention box into a
+  // drastic shrink.
+  if (v === '' || v === null || v === undefined) return fallback
+  const n = Math.trunc(Number(v))
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(hi, Math.max(lo, n))
+}
+
 function saveRetention() {
-  // watch on retentionDays also prunes; call explicitly for immediate feedback
+  const nextRetention = clampInt(retentionDraft.value, 7, 365, settings.s.retentionDays)
+  if (nextRetention < settings.s.retentionDays) {
+    const doomed = mailCache.countPrunedBy(nextRetention)
+    if (doomed > 0 && !window.confirm(t('settings.retentionShrinkConfirm', { n: doomed, days: nextRetention }))) {
+      retentionDraft.value = settings.s.retentionDays
+      return
+    }
+  }
+  settings.s.lookbackDays = clampInt(lookbackDraft.value, 1, 30, settings.s.lookbackDays)
+  settings.s.batchConcurrency = clampInt(concDraft.value, 1, 32, settings.s.batchConcurrency)
+  settings.s.retentionDays = nextRetention
+  // Reflect any clamping back into the inputs
+  lookbackDraft.value = settings.s.lookbackDays
+  retentionDraft.value = settings.s.retentionDays
+  concDraft.value = settings.s.batchConcurrency
   settings.applyRetentionNow()
   flashMsg(t('settings.saved'))
 }
@@ -157,17 +199,17 @@ onMounted(() => {
         <h2>{{ t('settings.fetchTitle') }}</h2>
         <div class="field">
           <label class="label">{{ t('settings.lookbackDays') }}</label>
-          <input v-model.number="settings.s.lookbackDays" class="input" type="number" min="1" max="30" />
+          <input v-model.number="lookbackDraft" class="input" type="number" min="1" max="30" />
           <p class="hint">{{ t('settings.lookbackHint') }}</p>
         </div>
         <div class="field">
           <label class="label">{{ t('settings.retentionDays') }}</label>
-          <input v-model.number="settings.s.retentionDays" class="input" type="number" min="7" max="365" />
+          <input v-model.number="retentionDraft" class="input" type="number" min="7" max="365" />
           <p class="hint">{{ t('settings.retentionHint') }}</p>
         </div>
         <div class="field">
           <label class="label">{{ t('settings.batchConc') }}</label>
-          <input v-model.number="settings.s.batchConcurrency" class="input" type="number" min="1" max="32" />
+          <input v-model.number="concDraft" class="input" type="number" min="1" max="32" />
         </div>
         <div class="field">
           <label class="toggle">

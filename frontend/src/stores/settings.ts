@@ -258,17 +258,10 @@ export const useSettingsStore = defineStore('settings', () => {
   )
   bindSystemThemeListener(() => s.value.theme)
 
-  // Prune local mail cache when retention window changes
-  watch(
-    () => s.value.retentionDays,
-    (days) => {
-      try {
-        useMailCacheStore().pruneAll(days)
-      } catch {
-        /* pinia may not be ready in rare edge cases */
-      }
-    },
-  )
+  // Retention is applied only through applyRetentionNow(). Pruning must never be
+  // a side effect of assigning retentionDays: an input bound straight to this
+  // value passes through every intermediate number the user types, so editing
+  // 90 into 10 would delete everything older than 1 day the moment "1" landed.
 
   function markFetched(email: string, full: boolean, folder?: string | null) {
     const k = fetchMapKey(email, folder)

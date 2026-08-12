@@ -703,6 +703,8 @@ export default {
     retentionDays: '本地保留天数',
     retentionHint:
       '超过保留天数的本机邮件会在加载、取件合并与保存时清理；无法解析日期的邮件会保留。',
+    retentionShrinkConfirm:
+      '保存 {days} 天的保留窗口将永久删除 {n} 封已缓存邮件。本机邮件是唯一副本，删除后无法恢复。确认继续？',
     batchConc: '批量并发',
     importPrecheck: '导入时预检查凭证',
     importPrecheckHint: '开启后导入会先取信探测；关闭则只检查格式与字段是否合法。',

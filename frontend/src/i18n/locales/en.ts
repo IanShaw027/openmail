@@ -707,6 +707,8 @@ export default {
     retentionDays: 'Local retention (days)',
     retentionHint:
       'Local mail older than this is pruned on load, after fetch merge, and when you save. Unparseable dates are kept.',
+    retentionShrinkConfirm:
+      'Saving a {days}-day window will permanently delete {n} cached message(s). Local mail is the only copy — this cannot be undone. Continue?',
     batchConc: 'Batch concurrency',
     importPrecheck: 'Precheck credentials on import',
     importPrecheckHint: 'When on, import probes mailboxes first; when off, only format/field validation runs.',
