@@ -55,6 +55,11 @@ services:
     build: .
     pull_policy: ${OPENMAIL_PULL_POLICY:-missing}
     container_name: openmail
+    # Non-root (matches image user). Bind-mounted ./data must be writable by
+    # this uid; override with OPENMAIL_UID/GID if your host dir differs.
+    user: "${OPENMAIL_UID:-10001}:${OPENMAIL_GID:-10001}"
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "${OPENMAIL_PORT:-8000}:8000"
     env_file:

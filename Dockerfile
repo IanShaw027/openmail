@@ -46,11 +46,19 @@ RUN if [ -n "$OPENMAIL_VERSION" ]; then \
     fi
 
 # Persistent SQLite lives here (compose mounts ./data → /data)
-RUN mkdir -p /data ./app/static
+# Run as a non-root user; own the writable paths so the app can create the DB.
+# For bind mounts (compose ./data:/data) the host dir must be writable by this
+# uid — either chown it to 10001 or run compose with matching `user:`.
+RUN mkdir -p /data ./app/static \
+    && groupadd --gid 10001 openmail \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin openmail \
+    && chown -R openmail:openmail /data /app
 
 LABEL org.opencontainers.image.title="OpenMail" \
       org.opencontainers.image.description="Local-first multi-source mail console" \
       org.opencontainers.image.source="https://github.com/IanShaw027/openmail"
+
+USER openmail
 
 EXPOSE 8000
 
