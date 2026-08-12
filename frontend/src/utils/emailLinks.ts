@@ -301,9 +301,16 @@ export type EmailLinkClickOptions = {
 
 /**
  * Click handler for containers with sanitized email HTML.
- * Intercepts <a> clicks, unwraps trackers, confirms, then opens in a new tab.
+ * Intercepts <a> activations (left, Ctrl/Cmd+click, and middle-click), unwraps
+ * trackers, confirms, then opens in a new tab.
+ *
+ * Bind to BOTH `@click` and `@auxclick`: without `auxclick`, a middle-click (or
+ * "open in new tab") opens the raw href and skips the confirmation dialog.
  */
 export function onEmailHtmlClick(ev: MouseEvent, opts: EmailLinkClickOptions): void {
+  // Right-click (button 2) → leave the native context menu alone.
+  if (ev.button === 2) return
+
   const target = ev.target
   if (!(target instanceof Element)) return
   const a = target.closest('a')
@@ -315,6 +322,8 @@ export function onEmailHtmlClick(ev: MouseEvent, opts: EmailLinkClickOptions): v
     return // let browser handle
   }
 
+  // Prevent the browser's default navigation for every intercepted button,
+  // including Ctrl/Cmd+click and middle-click new-tab opens.
   ev.preventDefault()
   ev.stopPropagation()
 

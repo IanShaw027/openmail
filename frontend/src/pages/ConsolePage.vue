@@ -3661,6 +3661,7 @@ onUnmounted(() => {
                   class="detail-body detail-html"
                   v-html="detailHtml"
                   @click="onMailHtmlClick"
+                  @auxclick="onMailHtmlClick"
                 />
                 <pre v-else class="detail-body">{{ detailText || t('console.mailNoBody') }}</pre>
               </div>
@@ -4194,6 +4195,7 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
             class="detail-body detail-html"
             v-html="detailHtml"
             @click="onMailHtmlClick"
+            @auxclick="onMailHtmlClick"
           />
           <pre v-else class="detail-body">{{ detailText || t('console.mailNoBody') }}</pre>
         </div>

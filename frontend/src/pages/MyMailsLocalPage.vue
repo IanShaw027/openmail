@@ -320,6 +320,7 @@ async function copyCode(code?: string | null) {
               class="body-html"
               v-html="detailHtml"
               @click="onMailHtmlClick"
+              @auxclick="onMailHtmlClick"
             />
             <pre v-else class="body-text">{{ detailText }}</pre>
           </div>
