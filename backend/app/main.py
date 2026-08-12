@@ -134,9 +134,13 @@ def _mount_spa(application: FastAPI) -> None:
         ):
             raise HTTPException(status_code=404, detail="Not Found")
 
-        candidate = STATIC_DIR / full_path
-        if full_path and candidate.is_file():
-            return FileResponse(candidate)
+        if full_path:
+            static_root = STATIC_DIR.resolve()
+            candidate = (static_root / full_path).resolve()
+            # Reject any path that escapes the static root (e.g. `%2e%2e/.env`).
+            if candidate == static_root or static_root in candidate.parents:
+                if candidate.is_file():
+                    return FileResponse(candidate)
         return FileResponse(index)
 
 
