@@ -1,26 +1,27 @@
-# Optional override: publish WARP SOCKS ports on the host for debugging.
+# Optional override: publish WARP SOCKS ports on the host for LOCAL debugging.
 #   docker compose --profile warp -f docker-compose.yml -f docker-compose.warp.yml up -d
 #
-# Host ports 11001–11010 → warp-1…10:1080
+# Host ports 11001–11010 → warp-1…10:1080, bound to 127.0.0.1 ONLY.
+# Never expose these on a public interface — they are open SOCKS egress proxies.
 
 services:
   warp-1:
-    ports: ["11001:1080"]
+    ports: ["127.0.0.1:11001:1080"]
   warp-2:
-    ports: ["11002:1080"]
+    ports: ["127.0.0.1:11002:1080"]
   warp-3:
-    ports: ["11003:1080"]
+    ports: ["127.0.0.1:11003:1080"]
   warp-4:
-    ports: ["11004:1080"]
+    ports: ["127.0.0.1:11004:1080"]
   warp-5:
-    ports: ["11005:1080"]
+    ports: ["127.0.0.1:11005:1080"]
   warp-6:
-    ports: ["11006:1080"]
+    ports: ["127.0.0.1:11006:1080"]
   warp-7:
-    ports: ["11007:1080"]
+    ports: ["127.0.0.1:11007:1080"]
   warp-8:
-    ports: ["11008:1080"]
+    ports: ["127.0.0.1:11008:1080"]
   warp-9:
-    ports: ["11009:1080"]
+    ports: ["127.0.0.1:11009:1080"]
   warp-10:
-    ports: ["11010:1080"]
+    ports: ["127.0.0.1:11010:1080"]
