@@ -17,17 +17,31 @@ env:
   HUB_IMAGE: ianshaw027/openmail
 
 jobs:
+  # Gate the publish on tests. On a tag push this runs against the tag itself;
+  # a manual re-publish runs against whichever ref was dispatched, so pick the
+  # tag there too if you want the check to mean anything.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   release:
     name: Package + GitHub Release
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Resolve ref
         id: ref
+        env:
+          # Via env, never interpolated into the script body: `${{ inputs.tag }}`
+          # is dispatcher-controlled text, and the validation below only runs
+          # after the shell has already parsed whatever it expanded to.
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            REF="${{ inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            REF="$INPUT_TAG"
           else
             REF="${GITHUB_REF_NAME}"
           fi

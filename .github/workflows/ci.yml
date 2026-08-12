@@ -5,6 +5,8 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  # Called by docker.yml / release.yml so a publish cannot outrun the tests.
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -32,6 +34,19 @@ jobs:
         env:
           OPENMAIL_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         run: pytest -q
+
+  lockfile:
+    name: uv.lock is current
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v5
+      # A lock file that silently drifts from pyproject.toml is worse than none:
+      # it looks like a reproducible build while resolving something else.
+      - run: uv lock --check
 
   frontend:
     name: Frontend build
