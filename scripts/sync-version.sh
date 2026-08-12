@@ -89,10 +89,17 @@ import pathlib, re, sys
 root, image = pathlib.Path(sys.argv[1]), sys.argv[2]
 path = root / "scripts" / "install.sh"
 text = path.read_text(encoding="utf-8")
-pat = r'IMAGE="\$\{OPENMAIL_IMAGE:-[^}]+\}"'
-if not re.search(pat, text):
+# Anchored to the assignment. The old pattern started at a bare `IMAGE="`, which
+# no longer matches the intended line — it matched the tail of
+# `export OPENMAIL_IMAGE="..."` as a substring and happened to produce the right
+# result. It would have stopped matching the moment the line was reworded again.
+pat = re.compile(
+    r'^(?P<prefix>(?:export\s+)?OPENMAIL_IMAGE=")\$\{OPENMAIL_IMAGE:-[^}]+\}"',
+    re.MULTILINE,
+)
+if not pat.search(text):
     raise SystemExit(f"could not find OPENMAIL_IMAGE default in {path}")
-new = re.sub(pat, f'IMAGE="${{OPENMAIL_IMAGE:-{image}}}"', text, count=1)
+new = pat.sub(lambda m: f'{m.group("prefix")}${{OPENMAIL_IMAGE:-{image}}}"', text, count=1)
 path.write_text(new, encoding="utf-8")
 print(f"  {path.relative_to(root)}")
 PY

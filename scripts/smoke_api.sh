@@ -124,7 +124,10 @@ fi
 # ── Summary ────────────────────────────────────────────────────────────
 echo "----------------------------------------"
 echo "Results:"
-for line in "${RESULTS[@]}"; do echo "  $line"; done
+# ${RESULTS[@]+"${RESULTS[@]}"}: bash 3.2 (stock on macOS) treats an empty array
+# as unset under `set -u`, so the plain expansion aborts the summary instead of
+# printing nothing.
+for line in ${RESULTS[@]+"${RESULTS[@]}"}; do echo "  $line"; done
 echo "----------------------------------------"
 printf "Summary: %d passed, %d failed, %d skipped\n" "$PASS" "$FAIL" "$SKIP"
 

@@ -33,9 +33,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt ./
-# Production: skip test-only packages (pytest, pytest-asyncio, httpx2)
-RUN pip install --no-cache-dir \
-    $(grep -vE '^(pytest|pytest-asyncio|httpx2)' requirements.txt | grep -vE '^#|^$')
+# Production: install only what appears above the test-only marker.
+#
+# This used to exclude packages by name with an unanchored pattern, which meant
+# a future `pytest-cov` or `httpx2-extra` would have been dropped silently —
+# and a missing runtime dependency does not show up until the image runs.
+# Splitting on the section header the file already declares keeps the two lists
+# in one place, and the build fails loudly if that header ever goes away.
+RUN awk '/^# ── Test-only/{found=1; exit} /^[^#]/ && NF {print} END{if(!found) exit 1}' \
+        requirements.txt > /tmp/requirements-prod.txt \
+    && pip install --no-cache-dir -r /tmp/requirements-prod.txt
 
 COPY backend/app ./app
 COPY --from=frontend /frontend/dist/ ./app/static/
@@ -52,6 +59,13 @@ RUN mkdir -p /data ./app/static \
     && groupadd --gid 10001 openmail \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin openmail \
     && chown -R openmail:openmail /data /app
+
+# The entrypoint can drop to whatever uid owns the mounted data dir, which need
+# not have a passwd entry at all. Anything that expands `~` would then fall back
+# to pwd.getpwuid() and raise, and the inherited HOME points at a directory that
+# uid cannot write. /tmp exists, is world-writable, and holds nothing worth
+# keeping — a cache directory is all HOME is used for here.
+ENV HOME=/tmp
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
