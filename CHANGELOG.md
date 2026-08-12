@@ -23,6 +23,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pinning `user:`/`--user` on a data directory that user does not own now fails
   with an explicit message naming the uid and the `chown` to run, rather than an
   opaque SQLite error.
+- SQLite migrations no longer leave foreign key enforcement disabled on the
+  connection they used. `PRAGMA foreign_keys` is a no-op inside a transaction,
+  so the pragma meant to re-enable it after dropping legacy tables never took
+  effect, and the connection went back to the pool with constraints off.
+- `CODE_API_MAX_FETCH_PER_HOUR=0` / `CODE_API_MAX_REFRESH_PER_HOUR=0` now mean
+  "no limit" instead of being read as unset and replaced by the default.
+- Requests for unknown or disabled code-API tokens are rate limited per client
+  IP. Only existing tokens could be charged before, leaving the not-found path
+  unmetered and usable for token enumeration.
+- The code-API rate limit can no longer be exceeded by concurrent requests; it
+  now runs in its own transaction so the count-and-insert is serialized.
+- A URL containing an encoded null byte returns the SPA instead of a 500.
+- Idle auto-lock counts reading as activity (scroll wheel, pointer movement,
+  touch), warns about a minute beforehand, flushes pending vault writes first,
+  and waits while a compose draft has unsaved text. It could previously fire
+  mid-session on someone who was only reading, with no warning, discarding an
+  unsent draft along with the rest of the page state.
+- Shrinking mail retention while the vault is still locked now warns that mail
+  will be deleted. The confirmation used to be skipped entirely, because the
+  encrypted cache reports zero messages until it is decrypted.
+- Declining that retention confirmation no longer discards the lookback and
+  concurrency edits saved alongside it.
 
 ### Changed
 
@@ -30,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to run as. `OPENMAIL_UID`/`OPENMAIL_GID` are no longer consulted (harmless if
   still present in your `.env`). Pin `user:` yourself only if you also own
   `./data` — see "Upgrade notes" in the README.
+
+### Security
+
+- Docker Hub publishes now require the test suite to pass first. Nothing
+  previously connected the two, which is how a broken image shipped.
+- `release.yml` no longer interpolates the dispatch `tag` input into a shell
+  script, where it ran before the validation that was supposed to constrain it.
 
 ## [0.3.6] — 2026-08-06
 

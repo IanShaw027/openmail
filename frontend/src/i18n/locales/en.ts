@@ -32,6 +32,8 @@ export default {
     unlockHint:
       'Enter your vault password. Same-tab refresh usually stays unlocked; closing the tab or Lock requires password again. Use recovery key if you forgot the password.',
     sessionResume: 'Restoring local session…',
+    idleLockWarning:
+      'Locking in {seconds}s for inactivity — move the mouse or press a key to stay unlocked.',
     password: 'Vault password',
     passwordPh: 'Daily unlock password — remember it',
     password2: 'Confirm vault password',
@@ -713,6 +715,8 @@ export default {
       'Local mail older than this is pruned on load, after fetch merge, and when you save. Unparseable dates are kept.',
     retentionShrinkConfirm:
       'Saving a {days}-day window will permanently delete {n} cached message(s). Local mail is the only copy — this cannot be undone. Continue?',
+    retentionShrinkConfirmUnknown:
+      'Saving a {days}-day window will permanently delete cached mail older than that, as soon as the vault is unlocked. The cache is still locked, so the exact count is unknown. Local mail is the only copy — this cannot be undone. Continue?',
     batchConc: 'Batch concurrency',
     importPrecheck: 'Precheck credentials on import',
     importPrecheckHint: 'When on, import probes mailboxes first; when off, only format/field validation runs.',

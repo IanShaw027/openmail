@@ -1292,11 +1292,15 @@ export const useMailCacheStore = defineStore('mailCache', () => {
   }
 
   /**
-   * How many cached messages `pruneAll(days)` would delete.
-   * Runs the same prune path rather than re-deriving the rule, so a confirmation
-   * prompt built on this cannot drift from what actually gets removed.
+   * How many cached messages `pruneAll(days)` would delete, or null when the
+   * count is unknowable because the cache has not been decrypted yet.
+   *
+   * Returning 0 in that state would be a lie that skips the confirmation: the
+   * in-memory map is empty only because it is still encrypted, and the mail
+   * gets deleted for real as soon as the vault hydrates and retention applies.
    */
-  function countPrunedBy(retentionDays: number): number {
+  function countPrunedBy(retentionDays: number): number | null {
+    if (!vaultHydrated.value) return null
     const days = Math.max(0, Number(retentionDays) || 0)
     if (!days) return 0
     let n = 0

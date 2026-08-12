@@ -53,6 +53,10 @@ const SESSION_WRAP_KEY = 'openmail.vault.session.v1'
  */
 const DEFAULT_LOCK_MINUTES = 30
 
+/** How long before an idle auto-lock the UI gets a chance to warn. */
+const IDLE_WARN_MS = 60_000
+const IDLE_TICK_MS = 15_000
+
 export type VaultStatus = 'unavailable' | 'setup' | 'locked' | 'unlocked'
 
 function loadMeta(): VaultMeta | null {
@@ -111,6 +115,38 @@ export const useVaultStore = defineStore('vault', () => {
 
   let idleTimer: ReturnType<typeof setInterval> | null = null
 
+  /**
+   * Seconds until an idle auto-lock, published shortly beforehand so the UI can
+   * warn. 0 while the deadline is far away. Locking tears down the app shell, so
+   * it must never be the first thing the user learns about it.
+   */
+  const lockWarningSeconds = ref(0)
+  let idleWarned = false
+
+  /**
+   * Work that must not be destroyed by an idle auto-lock, keyed by reason
+   * (an unsent draft, a running import). Locking unmounts every page, so
+   * anything held only in component state would be silently lost.
+   */
+  const lockHolds = ref(new Set<string>())
+  const lockHeld = computed(() => lockHolds.value.size > 0)
+
+  /** Postpone idle auto-lock until the returned release function is called. */
+  function holdLock(reason: string): () => void {
+    lockHolds.value.add(reason)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      lockHolds.value.delete(reason)
+    }
+  }
+
+  function clearIdleWarning() {
+    idleWarned = false
+    if (lockWarningSeconds.value !== 0) lockWarningSeconds.value = 0
+  }
+
   const status = computed<VaultStatus>(() => {
     if (!cryptoOk) return 'unavailable'
     if (!meta.value) return 'setup'
@@ -122,6 +158,7 @@ export const useVaultStore = defineStore('vault', () => {
 
   function touch() {
     lastActivityAt.value = Date.now()
+    clearIdleWarning()
   }
 
   function setLockMinutes(m: number) {
@@ -137,12 +174,27 @@ export const useVaultStore = defineStore('vault', () => {
   function startIdleWatch() {
     if (idleTimer) return
     idleTimer = setInterval(() => {
-      if (!unlocked.value || lockMinutes.value <= 0) return
-      const idleMs = Date.now() - lastActivityAt.value
-      if (idleMs >= lockMinutes.value * 60_000) {
-        lock()
+      if (!unlocked.value || lockMinutes.value <= 0) {
+        clearIdleWarning()
+        return
       }
-    }, 15_000)
+      const remainingMs = lockMinutes.value * 60_000 - (Date.now() - lastActivityAt.value)
+      if (remainingMs > IDLE_WARN_MS) {
+        clearIdleWarning()
+        return
+      }
+      if (remainingMs > 0) {
+        if (!idleWarned) {
+          idleWarned = true
+          lockWarningSeconds.value = Math.max(1, Math.round(remainingMs / 1000))
+        }
+        return
+      }
+      // Deadline reached. Unsaved work outranks the timeout: keep the warning up
+      // and re-check next tick rather than discarding what the user was doing.
+      if (lockHeld.value) return
+      void autoLock()
+    }, IDLE_TICK_MS)
   }
 
   function stopIdleWatch() {
@@ -150,6 +202,7 @@ export const useVaultStore = defineStore('vault', () => {
       clearInterval(idleTimer)
       idleTimer = null
     }
+    clearIdleWarning()
   }
 
   async function persistSessionWrap(raw: Uint8Array | null) {
@@ -544,6 +597,30 @@ export const useVaultStore = defineStore('vault', () => {
     stopIdleWatch()
   }
 
+  /**
+   * Idle lock path. Vault writes are debounced, so dropping the key on a timer
+   * without flushing first loses whatever was still pending — unlike an explicit
+   * lock, the user is not there to notice or retry.
+   */
+  async function autoLock() {
+    const results = await Promise.allSettled([
+      useAccountsStore().flushPersist(),
+      useTwoFaStore().flushPersist(),
+      useMailCacheStore().flushPersist(),
+    ])
+    for (const r of results) {
+      if (r.status === 'rejected') {
+        console.warn('[openmail] flush before idle lock failed', r.reason)
+      }
+    }
+    // Re-check: the flush is async, so the user may have come back or turned
+    // auto-lock off in the meantime.
+    if (!unlocked.value || lockMinutes.value <= 0) return
+    if (Date.now() - lastActivityAt.value < lockMinutes.value * 60_000) return
+    if (lockHeld.value) return
+    lock()
+  }
+
   async function saveAccounts(list: unknown[]): Promise<void> {
     touch()
     await persistBlob(ACCOUNTS_ENC_KEY, list)
@@ -648,6 +725,9 @@ export const useVaultStore = defineStore('vault', () => {
     savedRecoveryKey,
     hasRecovery,
     resuming,
+    lockWarningSeconds,
+    lockHeld,
+    holdLock,
     touch,
     setLockMinutes,
     createVault,

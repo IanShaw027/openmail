@@ -29,6 +29,7 @@ export default {
     setupHint: '首次使用请设置库主密码，创建后会生成恢复密钥（可在设置中再次查看）。日常同一浏览器标签内会记住解锁，无需反复输入。',
     unlockHint: '输入库主密码解锁。本标签页内刷新通常不必再输；关闭标签或手动锁定后需要重新验证。忘了密码可用恢复密钥。',
     sessionResume: '正在恢复本机会话…',
+    idleLockWarning: '{seconds} 秒后将因长时间无操作自动锁定 — 移动鼠标或按任意键可保持解锁。',
     password: '库主密码',
     passwordPh: '日常解锁用，请牢记',
     password2: '确认库主密码',
@@ -709,6 +710,8 @@ export default {
       '超过保留天数的本机邮件会在加载、取件合并与保存时清理；无法解析日期的邮件会保留。',
     retentionShrinkConfirm:
       '保存 {days} 天的保留窗口将永久删除 {n} 封已缓存邮件。本机邮件是唯一副本，删除后无法恢复。确认继续？',
+    retentionShrinkConfirmUnknown:
+      '保存 {days} 天的保留窗口后，一旦保险库解锁，超出该窗口的缓存邮件将被永久删除。当前缓存仍处于锁定状态，无法统计具体数量。本机邮件是唯一副本，删除后无法恢复。确认继续？',
     batchConc: '批量并发',
     importPrecheck: '导入时预检查凭证',
     importPrecheckHint: '开启后导入会先取信探测；关闭则只检查格式与字段是否合法。',

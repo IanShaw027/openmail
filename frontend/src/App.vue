@@ -15,6 +15,8 @@ import {
   formatLinkPreview,
   peekLandingRedirect,
 } from '@/utils/emailLinks'
+import { dismissToast, pushToast } from '@/composables/useToast'
+import { trackUserActivity } from '@/composables/useVaultActivity'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -59,9 +61,28 @@ watch(
   },
 )
 
-function onActivity() {
-  if (vault.unlocked) vault.touch()
-}
+/**
+ * Give the user a chance to react before an idle lock hides the app: any
+ * activity resets the timer, and the notice goes away with it.
+ */
+let lockWarnToastId: number | undefined
+watch(
+  () => vault.lockWarningSeconds,
+  (seconds) => {
+    if (seconds > 0) {
+      lockWarnToastId = pushToast(
+        t('vault.idleLockWarning', { seconds }),
+        'info',
+        seconds * 1000,
+      )
+    } else if (lockWarnToastId !== undefined) {
+      dismissToast(lockWarnToastId)
+      lockWarnToastId = undefined
+    }
+  },
+)
+
+let stopActivityTracking: (() => void) | null = null
 
 function onVisibility() {
   if (document.visibilityState === 'visible' && vault.unlocked) {
@@ -119,8 +140,9 @@ onMounted(() => {
     }
   }
 
-  window.addEventListener('pointerdown', onActivity, { passive: true })
-  window.addEventListener('keydown', onActivity, { passive: true })
+  stopActivityTracking = trackUserActivity(() => {
+    if (vault.unlocked) vault.touch()
+  })
   document.addEventListener('visibilitychange', onVisibility)
   // pagehide covers refresh / close / bfcache; beforeunload as extra for older WebKit
   window.addEventListener('pagehide', onPageHide)
@@ -137,8 +159,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('pointerdown', onActivity)
-  window.removeEventListener('keydown', onActivity)
+  stopActivityTracking?.()
+  stopActivityTracking = null
   document.removeEventListener('visibilitychange', onVisibility)
   window.removeEventListener('pagehide', onPageHide)
   window.removeEventListener('beforeunload', onPageHide)

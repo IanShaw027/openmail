@@ -24,6 +24,7 @@ import {
 import { ApiError, isAbortError, isTimeoutError } from '@/api/client'
 import { useSettingsStore } from '@/stores/settings'
 import { useMailCacheStore } from '@/stores/mailCache'
+import { useVaultStore } from '@/stores/vault'
 import {
   exportCredentialsTxt,
   buildSystemSnapshot,
@@ -72,6 +73,7 @@ const accounts = useAccountsStore()
 const userSettings = useSettingsStore()
 const mailCache = useMailCacheStore()
 const twofa = useTwoFaStore()
+const vault = useVaultStore()
 const { flashMsg } = useToast()
 const apiStatus = useApiStatus()
 
@@ -2559,6 +2561,27 @@ function openSend(acc?: MailAccount | null) {
 
 watch(showSend, (open) => {
   if (!open) sendTargetId.value = null
+})
+
+/**
+ * A draft with anything typed into it blocks the idle auto-lock: locking
+ * unmounts this page, and the draft lives only in component state.
+ */
+let releaseDraftHold: (() => void) | null = null
+watch(
+  () => showSend.value && Boolean(sendForm.value.to || sendForm.value.subject || sendForm.value.body),
+  (dirty) => {
+    if (dirty && !releaseDraftHold) {
+      releaseDraftHold = vault.holdLock('compose-draft')
+    } else if (!dirty && releaseDraftHold) {
+      releaseDraftHold()
+      releaseDraftHold = null
+    }
+  },
+)
+onUnmounted(() => {
+  releaseDraftHold?.()
+  releaseDraftHold = null
 })
 
 async function doSend() {

@@ -110,12 +110,21 @@ function clampInt(v: unknown, lo: number, hi: number, fallback: number): number 
 }
 
 function saveRetention() {
-  const nextRetention = clampInt(retentionDraft.value, 7, 365, settings.s.retentionDays)
+  let nextRetention = clampInt(retentionDraft.value, 7, 365, settings.s.retentionDays)
   if (nextRetention < settings.s.retentionDays) {
     const doomed = mailCache.countPrunedBy(nextRetention)
-    if (doomed > 0 && !window.confirm(t('settings.retentionShrinkConfirm', { n: doomed, days: nextRetention }))) {
-      retentionDraft.value = settings.s.retentionDays
-      return
+    // null = cache still encrypted, so the exact count is unknown. Warn anyway
+    // rather than skipping the prompt for a change that does delete mail later.
+    const prompt =
+      doomed === null
+        ? t('settings.retentionShrinkConfirmUnknown', { days: nextRetention })
+        : doomed > 0
+          ? t('settings.retentionShrinkConfirm', { n: doomed, days: nextRetention })
+          : ''
+    if (prompt && !window.confirm(prompt)) {
+      // Declining applies to retention only — the other fields on this form
+      // were never in question and the user did ask for them to be saved.
+      nextRetention = settings.s.retentionDays
     }
   }
   settings.s.lookbackDays = clampInt(lookbackDraft.value, 1, 30, settings.s.lookbackDays)
