@@ -213,6 +213,15 @@ const editForm = ref({
 const showSend = ref(false)
 const sendForm = ref({ to: '', subject: '', body: '' })
 const sendBusy = ref(false)
+/**
+ * Sender is pinned when the dialog opens. The row selection is global and moves
+ * under us (j/k, row clicks, copy actions), so resolving the sender at send time
+ * would mail from whichever account happened to be selected by then.
+ */
+const sendTargetId = ref<string | null>(null)
+const sendTarget = computed(() =>
+  sendTargetId.value ? accounts.findById(sendTargetId.value) : null,
+)
 
 const moveGroupId = ref('')
 
@@ -2543,13 +2552,24 @@ function openSend(acc?: MailAccount | null) {
     return
   }
   accounts.select(target.id)
+  sendTargetId.value = target.id
   sendForm.value = { to: '', subject: '', body: '' }
   showSend.value = true
 }
 
+watch(showSend, (open) => {
+  if (!open) sendTargetId.value = null
+})
+
 async function doSend() {
-  const acc = selected.value
-  if (!acc) return
+  const acc = sendTarget.value
+  // The pinned account can disappear while the dialog is open (deleted, or the
+  // vault relocked and dropped it).
+  if (!acc) {
+    flashMsg(t('console.needSelectAccount'), 'danger')
+    showSend.value = false
+    return
+  }
   const to = sendForm.value.to.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean)
   if (!to.length) {
     flashMsg(t('console.sendTo'), 'danger')
@@ -4007,7 +4027,7 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
       v-model:to="sendForm.to"
       v-model:subject="sendForm.subject"
       v-model:body="sendForm.body"
-      :email="selected?.email"
+      :email="sendTarget?.email"
       :busy="sendBusy"
       @send="doSend"
     />
