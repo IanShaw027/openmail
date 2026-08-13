@@ -471,6 +471,7 @@ export const useVaultStore = defineStore('vault', () => {
   /** Admission status from the server after register /me. */
   const deviceStatus = ref<'trusted' | 'pending' | 'unknown' | null>(null)
   const deviceAdmission = ref<'first_trust' | 'open' | null>(null)
+  const isAdmin = ref(false)
 
   async function registerDeviceWithServer(): Promise<void> {
     if (!deviceSecret.value || !devicePublicId.value) return
@@ -514,7 +515,11 @@ export const useVaultStore = defineStore('vault', () => {
   async function refreshDeviceStatus(): Promise<'trusted' | 'pending' | 'unknown' | null> {
     if (!unlocked.value || !deviceSecret.value) return null
     try {
-      const res = await apiRequest<{ status?: string; admission?: string }>('/api/device/me', {
+      const res = await apiRequest<{
+        status?: string
+        admission?: string
+        is_admin?: boolean
+      }>('/api/device/me', {
         timeoutMs: 10_000,
       })
       if (res?.status === 'pending' || res?.status === 'trusted') {
@@ -525,6 +530,7 @@ export const useVaultStore = defineStore('vault', () => {
       if (res?.admission === 'first_trust' || res?.admission === 'open') {
         deviceAdmission.value = res.admission
       }
+      isAdmin.value = res?.is_admin === true
       return deviceStatus.value
     } catch {
       return deviceStatus.value
@@ -680,6 +686,7 @@ export const useVaultStore = defineStore('vault', () => {
     devicePublicId.value = null
     deviceStatus.value = null
     deviceAdmission.value = null
+    isAdmin.value = false
     pendingRecoveryKey.value = null
     savedRecoveryKey.value = null
     clearSessionWrap()
@@ -801,6 +808,9 @@ export const useVaultStore = defineStore('vault', () => {
     unlocked.value = false
     deviceSecret.value = null
     devicePublicId.value = null
+    deviceStatus.value = null
+    deviceAdmission.value = null
+    isAdmin.value = false
     pendingRecoveryKey.value = null
     savedRecoveryKey.value = null
     meta.value = null
@@ -825,6 +835,7 @@ export const useVaultStore = defineStore('vault', () => {
     devicePublicId,
     deviceStatus,
     deviceAdmission,
+    isAdmin,
     pendingRecoveryKey,
     savedRecoveryKey,
     hasRecovery,

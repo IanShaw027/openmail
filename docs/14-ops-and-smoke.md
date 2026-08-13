@@ -44,6 +44,7 @@ Or: `make dev-frontend`
 | `CORS_ORIGINS` | Empty by default (same-origin SPA). Set e.g. `http://127.0.0.1:5173` when Vite is split from the API |
 | `PROXY_POOL` | Multi-line or `\|`-separated SOCKS/HTTP proxies |
 | `LICENSE_TOKENS` | Optional codes to raise poll quota |
+| `OPENMAIL_ADMIN_DEVICE_IDS` | `vk_…` ids that may issue license codes in Settings. Empty = no admin |
 | `PUBLIC_BASE_URL` | Only if you still serve legacy `/api/v1/code/{token}` links |
 
 See root [`.env.example`](../.env.example).
@@ -115,7 +116,7 @@ There is no `/admin` or `/register` product flow (legacy URLs redirect home).
 - Server cannot decrypt; background sync **skips** sealed rows
 - Requires vault unlock + successful `/api/device/register`
 
-Quota: free tier + optional `LICENSE_TOKENS`.
+Quota: free tier + optional `LICENSE_TOKENS` or admin-issued codes (`OPENMAIL_ADMIN_DEVICE_IDS`).
 
 ---
 

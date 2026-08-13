@@ -45,7 +45,8 @@ You should receive an acknowledgement within a few days when possible.
 - [ ] Do not expose `/docs` on the public internet without a network ACL if you care about surface area
 - [ ] Keep WARP/proxy nodes on a private Docker network; do not publish SOCKS ports
 - [ ] Back up `./data` including `device_registry.json` and SQLite; protect filesystem permissions
-- [ ] Rotate license tokens (`LICENSE_TOKENS`) if leaked
+- [ ] Rotate license tokens (`LICENSE_TOKENS` or admin-issued codes) if leaked
+- [ ] Keep `OPENMAIL_ADMIN_DEVICE_IDS` limited to devices you control
 
 ## Vault session resume
 

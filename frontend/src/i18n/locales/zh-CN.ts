@@ -100,6 +100,7 @@ export default {
     deviceApproved: '已批准设备',
     deviceRejected: '已拒绝设备',
     deviceRevoked: '已撤销设备',
+    deviceIdHint: '完整设备 ID，可复制到服务器 .env 的 OPENMAIL_ADMIN_DEVICE_IDS。',
     keysGuideTitle: '库主密码 vs 恢复密钥',
     enableRecovery: '生成 / 查看恢复能力',
     enableRecoveryHint:
@@ -766,6 +767,22 @@ export default {
     quotaHint:
       '未授权时：本机导入、云端入库与取件分别受上限约束。一个授权码即可解除全部限制。',
     saved: '已保存',
+    adminLicensesTitle: '签发授权码',
+    adminLicensesHint:
+      '生成的授权码可给任意设备在「设备授权」中粘贴使用，同一码可多人共用。使用成功的设备会记在下方。',
+    adminIssue: '签发新授权码',
+    adminNote: '备注（可选）',
+    adminNotePh: '例如：朋友 / 测试…',
+    adminRevoke: '作废',
+    adminRevokeConfirm: '作废此授权码？已填入该码的设备将重新受配额限制。',
+    adminIssued: '已签发授权码',
+    adminRevoked: '已作废',
+    adminActive: '有效',
+    adminCopiedToken: '已复制授权码',
+    adminDevices: '使用设备',
+    adminLastUsed: '最近使用',
+    adminNever: '尚未使用',
+    adminEmpty: '还没有签发过授权码。',
   },
   me: {
     mailsLocalSubtitle: '搜索本机已拉取邮件（无需登录）',

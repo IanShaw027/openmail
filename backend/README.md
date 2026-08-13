@@ -76,6 +76,7 @@ See repo root [`.env.example`](../.env.example). Common:
 | `CORS_ORIGINS` | Empty by default; set Vite origin if the UI is split from the API |
 | `PROXY_POOL` | SOCKS/HTTP channels |
 | `LICENSE_TOKENS` | Optional quota unlock codes |
+| `OPENMAIL_ADMIN_DEVICE_IDS` | Vault ids that may issue license codes in Settings |
 | `PUBLIC_BASE_URL` | Absolute base for legacy code-API URLs |
 
 Full ops notes: [docs/14-ops-and-smoke.md](../docs/14-ops-and-smoke.md).

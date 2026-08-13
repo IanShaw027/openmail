@@ -229,6 +229,7 @@ docker compose up -d --build
 | 变量 | 必填 | 作用 |
 |------|------|------|
 | `OPENMAIL_MASTER_KEY` | **是** | 服务端 AES 密钥 |
+| `OPENMAIL_ADMIN_DEVICE_IDS` | 否 | 可在设置里签发授权码的 `vk_…` 设备（逗号/换行）。空 = 无管理员 |
 | `OPENMAIL_IMAGE` | 否 | 覆盖镜像，默认 `ianshaw027/openmail:v0.1.0` |
 | `OPENMAIL_PORT` | 否 | 端口，默认 `8000` |
 | `LICENSE_TOKENS` | 否 | 解除客户端配额 |

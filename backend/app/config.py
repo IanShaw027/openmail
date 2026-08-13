@@ -183,6 +183,14 @@ class Settings(BaseSettings):
             "(previous behaviour)."
         ),
     )
+    openmail_admin_device_ids: str = Field(
+        default="",
+        validation_alias="OPENMAIL_ADMIN_DEVICE_IDS",
+        description=(
+            "Comma or newline separated vault device ids (vk_…) allowed to issue "
+            "and revoke license codes. Empty = no admin (fail closed)."
+        ),
+    )
 
     @field_validator("device_admission")
     @classmethod
@@ -221,6 +229,11 @@ class Settings(BaseSettings):
     @property
     def license_token_set(self) -> set[str]:
         return {t.strip() for t in self.license_tokens.split(",") if t.strip()}
+
+    @property
+    def admin_device_id_set(self) -> set[str]:
+        raw = (self.openmail_admin_device_ids or "").replace("\n", ",")
+        return {t.strip() for t in raw.split(",") if t.strip()}
 
 
 @lru_cache

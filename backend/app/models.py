@@ -280,3 +280,39 @@ class MailItem(Base):
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LicenseCode(Base):
+    """Admin-issued quota-unlock code. Plaintext is encrypted at rest."""
+
+    __tablename__ = "license_codes"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("lic_"))
+    token_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LicenseCodeUse(Base):
+    """HMAC-proven device that presented an issued license code."""
+
+    __tablename__ = "license_code_uses"
+    __table_args__ = (
+        UniqueConstraint("token_hash", "device_id", name="uq_license_code_uses_hash_device"),
+        Index("ix_license_code_uses_token_hash", "token_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _new_id("lcu_"))
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )

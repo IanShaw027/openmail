@@ -105,6 +105,7 @@ export default {
     deviceApproved: 'Device approved',
     deviceRejected: 'Device rejected',
     deviceRevoked: 'Device revoked',
+    deviceIdHint: 'Full device ID — copy into OPENMAIL_ADMIN_DEVICE_IDS on the server.',
     keysGuideTitle: 'Vault password vs recovery key',
     enableRecovery: 'Recovery key',
     enableRecoveryHint:
@@ -773,6 +774,22 @@ export default {
     quotaHint:
       'Without a license: browser import, cloud store, and fetches are capped. One code lifts every limit.',
     saved: 'Saved',
+    adminLicensesTitle: 'Issue license codes',
+    adminLicensesHint:
+      'Issued codes can be pasted in Device license on any device. The same code can be shared. Devices that successfully use a code are listed below.',
+    adminIssue: 'Issue new code',
+    adminNote: 'Note (optional)',
+    adminNotePh: 'e.g. friends / test…',
+    adminRevoke: 'Revoke',
+    adminRevokeConfirm: 'Revoke this code? Devices using it will fall back to quota limits.',
+    adminIssued: 'License code issued',
+    adminRevoked: 'Revoked',
+    adminActive: 'Active',
+    adminCopiedToken: 'License code copied',
+    adminDevices: 'Devices',
+    adminLastUsed: 'Last used',
+    adminNever: 'Never',
+    adminEmpty: 'No codes issued yet.',
   },
   me: {
     mailsLocalSubtitle: 'Search local mail history (no login)',

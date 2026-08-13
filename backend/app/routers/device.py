@@ -29,6 +29,7 @@ class DeviceMeOut(BaseModel):
     public_id: str
     status: str
     admission: str
+    is_admin: bool = False
 
 
 class DeviceListOut(BaseModel):
@@ -80,11 +81,14 @@ def register_device(request: Request, body: DeviceRegisterBody) -> DeviceRegiste
 @router.get("/me", response_model=DeviceMeOut)
 def device_me(device_id: str = Depends(device_id_any)) -> DeviceMeOut:
     st = device_auth.device_status(device_id) or device_auth.STATUS_TRUSTED
+    admin_ids = get_settings().admin_device_id_set
+    is_admin = st == device_auth.STATUS_TRUSTED and bool(admin_ids) and device_id in admin_ids
     return DeviceMeOut(
         ok=True,
         public_id=device_id,
         status=st,
         admission=get_settings().device_admission,
+        is_admin=is_admin,
     )
 
 

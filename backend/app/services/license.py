@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import secrets
 import time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
@@ -26,7 +27,15 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.models import Account, DevicePollEvent, DevicePollQuotaState, DeviceQuotaState
+from app.crypto import encrypt_str, decrypt_str
+from app.models import (
+    Account,
+    DevicePollEvent,
+    DevicePollQuotaState,
+    DeviceQuotaState,
+    LicenseCode,
+    LicenseCodeUse,
+)
 
 
 def _session_factory():
@@ -54,20 +63,135 @@ def _as_str(value: object | None) -> str:
     return value.strip()
 
 
+def token_sha256(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def generate_license_token() -> str:
+    return "om_" + secrets.token_urlsafe(24)
+
+
+def _issued_license_active(token: str, db: Session | None = None) -> bool:
+    """True if token matches a non-revoked admin-issued code."""
+    digest = token_sha256(token)
+    own_session = db is None
+    session = db or _session_factory()()
+    try:
+        row = (
+            session.query(LicenseCode)
+            .filter(LicenseCode.token_hash == digest, LicenseCode.revoked_at.is_(None))
+            .one_or_none()
+        )
+        return row is not None
+    except Exception:
+        logger.debug("issued license lookup failed", exc_info=True)
+        return False
+    finally:
+        if own_session:
+            session.close()
+
+
+def record_license_use(
+    *,
+    license_token: str | None,
+    device_id: str | None,
+    db: Session | None = None,
+) -> None:
+    """Record HMAC-proven device id against an issued (not env) license code.
+
+    Uses its own commit so GET handlers that never commit still persist last-seen.
+    """
+    token = _as_str(license_token)
+    did = _as_str(device_id)
+    if not token or not did.startswith("vk_"):
+        return
+    digest = token_sha256(token)
+    own_session = db is None
+    session = db or _session_factory()()
+    try:
+        code = (
+            session.query(LicenseCode)
+            .filter(LicenseCode.token_hash == digest, LicenseCode.revoked_at.is_(None))
+            .one_or_none()
+        )
+        if code is None:
+            if own_session:
+                session.rollback()
+            return
+        now = _utcnow()
+        row = (
+            session.query(LicenseCodeUse)
+            .filter(LicenseCodeUse.token_hash == digest, LicenseCodeUse.device_id == did)
+            .one_or_none()
+        )
+        if row is None:
+            session.add(
+                LicenseCodeUse(
+                    token_hash=digest,
+                    device_id=did,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+        else:
+            row.last_seen_at = now
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.debug("license use record failed", exc_info=True)
+    finally:
+        if own_session:
+            session.close()
+
+
+def issue_license_code(
+    db: Session,
+    *,
+    created_by: str,
+    note: str | None = None,
+    settings: Settings | None = None,
+) -> LicenseCode:
+    """Create an encrypted issued code. Caller must commit."""
+    s = settings or get_settings()
+    cleaned = (note or "").strip() or None
+    for _ in range(8):
+        token = generate_license_token()
+        digest = token_sha256(token)
+        if db.query(LicenseCode).filter(LicenseCode.token_hash == digest).one_or_none():
+            continue
+        row = LicenseCode(
+            token_enc=encrypt_str(token, settings=s),
+            token_hash=digest,
+            note=cleaned,
+            created_by=created_by,
+        )
+        db.add(row)
+        db.flush()
+        logger.info("license issued id=%s hash=%s by=%s", row.id, digest[:16], created_by[:16])
+        return row
+    raise RuntimeError("could not allocate unique license token")
+
+
+def decrypt_license_token(row: LicenseCode, *, settings: Settings | None = None) -> str:
+    return decrypt_str(row.token_enc, settings=settings)
+
+
 def is_licensed(
     *,
     device_id: str | None,
     license_token: str | None,
     settings: Settings | None = None,
+    db: Session | None = None,
 ) -> bool:
     """Return True if request presents a valid unlimited license."""
     s = settings or get_settings()
     token = _as_str(license_token)
     if not token:
         return False
-    if token in s.license_token_set:
+    token_set = getattr(s, "license_token_set", None) or set()
+    if token in token_set:
         return True
-    secret = (s.license_hmac_secret or "").strip()
+    secret = (getattr(s, "license_hmac_secret", None) or "").strip()
     fp = _as_str(device_id)
     if secret and fp:
         expected = hmac.new(
@@ -82,6 +206,8 @@ def is_licensed(
                 return True
         except ValueError:
             return False
+    if _issued_license_active(token, db=db):
+        return True
     return False
 
 
@@ -227,7 +353,9 @@ def check_poll_quota(
     ``used < limit`` then all insert.
     """
     s = settings or get_settings()
-    if is_licensed(device_id=device_id, license_token=_as_str(license_token) or None, settings=s):
+    token = _as_str(license_token) or None
+    if is_licensed(device_id=device_id, license_token=token, settings=s, db=db):
+        record_license_use(license_token=token, device_id=device_id)
         return True, None
     did = _device_key(device_id)
     # Tolerate incomplete settings mocks in unit tests (SimpleNamespace())
@@ -427,7 +555,11 @@ def quota_snapshot(
     db: Session | None = None,
 ) -> dict[str, Any]:
     s = settings or get_settings()
-    licensed = is_licensed(device_id=device_id, license_token=license_token, settings=s)
+    licensed = is_licensed(
+        device_id=device_id, license_token=license_token, settings=s, db=db
+    )
+    if licensed:
+        record_license_use(license_token=license_token, device_id=device_id)
     used = 0 if licensed else poll_used_in_hour(device_id, settings=s, db=db)
     out: dict[str, Any] = {
         "licensed": licensed,
@@ -466,7 +598,8 @@ def reserve_cloud_account_slot(
       ``with_for_update`` is a no-op (SQLite deferred) or weak.
     """
     s = settings or get_settings()
-    if is_licensed(device_id=device_id, license_token=license_token, settings=s):
+    if is_licensed(device_id=device_id, license_token=license_token, settings=s, db=db):
+        record_license_use(license_token=license_token, device_id=device_id)
         return
     cap = max(0, int(getattr(s, "quota_max_cloud_accounts", None) or 0))
     # Stronger SQLite multi-worker path when we can still take the write lock.

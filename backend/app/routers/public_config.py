@@ -64,6 +64,7 @@ def public_config(
         license_token=x_license_token,
         settings=settings,
         cloud_used=cloud_used if cloud_used is not None else 0,
+        db=db,
     )
     # Hide cloud_used from unauthenticated probes
     if cloud_used is None:
@@ -83,5 +84,6 @@ def public_config(
             device_id=x_device_id if cloud_used is not None else None,
             license_token=x_license_token,
             settings=settings,
+            db=db,
         ),
     }

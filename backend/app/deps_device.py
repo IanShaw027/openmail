@@ -7,6 +7,7 @@ import hmac
 
 from fastapi import Header, HTTPException, Request, status
 
+from app.config import get_settings
 from app.services.device_auth import require_device as _require_device
 
 
@@ -140,3 +141,33 @@ async def device_id_any(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
         ) from e
+
+
+async def device_id_admin(
+    request: Request,
+    x_device_id: str | None = Header(default=None, alias="X-Device-Id"),
+    x_device_ts: str | None = Header(default=None, alias="X-Device-Ts"),
+    x_device_sign: str | None = Header(default=None, alias="X-Device-Sign"),
+    x_device_body_sha256: str | None = Header(default=None, alias="X-Device-Body-Sha256"),
+    x_device_nonce: str | None = Header(default=None, alias="X-Device-Nonce"),
+) -> str:
+    """Trusted vault device that is listed in OPENMAIL_ADMIN_DEVICE_IDS.
+
+    Empty allowlist fails closed (nobody is admin). Pending devices never
+    reach this check — ``device_id_strict`` requires trusted status first.
+    """
+    did = await device_id_strict(
+        request,
+        x_device_id=x_device_id,
+        x_device_ts=x_device_ts,
+        x_device_sign=x_device_sign,
+        x_device_body_sha256=x_device_body_sha256,
+        x_device_nonce=x_device_nonce,
+    )
+    allowed = get_settings().admin_device_id_set
+    if not allowed or did not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="admin device required",
+        )
+    return did

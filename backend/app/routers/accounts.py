@@ -351,7 +351,7 @@ def account_quota(
     x_license_token: str | None = Header(default=None, alias="X-License-Token"),
 ) -> dict:
     snap = quota_snapshot(
-        device_id=device_id, license_token=x_license_token, settings=settings
+        device_id=device_id, license_token=x_license_token, settings=settings, db=db
     )
     used = _cloud_count(db, device_id)
     snap["cloud_used"] = used

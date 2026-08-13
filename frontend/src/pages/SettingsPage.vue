@@ -13,6 +13,12 @@ import UiSelect from '@/components/UiSelect.vue'
 import { browserTimeZone, TIMEZONE_OPTIONS } from '@/utils/timezones'
 import type { ThemeMode } from '@/utils/theme'
 import type { UiSelectOption } from '@/components/UiSelect.vue'
+import {
+  issueAdminLicense,
+  listAdminLicenses,
+  revokeAdminLicense,
+  type IssuedLicense,
+} from '@/api/admin'
 
 const { t, locale } = useI18n()
 const settings = useSettingsStore()
@@ -27,10 +33,71 @@ const devices = ref<DeviceRow[]>([])
 const devicesBusy = ref(false)
 const devicesErr = ref('')
 
+const licenses = ref<IssuedLicense[]>([])
+const licensesBusy = ref(false)
+const licensesErr = ref('')
+const licenseNote = ref('')
+const issuing = ref(false)
+
 const selfDeviceId = computed(() => {
   const hex = vault.devicePublicId
   return hex ? `vk_${hex.slice(0, 40)}` : ''
 })
+
+async function copyDeviceId(id: string) {
+  if (!id) return
+  if (await copyText(id)) flashMsg(t('common.copied'))
+}
+
+function fmtTs(iso: string | null | undefined): string {
+  if (!iso) return t('settings.adminNever')
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
+}
+
+async function loadAdminLicenses() {
+  if (!vault.isAdmin) {
+    licenses.value = []
+    return
+  }
+  licensesBusy.value = true
+  licensesErr.value = ''
+  try {
+    licenses.value = await listAdminLicenses()
+  } catch (e) {
+    licensesErr.value = e instanceof Error ? e.message : String(e)
+    licenses.value = []
+  } finally {
+    licensesBusy.value = false
+  }
+}
+
+async function onIssueLicense() {
+  issuing.value = true
+  licensesErr.value = ''
+  try {
+    const row = await issueAdminLicense(licenseNote.value)
+    licenseNote.value = ''
+    flashMsg(t('settings.adminIssued'))
+    licenses.value = [row, ...licenses.value.filter((x) => x.id !== row.id)]
+    if (await copyText(row.token)) flashMsg(t('settings.adminCopiedToken'))
+  } catch (e) {
+    flashMsg(e instanceof Error ? e.message : String(e), 'danger')
+  } finally {
+    issuing.value = false
+  }
+}
+
+async function onRevokeLicense(row: IssuedLicense) {
+  if (!window.confirm(t('settings.adminRevokeConfirm'))) return
+  try {
+    const updated = await revokeAdminLicense(row.id)
+    licenses.value = licenses.value.map((x) => (x.id === updated.id ? updated : x))
+    flashMsg(t('settings.adminRevoked'))
+  } catch (e) {
+    flashMsg(e instanceof Error ? e.message : String(e), 'danger')
+  }
+}
 
 async function loadDevices() {
   if (vault.deviceStatus === 'pending') {
@@ -298,13 +365,15 @@ function onFactoryReset() {
   vault.factoryResetLocal()
 }
 
-onMounted(() => {
+onMounted(async () => {
   licenseInput.value = getLicenseToken()
   // Prefer 0 (no idle lock) for existing users who still have old default 30
   // only when key was never customized? Keep stored value as-is.
   lockMin.value = vault.lockMinutes
   void loadConfig()
+  await vault.refreshDeviceStatus()
   void loadDevices()
+  void loadAdminLicenses()
 })
 </script>
 
@@ -397,6 +466,16 @@ onMounted(() => {
         <div class="field" style="margin-top: 18px">
           <label class="label">{{ t('vault.devicesTitle') }}</label>
           <p class="hint">{{ t('vault.devicesHint') }}</p>
+          <div v-if="selfDeviceId" class="this-device">
+            <label class="label">{{ t('settings.deviceId') }}</label>
+            <p class="hint">{{ t('vault.deviceIdHint') }}</p>
+            <div class="device-id-row">
+              <code class="device-id">{{ selfDeviceId }}</code>
+              <button type="button" class="btn btn-outline btn-sm" @click="copyDeviceId(selfDeviceId)">
+                {{ t('common.copy') }}
+              </button>
+            </div>
+          </div>
           <p v-if="vault.deviceStatus === 'pending'" class="hint" style="color: var(--warn, #b45309)">
             {{ t('vault.devicePendingBanner') }}
           </p>
@@ -415,7 +494,14 @@ onMounted(() => {
             <ul v-if="devices.length" class="device-list">
               <li v-for="d in devices" :key="d.public_id" class="device-row">
                 <div class="device-meta">
-                  <code class="device-id">{{ d.public_id.slice(0, 18) }}…</code>
+                  <code class="device-id">{{ d.public_id }}</code>
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-sm"
+                    @click="copyDeviceId(d.public_id)"
+                  >
+                    {{ t('common.copy') }}
+                  </button>
                   <span class="device-status" :data-status="d.status">{{
                     d.status === 'pending' ? t('vault.deviceStatusPending') : t('vault.deviceStatusTrusted')
                   }}</span>
@@ -595,6 +681,76 @@ onMounted(() => {
           <p class="hint">{{ t('settings.quotaHint') }}</p>
         </div>
       </section>
+
+      <section v-if="vault.isAdmin" class="block">
+        <h2>{{ t('settings.adminLicensesTitle') }}</h2>
+        <p class="hint">{{ t('settings.adminLicensesHint') }}</p>
+        <div class="field">
+          <label class="label">{{ t('settings.adminNote') }}</label>
+          <input
+            v-model="licenseNote"
+            class="input"
+            type="text"
+            maxlength="500"
+            :placeholder="t('settings.adminNotePh')"
+          />
+        </div>
+        <div class="btn-row">
+          <button
+            type="button"
+            class="btn btn-primary btn-sm"
+            :disabled="issuing"
+            @click="onIssueLicense"
+          >
+            {{ t('settings.adminIssue') }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-outline btn-sm"
+            :disabled="licensesBusy"
+            @click="loadAdminLicenses"
+          >
+            {{ t('vault.devicesRefresh') }}
+          </button>
+        </div>
+        <p v-if="licensesErr" class="hint" style="color: var(--danger)">{{ licensesErr }}</p>
+        <ul v-if="licenses.length" class="license-list">
+          <li v-for="row in licenses" :key="row.id" class="license-row">
+            <div class="license-head">
+              <code class="device-id">{{ row.token }}</code>
+              <button type="button" class="btn btn-ghost btn-sm" @click="copyDeviceId(row.token)">
+                {{ t('common.copy') }}
+              </button>
+              <span class="device-status" :data-status="row.revoked_at ? 'pending' : 'trusted'">
+                {{ row.revoked_at ? t('settings.adminRevoked') : t('settings.adminActive') }}
+              </span>
+            </div>
+            <p v-if="row.note" class="hint">{{ row.note }}</p>
+            <p class="hint">
+              {{ t('settings.adminDevices') }}: {{ row.device_count }} ·
+              {{ t('settings.adminLastUsed') }}: {{ fmtTs(row.last_used_at) }}
+            </p>
+            <ul v-if="row.devices.length" class="use-list">
+              <li v-for="u in row.devices" :key="u.device_id" class="device-id-row">
+                <code class="device-id">{{ u.device_id }}</code>
+                <button type="button" class="btn btn-ghost btn-sm" @click="copyDeviceId(u.device_id)">
+                  {{ t('common.copy') }}
+                </button>
+                <span class="hint">{{ fmtTs(u.last_seen_at) }}</span>
+              </li>
+            </ul>
+            <button
+              v-if="!row.revoked_at"
+              type="button"
+              class="btn btn-ghost btn-sm"
+              @click="onRevokeLicense(row)"
+            >
+              {{ t('settings.adminRevoke') }}
+            </button>
+          </li>
+        </ul>
+        <p v-else-if="!licensesBusy" class="hint">{{ t('settings.adminEmpty') }}</p>
+      </section>
     </div>
   </div>
 </template>
@@ -763,6 +919,45 @@ onMounted(() => {
 .device-id {
   font-size: 12px;
   word-break: break-all;
+  max-width: 100%;
+}
+.device-id-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.this-device {
+  margin: 10px 0 14px;
+}
+.license-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.license-row {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+}
+.license-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.use-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
 }
 .device-status[data-status='pending'] {
   color: var(--warn, #b45309);

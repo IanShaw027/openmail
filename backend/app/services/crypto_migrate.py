@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.crypto import reencrypt_token
-from app.models import Account, AccountSession
+from app.models import Account, AccountSession, LicenseCode
 
 logger = logging.getLogger("openmail.crypto_migrate")
 
@@ -70,6 +70,7 @@ def migrate_reencrypt_all(db: Session, *, settings: Settings | None = None) -> d
         "failed": 0,
         "rows_touched": 0,
         "registry": 0,
+        "licenses": 0,
     }
     # Skip migrate if no fallbacks configured (nothing to rewrite for rotation)
     fb = (getattr(s, "openmail_master_key_fallbacks", None) or "").strip()
@@ -108,6 +109,29 @@ def migrate_reencrypt_all(db: Session, *, settings: Settings | None = None) -> d
             totals["meta"],
             totals["failed"],
         )
+
+    license_rows = db.query(LicenseCode).all()
+    license_touched = 0
+    for row in license_rows:
+        if not row.token_enc:
+            continue
+        new = reencrypt_token(row.token_enc, settings=s)
+        if new is None:
+            totals["failed"] += 1
+            continue
+        if new != row.token_enc:
+            row.token_enc = new
+            license_touched += 1
+            totals["licenses"] += 1
+    if license_touched:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("reencrypt license commit failed")
+            raise
+        logger.info("crypto migrate: re-encrypted license_codes=%s", license_touched)
+
     try:
         from app.services.device_auth import rewrite_registry_with_primary_key
 

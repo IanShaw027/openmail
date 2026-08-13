@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Admin-issued license codes.** Set `OPENMAIL_ADMIN_DEVICE_IDS` to one or
+  more trusted vault ids (`vk_…`, comma or newline). That device can issue,
+  list, and revoke codes from Settings. Issued codes paste into the existing
+  license field (same as `LICENSE_TOKENS`), can be shared across devices, and
+  record HMAC-proven usage. Ciphertext at rest; logs only hashes. Empty
+  allowlist means nobody is admin.
+
+### Fixed
+
+- Settings shows the **full** device id with a copy button. The list previously
+  truncated `vk_…` to 18 characters, which made `OPENMAIL_ADMIN_DEVICE_IDS`
+  unusable from the UI.
+
 ### Security
 
 - **Device admission is first-trust by default.** The first vault device that
