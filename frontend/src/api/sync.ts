@@ -1,6 +1,6 @@
 import { apiRequest } from '@/api/client'
 
-/** Single mail row from GET /api/sync/delta (preview by default; body optional). */
+/** Single mail row from GET /api/sync/delta (bodies included by default). */
 export interface SyncDeltaMail {
   account_id?: string | null
   email: string

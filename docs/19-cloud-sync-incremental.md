@@ -136,7 +136,9 @@ Transaction order:
 }
 ```
 
-Default delta **omits full html** (preview + code + meta). Optional `include_body=1` later.
+Default delta **includes decrypted bodies**. Pass `include_body=false` to omit
+html/text (preview + code + meta still returned). The browser always requests
+bodies.
 
 ## Cloud upload (frontend)
 
@@ -177,5 +179,5 @@ Optional advanced: sealed backup only → `sync_enabled: false`, no poll badge a
 
 - Graph deltaLink persistence (time since OK v1)
 - Web Push
-- include_body negotiation
+- include_body (default true; `false` omits html/text)
 - Changing local load-more UX constants beyond stable_id alignment

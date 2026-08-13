@@ -54,6 +54,19 @@ describe('cloudSync delta ack', () => {
     pullSyncDelta.mockReset()
   })
 
+  it('requests includeBody on every delta page', async () => {
+    pullSyncDelta.mockResolvedValue({
+      has_more: false,
+      mails: [mailRow('m1', '2026-08-12T10:00:00+00:00')],
+    })
+
+    await useCloudSyncStore().pullCloudMailDelta()
+
+    expect(pullSyncDelta).toHaveBeenCalledWith(
+      expect.objectContaining({ includeBody: true }),
+    )
+  })
+
   it('acks only after flushPersist succeeds', async () => {
     pullSyncDelta.mockResolvedValue({
       has_more: false,

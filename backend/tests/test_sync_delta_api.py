@@ -173,6 +173,8 @@ def test_sync_delta_pulls_device_mails(client: TestClient, db_session, vault_dev
             from_="n@e.com",
             date=(base + timedelta(minutes=i)).isoformat(),
             body_preview=f"p{i}",
+            body_text=f"full body {i}",
+            verification_code="111111" if i == 0 else None,
         )
         for i in range(3)
     ]
@@ -205,8 +207,15 @@ def test_sync_delta_pulls_device_mails(client: TestClient, db_session, vault_dev
     assert body.get("server_seq") is None
     assert len(body["mails"]) == 2
     assert all(m["email"] == "delta@ex.com" for m in body["mails"])
-    assert all(m["body_text"] is None for m in body["mails"])
-    assert all(m["body_html"] is None for m in body["mails"])
+    assert all(m["body_text"] for m in body["mails"])
+    assert all(m["preview"] in ("p0", "p1", "p2") for m in body["mails"])
+    codes = {m["verification_code"] for m in body["mails"]}
+    assert "111111" in codes
+    path_omit = "/api/sync/delta?limit=2&include_body=false"
+    r_omit = client.get(path_omit, headers=headers_fn("GET", path_omit))
+    assert r_omit.status_code == 200, r_omit.text
+    assert all(m["body_text"] is None for m in r_omit.json()["mails"])
+    assert all(m["body_html"] is None for m in r_omit.json()["mails"])
     # accounts meta includes sync_enabled for this device
     acc_ids = {a["id"] for a in body["accounts"]}
     assert acc.id in acc_ids

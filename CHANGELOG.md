@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at rest** with the same master-key AES-GCM as bodies. Subject and from stay
   plaintext for list UI. Delta decrypts for trusted devices; existing plaintext
   rows still read. `verification_code` is widened to TEXT so ciphertext fits.
+- **Cloud delta includes bodies by default** (`include_body=true`). The
+  browser always requests them so OTP that lives only in HTML is not missing
+  from the local cache.
 
 ### Fixed
 

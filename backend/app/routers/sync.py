@@ -129,7 +129,7 @@ def sync_delta(
     since: str | None = Query(default=None, description="ISO datetime keyset lower bound"),
     since_id: str | None = Query(default=None, description="Mail id tie-breaker for keyset"),
     limit: int = Query(default=200, ge=1, le=500),
-    include_body: bool = Query(default=False),
+    include_body: bool = Query(default=True),
 ) -> dict:
     """Incremental mail_items pull for this vault device (HMAC required)."""
     delta = list_delta(

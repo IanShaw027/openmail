@@ -133,6 +133,7 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
               since,
               sinceId,
               limit: DEFAULT_LIMIT,
+              includeBody: true,
             })
           } catch (e) {
             if (isSoftFail(e)) {
