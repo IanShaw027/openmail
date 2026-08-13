@@ -91,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DROP TABLE users`, so the leftover FK no longer blocks migration.
 - **Cloud mail rows without IMAP UIDVALIDITY no longer use a bare UID as**
   `stable_id` (mailbox rebuild would otherwise overwrite the wrong message).
+- **IMAP UIDVALIDITY change drops stale folder rows** in the browser cache
+  (RFC 4549). Rows that never had a uv still re-key in place instead of wiping
+  the folder.
 - **Cookie SSRF tests no longer need live DNS** for `www.mail.com`.
 
 - **Upgrade from a root-run install no longer crash-loops.** Images before this

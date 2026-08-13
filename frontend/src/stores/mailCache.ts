@@ -785,13 +785,46 @@ export const useMailCacheStore = defineStore('mailCache', () => {
     // Folders for which this merge batch carries UIDVALIDITY — drop legacy
     // folder::id keys that lack uv so upgraded IMAP caches do not duplicate.
     const foldersWithUv = new Set<string>()
+    const incomingUvByFolder = new Map<string, number>()
     for (const m of messages) {
       if (
         m?.id &&
         m.uidvalidity != null &&
         Number.isFinite(Number(m.uidvalidity))
       ) {
-        foldersWithUv.add(normalizeFolder(m.folder || 'inbox'))
+        const f = normalizeFolder(m.folder || 'inbox')
+        foldersWithUv.add(f)
+        const uv = Number(m.uidvalidity)
+        const prevUv = incomingUvByFolder.get(f)
+        if (prevUv == null) incomingUvByFolder.set(f, uv)
+        else if (prevUv !== uv) incomingUvByFolder.set(f, Number.NaN)
+      }
+    }
+    // RFC 4549: a new UIDVALIDITY means prior UIDs in that mailbox are invalid.
+    for (const [folder, incomingUv] of incomingUvByFolder) {
+      if (!Number.isFinite(incomingUv)) continue
+      let hasDifferent = false
+      for (const existing of map.values()) {
+        if (normalizeFolder(existing.folder) !== folder) continue
+        if (
+          existing.uidvalidity != null &&
+          Number.isFinite(Number(existing.uidvalidity)) &&
+          Number(existing.uidvalidity) !== incomingUv
+        ) {
+          hasDifferent = true
+          break
+        }
+      }
+      if (!hasDifferent) continue
+      for (const [k, existing] of [...map.entries()]) {
+        if (normalizeFolder(existing.folder) !== folder) continue
+        if (
+          existing.uidvalidity != null &&
+          Number.isFinite(Number(existing.uidvalidity)) &&
+          Number(existing.uidvalidity) !== incomingUv
+        ) {
+          map.delete(k)
+        }
       }
     }
     if (foldersWithUv.size > 0) {
