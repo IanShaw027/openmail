@@ -53,7 +53,7 @@ fi
 mkdir -p data
 
 # Export so `pull` and `up` cannot disagree about which image they act on.
-export OPENMAIL_IMAGE="${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.3.6}"
+export OPENMAIL_IMAGE="${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.3.7}"
 echo "==> image: $OPENMAIL_IMAGE"
 # Prefer pull of published image; fall back to local build if pull fails (offline / private).
 if docker compose pull openmail; then

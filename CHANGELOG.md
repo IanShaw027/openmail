@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] — 2026-08-13
+
 ### Added
 
 - **Admin-issued license codes.** Set `OPENMAIL_ADMIN_DEVICE_IDS` to one or
@@ -389,7 +391,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - User registration, admin console, server mail search UI
 - Code-API **create** (legacy token URLs may still resolve if present in DB)
 
-[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/IanShaw027/openmail/compare/v0.3.6...v0.3.7
+[0.3.6]: https://github.com/IanShaw027/openmail/compare/v0.3.5...v0.3.6
+[0.3.5]: https://github.com/IanShaw027/openmail/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/IanShaw027/openmail/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/IanShaw027/openmail/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/IanShaw027/openmail/compare/v0.3.1...v0.3.2
