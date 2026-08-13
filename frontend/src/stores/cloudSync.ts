@@ -185,7 +185,7 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
           lastMailSince != null &&
           (lastMailSince !== ack0.since || lastMailId !== ack0.sinceId)
 
-        if (cursorMoved) {
+        if (cursorMoved && lastMailSince != null) {
           try {
             if (totalMerged > 0) {
               await mailCache.flushPersist()
