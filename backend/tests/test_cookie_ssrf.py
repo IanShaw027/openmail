@@ -142,3 +142,11 @@ def test_fetch_strips_poisoned_meta_and_still_attempts_restore() -> None:
     assert restore.called
     meta = restore.call_args.kwargs.get("meta") or {}
     assert "folder_url" not in meta
+
+
+def test_http_client_accepts_operator_private_warp_proxy() -> None:
+    """Pool URLs are injected upstream; cookie layer must not re-reject RFC1918."""
+    from app.providers.cookie_mailcom import _http_client
+
+    client = _http_client(5.0, proxy="socks5://10.1.0.5:1080")
+    assert client is not None

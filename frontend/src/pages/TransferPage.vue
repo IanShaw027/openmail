@@ -16,7 +16,7 @@ import { useMailCacheStore } from '@/stores/mailCache'
 import { useTwoFaStore } from '@/stores/twofa'
 import { useSettingsStore } from '@/stores/settings'
 import { getDeviceId } from '@/utils/device'
-import { buildSystemSnapshot, parseSystemSnapshot, type SystemSnapshot } from '@/utils/exportImport'
+import { buildSystemSnapshot, detachSnapshotAccounts, parseSystemSnapshot, type SystemSnapshot } from '@/utils/exportImport'
 import { loadGroups } from '@/utils/groups'
 import {
   transferApprove,
@@ -185,12 +185,11 @@ async function decryptBlob(blobB64: string, rawKeyB64: string): Promise<SystemSn
 }
 
 async function applySnapshotOverwrite(snap: SystemSnapshot) {
+  if (vault.status !== 'unlocked') {
+    throw new Error(t('transfer.needUnlock'))
+  }
   // Full replace of local vault data — user confirmed overwrite
-  const locals = snap.accounts.map((a) => ({
-    ...a,
-    storage: 'local' as const,
-    updatedAt: Date.now(),
-  }))
+  const locals = detachSnapshotAccounts(snap.accounts)
   accounts.localAccounts.splice(0, accounts.localAccounts.length, ...locals)
   if (snap.twofa && Array.isArray(snap.twofa)) {
     twofa.replaceAll(snap.twofa as never)
@@ -308,6 +307,10 @@ async function startAsGuest(inputCode?: string) {
   }
   if (!overwriteAck.value) {
     err.value = t('transfer.needOverwriteAck')
+    return
+  }
+  if (vault.status !== 'unlocked') {
+    err.value = t('transfer.needUnlock')
     return
   }
   if (!transferKey.value) {

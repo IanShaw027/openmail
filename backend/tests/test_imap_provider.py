@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import imaplib
 import pytest
 
 from app.providers.base import resolve_provider
@@ -13,17 +14,74 @@ from app.providers.imap_provider import ImapProvider, parse_rfc822
 
 
 def test_imap_utf7_encode_chinese_mailbox() -> None:
-    from app.providers.imap_provider import _imap_utf7_encode, _mailbox_select_variants
+    from app.providers.imap_provider import _imap_utf7_encode, _imap_utf7_decode, _mailbox_select_variants
 
-    # Pure ASCII unchanged
     assert _imap_utf7_encode("Sent") == "Sent"
-    # Non-ASCII → modified UTF-7 (starts with &)
+    assert _imap_utf7_encode("R&D") == "R&-D"
+    assert _imap_utf7_decode("R&-D") == "R&D"
     enc = _imap_utf7_encode("已发送")
     assert enc.isascii()
     assert enc.startswith("&") or "&" in enc
+    assert _imap_utf7_decode(enc) == "已发送"
     variants = _mailbox_select_variants("已发送")
     assert "已发送" in variants
     assert any(v.isascii() and v != "已发送" for v in variants)
+
+
+def test_safe_uids_reject_wildcards_and_crlf() -> None:
+    from app.providers.imap_provider import _safe_uids
+
+    assert _safe_uids([b"1", b"2", b"1:*", b"3\r\nSTORE 1:* +FLAGS (\\Deleted)"]) == ["1", "2"]
+    assert _safe_uids(["10", "abc", ""]) == ["10"]
+
+
+def test_imap_non_ssl_requires_starttls_before_login() -> None:
+    """ssl=false means STARTTLS on 143, never plaintext LOGIN."""
+    mock_conn = MagicMock()
+    mock_conn.login.return_value = ("OK", [b"Logged in"])
+    mock_conn.starttls.return_value = ("OK", [])
+
+    provider = ImapProvider()
+    fake_imap4 = MagicMock(return_value=mock_conn)
+    fake_imap4.error = imaplib.IMAP4.error
+    with (
+        patch(
+            "app.services.ssrf.resolve_mail_endpoint",
+            return_value=("93.184.216.34", 143, "imap.example.com"),
+        ),
+        patch("app.providers.imap_provider.imaplib.IMAP4", fake_imap4),
+    ):
+        conn = provider._login_connect(
+            "imap.example.com", 143, False, "u@example.com", "secret"
+        )
+
+    fake_imap4.assert_called_once()
+    assert conn is mock_conn
+    names = [c[0] for c in mock_conn.method_calls]
+    assert "starttls" in names
+    assert names.index("starttls") < names.index("login")
+
+
+def test_imap_non_ssl_aborts_login_if_starttls_fails() -> None:
+    mock_conn = MagicMock()
+    mock_conn.starttls.side_effect = OSError("STARTTLS failed")
+
+    provider = ImapProvider()
+    fake_imap4 = MagicMock(return_value=mock_conn)
+    fake_imap4.error = imaplib.IMAP4.error
+    with (
+        patch(
+            "app.services.ssrf.resolve_mail_endpoint",
+            return_value=("93.184.216.34", 143, "imap.example.com"),
+        ),
+        patch("app.providers.imap_provider.imaplib.IMAP4", fake_imap4),
+        pytest.raises(RuntimeError, match="STARTTLS"),
+    ):
+        provider._login_connect(
+            "imap.example.com", 143, False, "u@example.com", "secret"
+        )
+
+    mock_conn.login.assert_not_called()
 
 
 def test_imap_ssl_connect_uses_sni_hostname_not_ip() -> None:

@@ -1,5 +1,5 @@
 /**
- * Sanitize email HTML for safe v-html rendering.
+ * Sanitize email HTML before the sandboxed iframe (defense in depth).
  * Uses DOMParser + allowlist (not regex-only).
  */
 
@@ -294,6 +294,10 @@ function walk(node: Node, out: DocumentFragment, doc: Document) {
       /* ignore invalid */
     }
   }
+  if (tag === 'a' && neo.getAttribute('href')) {
+    neo.setAttribute('rel', 'noopener noreferrer nofollow')
+    neo.setAttribute('target', '_blank')
+  }
 
   const frag = doc.createDocumentFragment()
   for (const child of Array.from(el.childNodes)) {
@@ -303,7 +307,7 @@ function walk(node: Node, out: DocumentFragment, doc: Document) {
   out.appendChild(neo)
 }
 
-/** Strip obvious XSS vectors from email HTML before v-html. */
+/** Strip obvious XSS vectors from email HTML before the sandboxed iframe. */
 export function sanitizeHtml(html: string): string {
   if (!html || typeof html !== 'string') return ''
   if (typeof DOMParser === 'undefined') {

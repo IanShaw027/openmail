@@ -116,3 +116,43 @@ def test_migration_purges_overrides_for_settings_that_no_longer_exist(tmp_path, 
     assert "cookie_secure" not in keys
     # Live overrides are untouched.
     assert "sync_concurrency" in keys
+
+
+def test_postgres_drops_users_fk_before_dropping_table():
+    """Postgres cannot DROP TABLE users while accounts.owner_user_id still FKs it."""
+    executed: list[str] = []
+
+    class _Result:
+        def __init__(self, rows=None):
+            self._rows = rows or []
+
+        def fetchall(self):
+            return self._rows
+
+    class _Conn:
+        def execute(self, stmt, *args, **kwargs):  # type: ignore[no-untyped-def]
+            executed.append(str(stmt))
+            return _Result()
+
+    class _Insp:
+        def get_foreign_keys(self, table):  # type: ignore[no-untyped-def]
+            assert table == "accounts"
+            return [
+                {
+                    "name": "accounts_owner_user_id_fkey",
+                    "referred_table": "users",
+                    "constrained_columns": ["owner_user_id"],
+                }
+            ]
+
+    db_mod._drop_legacy_user_tables(
+        _Conn(),
+        _Insp(),
+        dialect="postgresql",
+        tables={"accounts", "users", "user_sessions"},
+    )
+    joined = "\n".join(executed)
+    assert "DROP CONSTRAINT" in joined.upper()
+    assert "accounts_owner_user_id_fkey" in joined
+    assert joined.upper().index("DROP CONSTRAINT") < joined.upper().index("DROP TABLE")
+    assert "users" in joined.lower()

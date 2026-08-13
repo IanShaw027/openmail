@@ -46,3 +46,13 @@ You should receive an acknowledgement within a few days when possible.
 - [ ] Keep WARP/proxy nodes on a private Docker network; do not publish SOCKS ports
 - [ ] Back up `./data` including `device_registry.json` and SQLite; protect filesystem permissions
 - [ ] Rotate license tokens (`LICENSE_TOKENS`) if leaked
+
+## Vault session resume
+
+While the vault is unlocked, `sessionStorage['openmail.vault.session.v1']` holds
+a random AES key (`sk`) and the DEK wrapped with that key (`pkg`). Same-origin
+script (XSS) can read both and recover the DEK — wrapping is **not** a
+confidentiality boundary against XSS. It only keeps the DEK out of
+`localStorage` so a later visit after the tab is closed still requires the
+password. Locking the vault deletes this wrap. Treat XSS in the SPA as vault
+compromise.

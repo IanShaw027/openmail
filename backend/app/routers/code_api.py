@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import PlainTextResponse
-from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.deps import DbDep, SettingsDep
+from app.deps_device import device_id_strict
 from app.models import Account, CodeApiToken
 from app.schemas import CodeApiOut, CodeFetchJsonResult
 from app.services.fetch_service import FetchServiceResult, fetch_account
@@ -38,6 +38,26 @@ def create_or_return_code_api(account_id: str) -> CodeApiOut:
         status_code=status.HTTP_410_GONE,
         detail="code-api create removed — use local fetch; token URLs already issued still work",
     )
+
+
+@router.post(
+    "/api/accounts/{account_id}/code-api/disable",
+    summary="Disable a legacy code-api token for a device-owned account",
+)
+def disable_code_api(
+    account_id: str,
+    db: DbDep,
+    device_id: str = Depends(device_id_strict),
+) -> dict[str, bool]:
+    acc = db.get(Account, account_id)
+    if acc is None or acc.owner_user_id != device_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account not found")
+    row = db.query(CodeApiToken).filter(CodeApiToken.account_id == account_id).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="token not found")
+    row.enabled = False
+    db.commit()
+    return {"ok": True, "enabled": False}
 
 
 def _client_ip(request: Request) -> str:
@@ -91,8 +111,11 @@ def public_code_fetch(
     request: Request,
     db: DbDep,
     settings: SettingsDep,
-    format: str = Query(default="json"),
+    format: str | None = Query(default=None),
     refresh: int = Query(default=0),
+    folder: str | None = Query(default=None),
+    keyword: str | None = Query(default=None),
+    regex: str | None = Query(default=None),
 ) -> Response:
     row = db.query(CodeApiToken).filter(CodeApiToken.token == token).one_or_none()
     if row is None or not row.enabled:
@@ -119,17 +142,23 @@ def public_code_fetch(
     db.commit()
 
     use_cache = refresh != 1
+    folder_q = (folder or "inbox").strip() or "inbox"
+    keyword_q = keyword if keyword is not None else row.default_keyword
+    regex_q = regex if regex is not None else row.default_regex
+    fmt = (format or row.default_format or "json").strip().lower()
     result = fetch_account(
         db,
         acc,
-        folder="inbox",
+        folder=folder_q,
         quick=True,
         force=refresh == 1,
+        keyword=keyword_q,
+        custom_regex=regex_q,
         settings=settings,
         use_cache=use_cache,
     )
 
-    if format in ("text", "plain"):
+    if fmt in ("text", "plain"):
         body = result.code or ""
         return PlainTextResponse(body)
 

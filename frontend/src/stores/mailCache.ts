@@ -795,12 +795,16 @@ export const useMailCacheStore = defineStore('mailCache', () => {
       }
     }
     if (foldersWithUv.size > 0) {
+      const incomingIds = new Set(
+        messages.filter((m) => m?.id).map((m) => String(m.id)),
+      )
       for (const [k, m] of [...map.entries()]) {
         const f = normalizeFolder(m.folder)
         if (!foldersWithUv.has(f)) continue
         const hasUv =
           m.uidvalidity != null && Number.isFinite(Number(m.uidvalidity))
-        if (!hasUv) map.delete(k)
+        // Only drop the same message's legacy folder::id key, not the whole folder.
+        if (!hasUv && incomingIds.has(String(m.id))) map.delete(k)
       }
     }
     for (const m of messages) {

@@ -42,6 +42,34 @@ MAX_EGRESS_ATTEMPTS = 3
 MAX_EGRESS_ATTEMPTS_COOKIE = 2
 
 
+def build_fetch_limits(
+    *,
+    since: str | None = None,
+    before: str | None = None,
+    full: bool = False,
+    quick: bool = False,
+    max_messages: int | None = None,
+    default_quick: int = 15,
+    default_page: int = 50,
+) -> dict[str, Any]:
+    """Build provider ``limits``. ``since`` stays set when paging with ``before``."""
+    limits: dict[str, Any] = {}
+    if since and not full:
+        limits["since"] = since
+    if before:
+        limits["before"] = before
+    if max_messages is not None:
+        try:
+            limits["max_messages"] = max(1, min(int(max_messages), 100))
+        except (TypeError, ValueError):
+            limits["max_messages"] = default_quick if quick else default_page
+    elif quick:
+        limits["max_messages"] = default_quick
+    elif not full:
+        limits["max_messages"] = default_page
+    return limits
+
+
 @dataclass
 class FetchServiceResult:
     ok: bool
@@ -67,6 +95,7 @@ class FetchServiceResult:
     mailboxes: list[str] | None = None
     # IMAP mailbox UIDVALIDITY for this folder (optional)
     uidvalidity: int | None = None
+    credential_updates: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.message_count == 0 and self.messages:
@@ -342,20 +371,15 @@ def fetch_account(
     # cursors. A mailbox-level last_fetch_at is not a valid high-water mark:
     # fetching inbox first could make junk/sent skip older unseen messages.
     # Keep this path recent-page based until a (account, folder) cursor exists.
-    limits: dict[str, Any] = {}
-    if since and not full and not before:
-        limits["since"] = since
-    if before:
-        limits["before"] = before
-    if max_messages is not None:
-        try:
-            limits["max_messages"] = max(1, min(int(max_messages), 100))
-        except (TypeError, ValueError):
-            limits["max_messages"] = 15 if quick else 50
-    elif quick:
-        limits["max_messages"] = 15
-    elif not full:
-        limits["max_messages"] = 50
+    limits = build_fetch_limits(
+        since=since,
+        before=before,
+        full=full,
+        quick=quick,
+        max_messages=max_messages,
+        default_quick=15,
+        default_page=50,
+    )
 
     try:
         with account_fetch_slot(db, account.id, settings=s, force=force) as lease_token:
@@ -509,6 +533,7 @@ def fetch_account(
                 session_restored=session["session_restored"],
                 mailboxes=session.get("mailboxes"),
                 uidvalidity=getattr(result, "uidvalidity", None),
+                credential_updates=session.get("credential_updates"),
             )
     except FetchTooSoonError as exc:
         # Fall back to cache if available
@@ -664,6 +689,7 @@ def _session_fields_from_result(result: FetchResult) -> dict[str, Any]:
         "session_cookies": None,
         "session_meta": None,
         "mailboxes": None,
+        "credential_updates": None,
     }
     updates = getattr(result, "credential_updates", None)
     if updates is None:
@@ -678,6 +704,12 @@ def _session_fields_from_result(result: FetchResult) -> dict[str, Any]:
             out["mailboxes"] = [str(x) for x in mb if x]
     if getattr(updates, "mailboxes", None) is not None:
         out["mailboxes"] = [str(x) for x in (updates.mailboxes or []) if x]
+    cred: dict[str, str] = {}
+    if updates.refresh_token:
+        cred["refresh_token"] = str(updates.refresh_token)
+    if updates.access_token:
+        cred["access_token"] = str(updates.access_token)
+    out["credential_updates"] = cred or None
     return out
 
 
@@ -769,21 +801,15 @@ def fetch_proxy(
             folder=folder,
         )
 
-    limits: dict[str, Any] = {}
-    if since and not full and not before:
-        limits["since"] = since
-    if before:
-        limits["before"] = before
-    # Explicit page size wins; else quick defaults to 20 recent
-    if max_messages is not None:
-        try:
-            limits["max_messages"] = max(1, min(int(max_messages), 100))
-        except (TypeError, ValueError):
-            limits["max_messages"] = 20 if quick else 50
-    elif quick:
-        limits.setdefault("max_messages", 20)
-    elif not full:
-        limits.setdefault("max_messages", 50)
+    limits = build_fetch_limits(
+        since=since,
+        before=before,
+        full=full,
+        quick=quick,
+        max_messages=max_messages,
+        default_quick=20,
+        default_page=50,
+    )
 
     def _do_fetch(c: dict[str, Any]) -> FetchResult:
         return provider_impl.fetch(
@@ -867,4 +893,5 @@ def fetch_proxy(
         session_restored=session["session_restored"],
         mailboxes=session.get("mailboxes"),
         uidvalidity=getattr(result, "uidvalidity", None),
+        credential_updates=session.get("credential_updates"),
     )

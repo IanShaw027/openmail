@@ -56,6 +56,8 @@ const DEFAULT_LOCK_MINUTES = 30
 /** How long before an idle auto-lock the UI gets a chance to warn. */
 const IDLE_WARN_MS = 60_000
 const IDLE_TICK_MS = 15_000
+/** Hold can postpone idle lock, but not cancel it forever. */
+const HOLD_MAX_GRACE_MS = 5 * 60_000
 
 export type VaultStatus = 'unavailable' | 'setup' | 'locked' | 'unlocked'
 
@@ -190,9 +192,10 @@ export const useVaultStore = defineStore('vault', () => {
         }
         return
       }
-      // Deadline reached. Unsaved work outranks the timeout: keep the warning up
-      // and re-check next tick rather than discarding what the user was doing.
-      if (lockHeld.value) return
+      // Deadline reached. Unsaved work may postpone the lock, but only up to
+      // HOLD_MAX_GRACE_MS — a forgotten compose draft must not keep the vault
+      // (and 2FA secrets) in memory indefinitely.
+      if (lockHeld.value && remainingMs > -HOLD_MAX_GRACE_MS) return
       void autoLock()
     }, IDLE_TICK_MS)
   }
@@ -211,6 +214,8 @@ export const useVaultStore = defineStore('vault', () => {
       return
     }
     try {
+      // sk + wrapped DEK in sessionStorage ≈ plaintext DEK to same-origin XSS.
+      // See SECURITY.md (Vault session resume). Locking clears this wrap.
       const { sessionKeyB64, package: pkg } = await wrapDekForSession(raw)
       sessionStorage.setItem(
         SESSION_WRAP_KEY,
@@ -364,6 +369,18 @@ export const useVaultStore = defineStore('vault', () => {
     await persistBlob(ACCOUNTS_ENC_KEY, accounts)
     await persistBlob(TWOFA_ENC_KEY, twofa)
     await persistBlob(MAILCACHE_ENC_KEY, mailCache)
+
+    // Ciphertext is authoritative once a vault exists. Always drop leftover
+    // plaintext even when the encrypted blob already had data.
+    try {
+      localStorage.removeItem(LEGACY_ACCOUNTS)
+      localStorage.removeItem(LEGACY_TWOFA)
+      localStorage.removeItem(LEGACY_MAIL)
+      localStorage.removeItem('openmail.localAccounts')
+      localStorage.removeItem('openmail.twofa')
+    } catch {
+      /* ignore */
+    }
 
     return { accounts, twofa, mailCache }
   }
@@ -689,7 +706,8 @@ export const useVaultStore = defineStore('vault', () => {
     // auto-lock off in the meantime.
     if (!unlocked.value || lockMinutes.value <= 0) return
     if (Date.now() - lastActivityAt.value < lockMinutes.value * 60_000) return
-    if (lockHeld.value) return
+    const remainingMs = lockMinutes.value * 60_000 - (Date.now() - lastActivityAt.value)
+    if (lockHeld.value && remainingMs > -HOLD_MAX_GRACE_MS) return
     lock()
   }
 

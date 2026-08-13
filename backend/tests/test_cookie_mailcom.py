@@ -196,6 +196,20 @@ def test_resolve_provider_cookie() -> None:
     assert isinstance(p, MailcomCookieProvider)
 
 
+def test_resolve_provider_respects_explicit_imap_on_mail_com() -> None:
+    acc = SimpleNamespace(provider="imap", email="u@mail.com")
+    p = resolve_provider(acc)
+    assert p is not None
+    assert p.name == "imap"
+
+
+def test_resolve_provider_respects_explicit_http_api_on_mail_com() -> None:
+    acc = SimpleNamespace(provider="http_api", email="api@worker.mail.com")
+    p = resolve_provider(acc)
+    assert p is not None
+    assert p.name == "http_api"
+
+
 class _FakeResp:
     def __init__(self, text: str, status_code: int = 200, url: str = "https://www.mail.com/mail"):
         self.text = text

@@ -87,6 +87,7 @@ def _to_response(result: Any) -> FetchResponse:
         session_restored=bool(getattr(result, "session_restored", False)),
         mailboxes=getattr(result, "mailboxes", None),
         uidvalidity=uv_out,
+        credential_updates=getattr(result, "credential_updates", None),
     )
 
 
@@ -206,7 +207,12 @@ def proxy_send(
         body_html=body.body_html,
         proxy=body.proxy,
     )
-    return SendMailResponse(ok=result.ok, error=result.error, detail=result.detail)
+    return SendMailResponse(
+        ok=result.ok,
+        error=result.error,
+        detail=result.detail,
+        credential_updates=getattr(result, "credential_updates", None),
+    )
 
 
 @router.post(

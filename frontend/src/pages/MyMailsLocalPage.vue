@@ -6,7 +6,8 @@ import { useAccountsStore } from '@/stores/accounts'
 import { copyText } from '@/utils/clipboard'
 import { useToast } from '@/composables/useToast'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
-import { formatLinkPreview, onEmailHtmlClick } from '@/utils/emailLinks'
+import { formatLinkPreview } from '@/utils/emailLinks'
+import EmailHtmlFrame from '@/components/EmailHtmlFrame.vue'
 import { formatInUserTz, formatInUserTzTitle } from '@/utils/datetime'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
 import { useSettingsStore } from '@/stores/settings'
@@ -132,12 +133,11 @@ const detailHtml = computed(() => {
   return sanitizeHtml(m.body_html)
 })
 
-function onMailHtmlClick(ev: MouseEvent) {
-  onEmailHtmlClick(ev, {
-    confirmNavigate: (url) =>
-      window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url })),
-    onBlocked: () => flashMsg(t('console.openLinkBlocked'), 'danger'),
-  })
+function confirmMailNavigate(url: string) {
+  return window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url }))
+}
+function onMailLinkBlocked() {
+  flashMsg(t('console.openLinkBlocked'), 'danger')
 }
 
 const detailText = computed(() => {
@@ -316,12 +316,12 @@ async function copyCode(code?: string | null) {
             >
               {{ t('console.mailCode') }}: {{ selected.verification_code }}
             </button>
-            <div
+            <EmailHtmlFrame
               v-if="detailHtml"
               class="body-html"
-              v-html="detailHtml"
-              @click="onMailHtmlClick"
-              @auxclick="onMailHtmlClick"
+              :html="detailHtml"
+              :confirm-navigate="confirmMailNavigate"
+              :on-blocked="onMailLinkBlocked"
             />
             <pre v-else class="body-text">{{ detailText }}</pre>
           </div>

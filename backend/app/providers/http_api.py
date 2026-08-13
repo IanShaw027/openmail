@@ -542,9 +542,6 @@ def message_matches_mailbox(msg: Message, email: str) -> bool:
     hay = to_field.lower()
     if target in hay:
         return True
-    local = target.split("@", 1)[0]
-    if local and len(local) >= 4 and local in hay:
-        return True
     return False
 
 

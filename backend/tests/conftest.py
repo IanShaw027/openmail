@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import tempfile
 from collections.abc import Generator
 
 import pytest
@@ -15,6 +16,9 @@ from sqlalchemy.pool import StaticPool
 # Configure env before app imports settings cache
 os.environ["OPENMAIL_MASTER_KEY"] = base64.b64encode(os.urandom(32)).decode()
 os.environ["OPENMAIL_DATABASE_URL"] = "sqlite://"
+os.environ["OPENMAIL_DEVICE_REGISTRY_PATH"] = os.path.join(
+    tempfile.gettempdir(), f"openmail-pytest-reg-{os.getpid()}.json"
+)
 # Keep background sync quiet / short interval in tests (worker still starts)
 os.environ.setdefault("SYNC_ENABLED_GLOBAL", "false")
 os.environ.setdefault("SYNC_INTERVAL_SECONDS", "3600")
@@ -28,8 +32,20 @@ import app.services.sync_worker as sync_worker_mod
 
 
 @pytest.fixture()
-def client() -> Generator[TestClient, None, None]:
+def client(tmp_path, monkeypatch) -> Generator[TestClient, None, None]:
+    monkeypatch.setenv("OPENMAIL_DEVICE_REGISTRY_PATH", str(tmp_path / "device_registry.json"))
     get_settings.cache_clear()
+    import app.services.device_auth as da
+
+    da._loaded = False
+    da._secrets.clear()
+    da._registry.clear()
+    da._status.clear()
+    da._created_at.clear()
+    if hasattr(da, "_seen_hmac"):
+        da._seen_hmac.clear()
+    if hasattr(da, "_register_by_ip"):
+        da._register_by_ip.clear()
 
     engine = create_engine(
         "sqlite://",

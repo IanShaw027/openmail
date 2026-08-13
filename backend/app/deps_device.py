@@ -58,6 +58,7 @@ async def device_id_strict(
     x_device_ts: str | None = Header(default=None, alias="X-Device-Ts"),
     x_device_sign: str | None = Header(default=None, alias="X-Device-Sign"),
     x_device_body_sha256: str | None = Header(default=None, alias="X-Device-Body-Sha256"),
+    x_device_nonce: str | None = Header(default=None, alias="X-Device-Nonce"),
 ) -> str:
     """Require registered vault device + valid HMAC (cloud / stored credentials)."""
     try:
@@ -73,6 +74,7 @@ async def device_id_strict(
             path=path,
             require_hmac=True,
             body_sha256=body_sha256,
+            nonce=x_device_nonce,
         )
     except ValueError as e:
         raise HTTPException(
@@ -87,6 +89,7 @@ async def device_id_quota(
     x_device_ts: str | None = Header(default=None, alias="X-Device-Ts"),
     x_device_sign: str | None = Header(default=None, alias="X-Device-Sign"),
     x_device_body_sha256: str | None = Header(default=None, alias="X-Device-Body-Sha256"),
+    x_device_nonce: str | None = Header(default=None, alias="X-Device-Nonce"),
 ) -> str:
     """Device id for proxy fetch/send — same as strict (vault + HMAC required).
 
@@ -99,6 +102,7 @@ async def device_id_quota(
         x_device_ts=x_device_ts,
         x_device_sign=x_device_sign,
         x_device_body_sha256=x_device_body_sha256,
+        x_device_nonce=x_device_nonce,
     )
 
 
@@ -108,6 +112,7 @@ async def device_id_any(
     x_device_ts: str | None = Header(default=None, alias="X-Device-Ts"),
     x_device_sign: str | None = Header(default=None, alias="X-Device-Sign"),
     x_device_body_sha256: str | None = Header(default=None, alias="X-Device-Body-Sha256"),
+    x_device_nonce: str | None = Header(default=None, alias="X-Device-Nonce"),
 ) -> str:
     """Registered vault device with valid HMAC — trusted or still pending.
 
@@ -128,6 +133,7 @@ async def device_id_any(
             require_hmac=True,
             require_trusted=False,
             body_sha256=body_sha256,
+            nonce=x_device_nonce,
         )
     except ValueError as e:
         raise HTTPException(

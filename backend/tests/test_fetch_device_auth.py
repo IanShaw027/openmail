@@ -21,7 +21,7 @@ def _pair():
 
 
 def _sign(secret: bytes, method: str, path: str, body: bytes | str | None = None) -> dict[str, str]:
-    """Sign with body-hash binding: {ts}.{METHOD}.{path}.{body_sha256}."""
+    """Sign with body-hash binding: {ts}.{METHOD}.{path}.{body_sha256}.{nonce}."""
     if body is None:
         body_bytes = b""
     elif isinstance(body, str):
@@ -30,12 +30,14 @@ def _sign(secret: bytes, method: str, path: str, body: bytes | str | None = None
         body_bytes = body
     body_hash = hashlib.sha256(body_bytes).hexdigest()
     ts = str(int(time.time()))
-    msg = f"{ts}.{method.upper()}.{path}.{body_hash}".encode()
+    nonce = os.urandom(8).hex()
+    msg = f"{ts}.{method.upper()}.{path}.{body_hash}.{nonce}".encode()
     sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
     return {
         "X-Device-Ts": ts,
         "X-Device-Sign": sig,
         "X-Device-Body-Sha256": body_hash,
+        "X-Device-Nonce": nonce,
     }
 
 

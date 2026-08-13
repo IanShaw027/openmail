@@ -1,0 +1,66 @@
+/** Build the srcdoc document for EmailHtmlFrame (kept out of the .vue SFC). */
+
+export const EMAIL_FRAME_MSG = 'openmail-email-frame'
+
+export function buildEmailFrameSrcdoc(bodyHtml: string): string {
+  const bridgeJs = `(function () {
+  var MSG = ${JSON.stringify(EMAIL_FRAME_MSG)};
+  function report() {
+    var h = Math.max(
+      document.documentElement ? document.documentElement.scrollHeight : 0,
+      document.body ? document.body.scrollHeight : 0,
+      80
+    );
+    parent.postMessage({ source: MSG, type: 'resize', height: h }, '*');
+  }
+  function onActivate(ev) {
+    var t = ev.target;
+    if (!t || !t.closest) return;
+    var a = t.closest('a');
+    if (!a) return;
+    var href = a.getAttribute('href');
+    if (!href) return;
+    var low = href.trim().toLowerCase();
+    if (low.indexOf('mailto:') === 0 || low.charAt(0) === '#' || low.indexOf('tel:') === 0) {
+      return;
+    }
+    ev.preventDefault();
+    ev.stopPropagation();
+    parent.postMessage({ source: MSG, type: 'navigate', href: href }, '*');
+  }
+  document.addEventListener('click', onActivate, true);
+  document.addEventListener('auxclick', onActivate, true);
+  window.addEventListener('load', report);
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(report).observe(document.documentElement);
+  }
+  setTimeout(report, 0);
+  setTimeout(report, 200);
+})();`
+
+  const open = String.fromCharCode(60) + 'script>'
+  const close = String.fromCharCode(60) + '/script>'
+  const bridge = open + bridgeJs + close
+  // sha256 of bridgeJs UTF-8; keep in sync (emailHtmlFrameDoc.spec.ts checks).
+  const csp =
+    "default-src 'none'; img-src data: https: cid:; style-src 'unsafe-inline'; " +
+    "script-src 'sha256-IwZqvhUobX3jAiEybFnqG/e66ZJioVN+8dsJz6m+jKk='; " +
+    "object-src 'none'; base-uri 'none'; form-action 'none';"
+
+  return [
+    '<!DOCTYPE html><html><head><meta charset="utf-8" />',
+    '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+    `<meta http-equiv="Content-Security-Policy" content="${csp}" />`,
+    '<style>',
+    'html, body { margin: 0; padding: 0; }',
+    'body { font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1a2333; word-wrap: break-word; overflow-wrap: anywhere; padding: 2px 0; }',
+    'img { max-width: 100%; height: auto; }',
+    'a { color: #1d4ed8; }',
+    'pre, code { white-space: pre-wrap; word-break: break-word; }',
+    'table { max-width: 100%; }',
+    '</style></head><body>',
+    bodyHtml,
+    bridge,
+    '</body></html>',
+  ].join('')
+}

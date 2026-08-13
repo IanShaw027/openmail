@@ -69,6 +69,7 @@ def migrate_reencrypt_all(db: Session, *, settings: Settings | None = None) -> d
         "meta": 0,
         "failed": 0,
         "rows_touched": 0,
+        "registry": 0,
     }
     # Skip migrate if no fallbacks configured (nothing to rewrite for rotation)
     fb = (getattr(s, "openmail_master_key_fallbacks", None) or "").strip()
@@ -107,4 +108,13 @@ def migrate_reencrypt_all(db: Session, *, settings: Settings | None = None) -> d
             totals["meta"],
             totals["failed"],
         )
+    try:
+        from app.services.device_auth import rewrite_registry_with_primary_key
+
+        totals["registry"] = rewrite_registry_with_primary_key()
+        if totals["registry"]:
+            logger.info("crypto migrate: re-encrypted device_registry entries=%s", totals["registry"])
+    except Exception:
+        logger.exception("crypto migrate: device registry re-encrypt failed")
+        raise
     return totals

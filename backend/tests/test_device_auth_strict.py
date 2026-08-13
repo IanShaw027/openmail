@@ -31,6 +31,8 @@ def da(tmp_path, monkeypatch):
     module._registry.clear()
     module._status.clear()
     module._created_at.clear()
+    if hasattr(module, "_seen_hmac"):
+        module._seen_hmac.clear()
     yield module
     cfg.get_settings.cache_clear()
 
@@ -286,3 +288,74 @@ def test_unknown_device_reloads_registry_written_by_another_worker(da):
     da._created_at.clear()
     da._loaded = True
     assert da.is_registered(pid) is True
+
+
+def test_mutating_hmac_replay_rejected(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    body_hash = hashlib.sha256(b'{"a":1}').hexdigest()
+    msg = f"{ts}.POST./api/fetch/send.{body_hash}".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    kwargs = dict(
+        public_id=out,
+        ts=ts,
+        signature=sig,
+        method="POST",
+        path="/api/fetch/send",
+        require_hmac=True,
+        body_sha256=body_hash,
+    )
+    ok, err = da.verify_request(**kwargs)
+    assert ok is True, err
+    ok2, err2 = da.verify_request(**kwargs)
+    assert ok2 is False
+    assert err2 and "replay" in err2.lower()
+
+
+def test_nonce_allows_same_second_identical_body(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    body_hash = hashlib.sha256(b'{"a":1}').hexdigest()
+    for nonce in ("n1", "n2"):
+        msg = f"{ts}.POST./api/fetch/send.{body_hash}.{nonce}".encode()
+        sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+        ok, err = da.verify_request(
+            out,
+            ts,
+            sig,
+            "POST",
+            "/api/fetch/send",
+            require_hmac=True,
+            body_sha256=body_hash,
+            nonce=nonce,
+        )
+        assert ok is True, err
+
+
+def test_get_hmac_may_repeat_within_skew(da):
+    """Reads are not replay-gated; listing twice in the same second must work."""
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ts = str(int(time.time()))
+    msg = f"{ts}.GET./api/accounts".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    kwargs = dict(public_id=out, ts=ts, signature=sig, method="GET", path="/api/accounts")
+    assert da.verify_request(**kwargs)[0] is True
+    assert da.verify_request(**kwargs)[0] is True
+
+
+def test_hmac_signature_length_mismatch_is_invalid(da):
+    secret, b64, pid = _secret_pair()
+    out = da.register_device_secret(pid, b64)
+    ok, err = da.verify_request(
+        out,
+        str(int(time.time())),
+        "short",
+        "GET",
+        "/api/accounts",
+        require_hmac=True,
+    )
+    assert ok is False
+    assert err

@@ -225,6 +225,45 @@ _ACCOUNTS_EXTRA_COLUMNS: list[tuple[str, str]] = [
 ]
 
 
+def _drop_legacy_user_tables(conn, insp, dialect: str, tables: set[str]) -> None:  # type: ignore[no-untyped-def]
+    """Drop leftover user tables. Postgres must drop accounts→users FK first."""
+    if dialect in ("postgresql", "mysql", "mariadb") and "accounts" in tables and "users" in tables:
+        try:
+            for fk in insp.get_foreign_keys("accounts"):
+                referred = str(fk.get("referred_table") or "").lower()
+                name = fk.get("name")
+                if referred != "users" or not name:
+                    continue
+                if dialect == "postgresql":
+                    conn.execute(
+                        text(f'ALTER TABLE accounts DROP CONSTRAINT IF EXISTS "{name}"')
+                    )
+                else:
+                    conn.execute(text(f"ALTER TABLE accounts DROP FOREIGN KEY `{name}`"))
+                logger.info("migrate: dropped accounts FK %s → users", name)
+        except Exception:
+            logger.exception("migrate: failed to drop accounts→users foreign key")
+
+    for tbl in ("user_sessions", "admin_sessions", "mail_index", "users"):
+        if tbl in tables:
+            try:
+                conn.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
+                logger.info("migrate: dropped legacy table %s", tbl)
+            except Exception:
+                logger.exception("migrate: failed to drop %s", tbl)
+
+    if dialect in ("postgresql", "mysql", "mariadb") and "accounts" in tables:
+        try:
+            conn.execute(
+                text(
+                    "UPDATE accounts SET sync_enabled = FALSE "
+                    "WHERE owner_user_id IS NOT NULL AND owner_user_id NOT LIKE 'vk_%'"
+                )
+            )
+        except Exception:
+            logger.debug("migrate: could not disable sync on non-device owners", exc_info=True)
+
+
 def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
     """For PostgreSQL/MySQL/etc.: ADD COLUMN IF NOT EXISTS style via inspector."""
     insp = inspect(conn)
@@ -268,14 +307,7 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
     except Exception:
         logger.exception("migrate: failed to widen accounts.owner_user_id")
 
-    # Drop legacy user tables if present (local-first no longer uses them)
-    for tbl in ("user_sessions", "admin_sessions", "mail_index", "users"):
-        if tbl in tables:
-            try:
-                conn.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
-                logger.info("migrate: dropped legacy table %s", tbl)
-            except Exception:
-                logger.exception("migrate: failed to drop %s", tbl)
+    _drop_legacy_user_tables(conn, insp, dialect, tables)
 
     if "fetch_lock_state" in tables:
         lock_columns = {c["name"] for c in insp.get_columns("fetch_lock_state")}

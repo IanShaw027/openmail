@@ -72,13 +72,11 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     init_db()
-    # Device HMAC registry (encrypted on disk) — survive restarts
-    try:
-        from app.services.device_auth import load_registry
+    # Device HMAC registry (encrypted on disk) — survive restarts.
+    # Fail closed: a decrypt miss must not look like an empty registry.
+    from app.services.device_auth import load_registry
 
-        load_registry()
-    except Exception:
-        pass
+    load_registry()
     # After master-key rotation: re-encrypt rows decryptable via FALLBACKS
     try:
         from app.db import SessionLocal
@@ -90,7 +88,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         finally:
             db.close()
     except Exception:
-        # Non-fatal: worker can still decrypt via fallbacks until migrate succeeds
+        # Non-fatal for SQL rows: worker can still decrypt via fallbacks.
+        # Registry rewrite failure is logged inside migrate and re-raised;
+        # if we land here the SQL walk failed after a successful load.
         pass
     # Background hourly sync (daemon thread); no-op if already running
     start_sync_worker()

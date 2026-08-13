@@ -336,7 +336,12 @@ export function dekRawFromB64(s: string): Uint8Array {
 
 /**
  * Wrap DEK raw for tab/session resume (sessionStorage).
- * Uses a random session key that only lives in sessionStorage.
+ *
+ * This is not a confidentiality boundary against same-origin XSS: the random
+ * session key (`sk`) is stored next to the wrapped DEK (`pkg`), so a script
+ * that can read sessionStorage can recover the DEK. It only keeps the DEK out
+ * of localStorage so a later visit after the tab is closed still needs the
+ * vault password. Locking the vault deletes the wrap.
  */
 export async function wrapDekForSession(dekRaw: Uint8Array): Promise<{
   sessionKeyB64: string

@@ -29,11 +29,13 @@ import {
   exportCredentialsTxt,
   buildSystemSnapshot,
   parseSystemSnapshot,
+  detachSnapshotAccounts,
   rebuildRawLine,
 } from '@/utils/exportImport'
 import { getDeviceId, getLicenseToken, setLicenseToken } from '@/utils/device'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
-import { formatLinkPreview, onEmailHtmlClick } from '@/utils/emailLinks'
+import { formatLinkPreview } from '@/utils/emailLinks'
+import EmailHtmlFrame from '@/components/EmailHtmlFrame.vue'
 import {
   type MailGroup,
   DEFAULT_GROUP_ID,
@@ -424,12 +426,11 @@ const detailHtml = computed(() => {
 })
 
 /** Confirm then open unwrapped http(s) links from email HTML (tracking redirectUrl etc.). */
-function onMailHtmlClick(ev: MouseEvent) {
-  onEmailHtmlClick(ev, {
-    confirmNavigate: (url) =>
-      window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url })),
-    onBlocked: () => flashMsg(t('console.openLinkBlocked'), 'danger'),
-  })
+function confirmMailNavigate(url: string) {
+  return window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url }))
+}
+function onMailLinkBlocked() {
+  flashMsg(t('console.openLinkBlocked'), 'danger')
 }
 
 /**
@@ -785,6 +786,9 @@ async function revalidateOneDraft(row: ImportDraftRow) {
           ;(row.partial as { sessionMeta?: unknown }).sessionMeta = result.session_meta
         }
       }
+      if (result.credential_updates?.refresh_token) {
+        row.partial.refreshToken = result.credential_updates.refresh_token
+      }
     }
   } catch (e) {
     if (isAbortError(e) && !isTimeoutError(e)) {
@@ -854,6 +858,9 @@ async function validateImportDrafts() {
             if (result.session_meta) {
               ;(row.partial as { sessionMeta?: unknown }).sessionMeta = result.session_meta
             }
+          }
+          if (result.credential_updates?.refresh_token) {
+            row.partial.refreshToken = result.credential_updates.refresh_token
           }
         }
       } catch (e) {
@@ -1164,7 +1171,11 @@ function onImportSystemFile(e: Event) {
             truncated = true
           }
         }
-        accounts.localAccounts.splice(0, accounts.localAccounts.length, ...restored)
+        accounts.localAccounts.splice(
+          0,
+          accounts.localAccounts.length,
+          ...detachSnapshotAccounts(restored),
+        )
         // mailCache: only keep mailboxes that still have an account after restore
         if (snap.mailCache) {
           const keep = new Set(
@@ -1349,6 +1360,10 @@ async function applyFetchResult(
     if (result.session_meta) {
       patch.sessionMeta = result.session_meta as Record<string, unknown>
     }
+  }
+  const rotatedRefresh = result.credential_updates?.refresh_token
+  if (result.ok !== false && rotatedRefresh) {
+    patch.refreshToken = rotatedRefresh
   }
   // HttpApi: discovered temp mailboxes under this Worker / api_url
   const mboxes =
@@ -1705,6 +1720,9 @@ async function fetchOne(
               sessionCookies: result.session_cookies as Array<Record<string, unknown>>,
               sessionMeta: result.session_meta as Record<string, unknown> | undefined,
             }
+          : {}),
+        ...(result.ok !== false && result.credential_updates?.refresh_token
+          ? { refreshToken: result.credential_updates.refresh_token }
           : {}),
         ...(result.ok !== false && mboxes?.length && (acc.isApiSource || acc.type === 'http_api')
           ? { isApiSource: acc.isApiSource ?? !acc.parentApiId, apiMailboxes: mboxes }
@@ -2645,9 +2663,11 @@ async function doSend() {
       body_text: sendForm.value.body,
     })
     if (result.ok) {
+      const rt = result.credential_updates?.refresh_token
       void accounts.patchAccount(acc.id, {
         status: 'ok',
         lastError: undefined,
+        ...(rt ? { refreshToken: rt } : {}),
       })
       flashMsg(t('console.sendOk'))
       showSend.value = false
@@ -3750,12 +3770,12 @@ onUnmounted(() => {
                 >{{ formatMailDate(selectedMessage.date) }}</span>
               </div>
               <div class="detail-body-scroll">
-                <div
+                <EmailHtmlFrame
                   v-if="detailHtml"
                   class="detail-body detail-html"
-                  v-html="detailHtml"
-                  @click="onMailHtmlClick"
-                  @auxclick="onMailHtmlClick"
+                  :html="detailHtml"
+                  :confirm-navigate="confirmMailNavigate"
+                  :on-blocked="onMailLinkBlocked"
                 />
                 <pre v-else class="detail-body">{{ detailText || t('console.mailNoBody') }}</pre>
               </div>
@@ -4284,12 +4304,12 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
           }}</span>
         </div>
         <div class="modal-body body-modal-content">
-          <div
+          <EmailHtmlFrame
             v-if="detailHtml"
             class="detail-body detail-html"
-            v-html="detailHtml"
-            @click="onMailHtmlClick"
-            @auxclick="onMailHtmlClick"
+            :html="detailHtml"
+            :confirm-navigate="confirmMailNavigate"
+            :on-blocked="onMailLinkBlocked"
           />
           <pre v-else class="detail-body">{{ detailText || t('console.mailNoBody') }}</pre>
         </div>

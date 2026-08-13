@@ -37,7 +37,23 @@ def test_validate_proxy_url_allows_private_when_configured() -> None:
 def test_validate_proxy_url_allows_public_host_with_mocked_dns() -> None:
     with patch("app.services.ssrf.pick_safe_ip", return_value="93.184.216.34"):
         out = validate_proxy_url("http://proxy.example.com:8080", allow_private=False)
-    assert out == "http://proxy.example.com:8080"
+    assert out == "http://93.184.216.34:8080"
+
+
+def test_validate_proxy_url_pins_userinfo_and_port() -> None:
+    with patch("app.services.ssrf.pick_safe_ip", return_value="93.184.216.34"):
+        out = validate_proxy_url(
+            "socks5://user:p%40ss@proxy.example.com:1080",
+            allow_private=False,
+        )
+    assert out == "socks5://user:p%40ss@93.184.216.34:1080"
+
+
+def test_validate_proxy_url_does_not_pin_when_private_allowed() -> None:
+    assert (
+        validate_proxy_url("socks5://warp-1:1080", allow_private=True)
+        == "socks5://warp-1:1080"
+    )
 
 
 def test_proxy_fetch_request_rejects_loopback_proxy() -> None:
@@ -48,6 +64,30 @@ def test_proxy_fetch_request_rejects_loopback_proxy() -> None:
             password="x",
             proxy="http://127.0.0.1:9050",
         )
+
+
+def test_send_mail_rejects_nested_credential_loopback_proxy() -> None:
+    from unittest.mock import patch
+
+    from app.services.send_service import send_mail
+
+    with patch("app.services.send_service.send_via_graph") as graph:
+        result = send_mail(
+            email="a@b.com",
+            provider="oauth",
+            credential={
+                "client_id": "cid",
+                "refresh_token": "rt",
+                "proxy": "http://127.0.0.1:6379",
+            },
+            to=["b@c.com"],
+            subject="hi",
+            body_text="x",
+        )
+    graph.assert_not_called()
+    assert result.ok is False
+    err = (result.error or "").lower()
+    assert "proxy" in err or "ssrf" in err
 
 
 def test_send_mail_request_rejects_loopback_proxy() -> None:

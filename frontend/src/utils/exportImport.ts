@@ -132,5 +132,32 @@ export function parseSystemSnapshot(text: string): SystemSnapshot {
   if (!data || data.v !== 1 || !Array.isArray(data.accounts)) {
     throw new Error('invalid snapshot')
   }
+  if (data.accounts.length > 5000) {
+    throw new Error('invalid snapshot')
+  }
+  for (const row of data.accounts) {
+    if (!row || typeof row !== 'object' || typeof row.email !== 'string' || !row.email.trim()) {
+      throw new Error('invalid snapshot')
+    }
+  }
+  if (data.mailCache != null && (typeof data.mailCache !== 'object' || Array.isArray(data.mailCache))) {
+    throw new Error('invalid snapshot')
+  }
+  if (data.twofa != null && !Array.isArray(data.twofa)) {
+    throw new Error('invalid snapshot')
+  }
   return data
+}
+
+/** Snapshot restore must not keep another device's cloud row ids. */
+export function detachSnapshotAccounts(accounts: MailAccount[]): MailAccount[] {
+  return accounts.map((a) => ({
+    ...a,
+    storage: 'local',
+    serverId: undefined,
+    clientSealed: false,
+    cloudSyncPending: false,
+    cloudPendingPatch: undefined,
+    updatedAt: Date.now(),
+  }))
 }

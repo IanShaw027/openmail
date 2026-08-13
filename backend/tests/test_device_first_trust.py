@@ -34,6 +34,10 @@ def da(tmp_path, monkeypatch):
     module._registry.clear()
     module._status.clear()
     module._created_at.clear()
+    if hasattr(module, "_seen_hmac"):
+        module._seen_hmac.clear()
+    if hasattr(module, "_register_by_ip"):
+        module._register_by_ip.clear()
     yield module
     cfg.get_settings.cache_clear()
 
@@ -280,6 +284,80 @@ def test_register_and_approve_over_http(tmp_path, monkeypatch):
         )
         assert good_list.status_code == 200
         assert len(good_list.json()["devices"]) == 2
+
+    application.dependency_overrides.clear()
+    cfg.get_settings.cache_clear()
+
+
+def test_pending_cap_rejects_further_devices(da, monkeypatch):
+    monkeypatch.setattr(da, "MAX_PENDING_DEVICES", 1)
+    _, b1, p1 = _pair()
+    _, b2, p2 = _pair()
+    _, b3, p3 = _pair()
+    da.register_device_secret(p1, b1)
+    da.register_device_secret(p2, b2)
+    with pytest.raises(ValueError, match="pending"):
+        da.register_device_secret(p3, b3)
+
+
+def test_register_http_rate_limited_per_ip(tmp_path, monkeypatch):
+    key = base64.b64encode(os.urandom(32)).decode()
+    monkeypatch.setenv("OPENMAIL_MASTER_KEY", key)
+    monkeypatch.setenv("OPENMAIL_DATABASE_URL", "sqlite://")
+    monkeypatch.setenv("OPENMAIL_DEVICE_ADMISSION", "open")
+    monkeypatch.setenv("OPENMAIL_DEVICE_REGISTRY_PATH", str(tmp_path / "rate-reg.json"))
+    monkeypatch.setenv("SYNC_ENABLED_GLOBAL", "false")
+
+    import app.config as cfg
+    from importlib import reload
+    import app.services.device_auth as module
+    from app.db import Base, get_db
+    from app.main import create_app
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    import app.db as app_db
+    import app.models  # noqa: F401
+
+    cfg.get_settings.cache_clear()
+    module = reload(module)
+    module._loaded = False
+    module._secrets.clear()
+    module._registry.clear()
+    module._status.clear()
+    module._created_at.clear()
+    module._register_by_ip.clear()
+    monkeypatch.setattr(module, "REGISTER_MAX_PER_IP", 2)
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+        future=True,
+    )
+    TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    Base.metadata.create_all(bind=engine)
+    app_db.engine = engine
+    app_db.SessionLocal = TestingSessionLocal
+
+    def _override_db():
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    application = create_app()
+    application.dependency_overrides[get_db] = _override_db
+
+    with TestClient(application) as c:
+        codes = []
+        for _ in range(4):
+            _, b64, pid = _pair()
+            r = c.post("/api/device/register", json={"public_id": pid, "secret_b64": b64})
+            codes.append(r.status_code)
+        assert codes[:2] == [200, 200]
+        assert codes[2:] == [429, 429]
 
     application.dependency_overrides.clear()
     cfg.get_settings.cache_clear()

@@ -31,6 +31,15 @@ def test_expand_api_url_candidates_bare_worker() -> None:
     assert single == ["https://x.workers.dev/api/mails"]
 
 
+def test_message_matches_mailbox_requires_full_address() -> None:
+    from app.providers.base import Message
+    from app.providers.http_api import message_matches_mailbox
+
+    msg = Message(id="1", subject="x", from_="a@b.com", to="foo@gmail.com")
+    assert message_matches_mailbox(msg, "mail@x.com") is False
+    assert message_matches_mailbox(msg, "foo@gmail.com") is True
+
+
 def test_normalize_generic_message() -> None:
     msg = normalize_message_item(
         {

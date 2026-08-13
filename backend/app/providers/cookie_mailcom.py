@@ -1645,10 +1645,10 @@ def _http_client(timeout: float, proxy: str | None = None):
         from app.services.ssrf import SsrfError, validate_proxy_url
 
         try:
-            # Client-supplied proxy on a cookie credential is the same SSRF
-            # surface as ProxyFetchRequest.proxy — never allow private targets
-            # here. Operator PROXY_POOL is applied upstream, not through this.
-            proxies = validate_proxy_url(proxies, allow_private=False)
+            # Operator PROXY_POOL (WARP sidecars) is injected upstream and is
+            # often a private Docker DNS name. Client-supplied proxies are
+            # already validated with allow_private=False before they reach here.
+            proxies = validate_proxy_url(proxies, allow_private=True)
         except SsrfError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -2058,9 +2058,12 @@ class MailcomCookieProvider:
 
     def can_handle(self, account: Any) -> bool:
         p = getattr(account, "provider", None)
-        if p is not None and str(getattr(p, "value", p)) == "cookie":
+        pval = str(getattr(p, "value", p) or "").strip().lower()
+        if pval == "cookie":
             return True
-        # Domain hint when provider unset/unknown
+        if pval in ("imap", "http_api", "oauth"):
+            return False
+        # Domain hint only when provider is unset/unknown
         email = (getattr(account, "email", None) or "").lower()
         if email.endswith("@mail.com") or email.endswith(".mail.com"):
             return True

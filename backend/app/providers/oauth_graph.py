@@ -296,7 +296,7 @@ class OAuthGraphProvider:
             since = limits.get("since") or limits.get("received_after")
             before = limits.get("before") or limits.get("received_before")
         filters: list[str] = []
-        if since and not before:
+        if since:
             since_s = str(since).replace("+00:00", "Z")
             if "T" not in since_s:
                 since_s = f"{since_s}T00:00:00Z"

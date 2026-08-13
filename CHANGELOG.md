@@ -15,8 +15,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them. Set `OPENMAIL_DEVICE_ADMISSION=open` to restore the previous open
   registration behaviour. Existing registry entries without a status are
   treated as trusted on upgrade so multi-device installs are not locked out.
+- **Mail HTML renders in a sandboxed iframe.** Bodies no longer use same-
+  document `v-html`, so a sanitizer miss cannot reach the vault SPA: the frame
+  has neither `allow-same-origin` (so it cannot read parent storage) nor
+  `allow-popups` (so injected script cannot call `window.open` and skip the
+  confirm dialog). The allowlist sanitizer remains as defense-in-depth; link
+  clicks still confirm via the parent through `postMessage`. The srcdoc carries
+  a hash CSP for the height/link bridge, and mail-supplied `target`/`rel` can
+  no longer override `noopener` + `_blank`.
+- **Closed a cookie-provider SSRF, an IMAP CRLF injection, and a DNS-rebinding
+  window in outbound HTTP fetches.** The mail.com cookie provider treated the
+  login target and a cached folder URL as trusted; both could be redirected to
+  an attacker host, which then received a plaintext password or had its
+  response parsed back as mail. IMAP mailbox names were sent unquoted, so a
+  folder containing CR/LF could inject a second command into the same write.
+  HTTP fetches re-resolved DNS between the SSRF check and the connection,
+  leaving a rebinding window; each hop is now pinned to the address it was
+  checked against.
+- **Outbound policy now also blocks CGNAT / Aliyun metadata (`100.64.0.0/10`),
+  nested `credential.proxy` on Graph send, and plaintext IMAP LOGIN.**
+  `imap_ssl=false` upgrades with STARTTLS before LOGIN. Client-supplied nested
+  proxies are validated the same way as the top-level `proxy` field.
+- **Device HMAC rejects replays** of the same mutating signature inside the
+  5-minute timestamp window. `POST /api/device/register` is per-IP rate-limited
+  and pending devices are capped. Master-key rotation re-encrypts
+  `device_registry.json`; a decrypt miss no longer looks like an empty registry.
+- **Client-supplied proxy hostnames are pinned to the checked IP** (DNS
+  rebinding). Graph send returns a rotated `refresh_token` so the browser can
+  persist it. Cookie fetch no longer re-rejects operator WARP pool URLs.
+- **Legacy code-api tokens** honour stored `default_keyword` / `default_regex`
+  and can be disabled with HMAC (`POST /api/accounts/{id}/code-api/disable`).
 
 ### Fixed
+
+- **Cloud sync no longer silently drops mail.** Server catch-up keeps the
+  previous time cursor until the since-window is exhausted (a failed later
+  page no longer raises high-water to page-1 newest). `since` stays set when
+  paging with `before`. The browser acks a delta page only after
+  `mailCache.flushPersist()` succeeds, and still advances the cursor when the
+  20-page cap is hit with `has_more`.
+- **IMAP mailbox names use RFC 3501 modified UTF-7** (`R&D` → `R&-D`). Sent
+  APPEND quotes names with spaces. UID tokens must be numeric.
+- **Cookie routing no longer steals explicit IMAP/HttpApi accounts** whose
+  address ends in `@mail.com`. HttpApi mailbox matching requires the full
+  address, not a local-part substring.
+- **Idle lock cannot be postponed forever** by a compose draft (5 minute
+  grace). Leftover plaintext `localStorage` keys are always removed once a
+  vault exists. Device transfer and system snapshot restore strip the host
+  `serverId` and refuse to apply while the vault is locked. HttpApi import
+  rows with a real mailbox are no longer marked as API source shells.
+- **Postgres upgrades drop `accounts.owner_user_id` → `users` before**
+  `DROP TABLE users`, so the leftover FK no longer blocks migration.
 
 - **Upgrade from a root-run install no longer crash-loops.** Images before this
   change ran as root and created `data/openmail.db` as `root:root`; the switch to

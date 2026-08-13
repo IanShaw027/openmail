@@ -107,3 +107,119 @@ def test_text_format_returns_the_bare_code(token_client, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.text == "123456"
+
+
+def test_token_default_keyword_and_regex_are_passed_to_fetch(token_client, monkeypatch):
+    _set_limits(monkeypatch, fetch="0")
+    factory = token_client.db_session_factory  # type: ignore[attr-defined]
+    db = factory()
+    try:
+        row = db.query(CodeApiToken).filter(CodeApiToken.token == "tok_live").one()
+        row.default_keyword = "PayPal"
+        row.default_regex = r"\d{6}"
+        db.commit()
+    finally:
+        db.close()
+
+    captured: list[dict] = []
+
+    def _fake_fetch(db_, acc_, **kwargs):
+        captured.append(kwargs)
+        return FetchServiceResult(ok=True, code="999000", email=acc_.email)
+
+    monkeypatch.setattr("app.routers.code_api.fetch_account", _fake_fetch)
+    resp = token_client.get("/api/v1/code/tok_live")
+    assert resp.status_code == 200
+    assert captured and captured[0].get("keyword") == "PayPal"
+    assert captured[0].get("custom_regex") == r"\d{6}"
+    assert captured[0].get("folder") == "inbox"
+
+
+def test_query_keyword_overrides_token_default(token_client, monkeypatch):
+    _set_limits(monkeypatch, fetch="0")
+    factory = token_client.db_session_factory  # type: ignore[attr-defined]
+    db = factory()
+    try:
+        row = db.query(CodeApiToken).filter(CodeApiToken.token == "tok_live").one()
+        row.default_keyword = "PayPal"
+        db.commit()
+    finally:
+        db.close()
+
+    captured: list[dict] = []
+
+    def _fake_fetch(db_, acc_, **kwargs):
+        captured.append(kwargs)
+        return FetchServiceResult(ok=True, code="111222", email=acc_.email)
+
+    monkeypatch.setattr("app.routers.code_api.fetch_account", _fake_fetch)
+    resp = token_client.get("/api/v1/code/tok_live", params={"keyword": "Amazon", "folder": "junk"})
+    assert resp.status_code == 200
+    assert captured[0].get("keyword") == "Amazon"
+    assert captured[0].get("folder") == "junk"
+
+
+def test_hmac_disable_stops_public_fetch(client, monkeypatch, tmp_path):
+    import base64
+    import hashlib
+    import hmac
+    import time
+
+    from app.config import get_settings
+    from app.models import Account, CodeApiToken, ProviderType
+
+    key = base64.b64encode(os.urandom(32)).decode()
+    monkeypatch.setenv("OPENMAIL_MASTER_KEY", key)
+    monkeypatch.setenv("OPENMAIL_DEVICE_REGISTRY_PATH", str(tmp_path / "reg.json"))
+    get_settings.cache_clear()
+    import app.services.device_auth as da
+    from importlib import reload
+
+    da = reload(da)
+    da._loaded = False
+    da._secrets.clear()
+    da._registry.clear()
+    da._status.clear()
+    da._created_at.clear()
+
+    secret = os.urandom(32)
+    b64 = base64.urlsafe_b64encode(secret).decode().rstrip("=")
+    pid = "vk_" + hashlib.sha256(secret).hexdigest()[:40]
+    da.register_device_secret(pid, b64)
+
+    factory = client.db_session_factory  # type: ignore[attr-defined]
+    db = factory()
+    try:
+        acc = Account(
+            email="owned@example.com",
+            provider=ProviderType.imap,
+            owner_user_id=pid,
+        )
+        db.add(acc)
+        db.flush()
+        db.add(CodeApiToken(token="tok_owned", account_id=acc.id, enabled=True))
+        db.commit()
+        acc_id = acc.id
+    finally:
+        db.close()
+
+    def _sign(method: str, path: str, body: bytes = b"") -> dict[str, str]:
+        body_hash = hashlib.sha256(body).hexdigest()
+        ts = str(int(time.time()))
+        msg = f"{ts}.{method.upper()}.{path}.{body_hash}".encode()
+        sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+        return {
+            "X-Device-Id": pid,
+            "X-Device-Ts": ts,
+            "X-Device-Sign": sig,
+            "X-Device-Body-Sha256": body_hash,
+        }
+
+    path = f"/api/accounts/{acc_id}/code-api/disable"
+    r = client.post(path, headers=_sign("POST", path))
+    assert r.status_code == 200, r.text
+    assert r.json()["enabled"] is False
+
+    miss = client.get("/api/v1/code/tok_owned")
+    assert miss.status_code == 404
+

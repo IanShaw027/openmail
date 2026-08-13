@@ -11,7 +11,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from typing import Iterable
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlunparse
 
 # AWS / cloud metadata hostnames often used in SSRF
 _BLOCKED_HOSTNAMES = frozenset(
@@ -33,27 +33,16 @@ class SsrfError(ValueError):
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    if ip.is_private:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return _is_blocked_ip(ip.ipv4_mapped)
+    # Non-global covers private, loopback, link-local, multicast, reserved,
+    # unspecified, and CGNAT (100.64.0.0/10) including Aliyun IMDS 100.100.100.200.
+    if not ip.is_global:
         return True
-    if ip.is_loopback:
+    if isinstance(ip, ipaddress.IPv4Address) and ip in ipaddress.ip_network("100.64.0.0/10"):
         return True
-    if ip.is_link_local:
+    if isinstance(ip, ipaddress.IPv6Address) and (ip.packed[0] & 0xFE) == 0xFC:
         return True
-    if ip.is_multicast:
-        return True
-    if ip.is_reserved:
-        return True
-    if ip.is_unspecified:
-        return True
-    # IPv6 unique local / site local
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped is not None:
-            return _is_blocked_ip(ip.ipv4_mapped)
-        # fc00::/7 unique local
-        if (ip.packed[0] & 0xFE) == 0xFC:
-            return True
-    # Explicit cloud metadata ranges often hit via 169.254.169.254
-    # (already covered by link_local) and 10.x / 172.16 etc (private)
     return False
 
 
@@ -246,9 +235,28 @@ def validate_proxy_url(proxy: str, *, allow_private: bool | None = None) -> str:
     _check_hostname_literal(host)
     try:
         ipaddress.ip_address(host)
+        return raw
     except ValueError:
-        pick_safe_ip(host)
-    return raw
+        ip = pick_safe_ip(host)
+        return _proxy_url_with_pinned_host(parsed, ip)
+
+
+def _proxy_url_with_pinned_host(parsed, ip: str) -> str:  # type: ignore[no-untyped-def]
+    """Replace hostname with a already-checked IP; keep userinfo, port, path."""
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        host = f"[{ip}]" if isinstance(ip_obj, ipaddress.IPv6Address) else ip
+    except ValueError:
+        host = ip
+    port = parsed.port
+    hostport = f"{host}:{port}" if port is not None else host
+    netloc = parsed.netloc
+    at = netloc.rfind("@")
+    if at != -1:
+        hostport = netloc[: at + 1] + hostport
+    return urlunparse(
+        (parsed.scheme, hostport, parsed.path, parsed.params, parsed.query, parsed.fragment)
+    )
 
 
 def is_safe_url(url: str, *, resolve_dns: bool = True) -> bool:

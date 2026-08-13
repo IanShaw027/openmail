@@ -117,4 +117,12 @@ describe('vault idle auto-lock', () => {
     release()
     expect(vault.lockHeld).toBe(false)
   })
+
+  it('locks anyway after a held draft exceeds the grace window', async () => {
+    const vault = await unlockedVault(1)
+    vault.holdLock('compose-draft')
+    // 1 minute lock + 5 minute grace + one tick
+    await advance(60_000 + 5 * 60_000 + TICK_MS)
+    expect(vault.unlocked).toBe(false)
+  })
 })

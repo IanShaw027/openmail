@@ -23,6 +23,18 @@ def test_block_metadata_link_local() -> None:
     assert is_safe_url("http://169.254.169.254") is False
 
 
+def test_block_aliyun_metadata_and_cgnat() -> None:
+    for url in (
+        "http://100.100.100.200/",
+        "http://100.100.100.200/latest/meta-data/",
+        "http://100.64.0.1/",
+        "http://100.127.255.254/",
+    ):
+        with pytest.raises(SsrfError):
+            validate_url(url)
+        assert is_safe_url(url) is False
+
+
 def test_block_private_ranges() -> None:
     for url in (
         "http://10.0.0.1/",

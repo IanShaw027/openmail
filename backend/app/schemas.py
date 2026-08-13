@@ -205,6 +205,7 @@ class SendMailResponse(BaseModel):
     ok: bool
     error: str | None = None
     detail: str | None = None
+    credential_updates: dict[str, str] | None = None
 
 
 class FetchMessageOut(BaseModel):
@@ -248,6 +249,7 @@ class FetchResponse(BaseModel):
     mailboxes: list[str] | None = None
     # IMAP mailbox UIDVALIDITY for this folder (optional)
     uidvalidity: int | None = None
+    credential_updates: dict[str, str] | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 

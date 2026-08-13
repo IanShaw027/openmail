@@ -88,7 +88,7 @@ def test_send_mail_request_accepts_proxy():
             password="secret",
             proxy="socks5://proxy.example.com:1080",
         )
-    assert body.proxy == "socks5://proxy.example.com:1080"
+    assert body.proxy == "socks5://93.184.216.34:1080"
     body_none = SendMailRequest(to=["a@example.com"])
     assert body_none.proxy is None
 

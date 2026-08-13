@@ -35,7 +35,7 @@ def test_append_to_sent_imap_success() -> None:
     assert err is None
     mock_conn.append.assert_called_once()
     args = mock_conn.append.call_args[0]
-    assert args[0] == "Sent"
+    assert args[0] == '"Sent"'
     mock_conn.logout.assert_called()
 
 

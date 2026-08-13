@@ -103,7 +103,7 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
   let pullChain: Promise<{ merged: number; done: boolean }> | null = null
 
   /**
-   * Pull cloud mail delta pages, merge into mailCache, ack server_time on full success.
+   * Pull cloud mail delta pages, merge into mailCache, then ack after persist.
    * Soft-fails (404/410/501) with console.warn only — backend may not ship yet.
    */
   async function pullCloudMailDelta(): Promise<{ merged: number; done: boolean }> {
@@ -115,7 +115,6 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
       lastError.value = null
       let totalMerged = 0
       let done = false
-      let lastServerTime: string | null = null
 
       try {
         const mailCache = useMailCacheStore()
@@ -156,8 +155,6 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
           }
           patchAccountsFromDelta(res.accounts)
 
-          if (res.server_time) lastServerTime = String(res.server_time)
-
           // Advance durable cursor from last mail on this page (keyset)
           const last = mails[mails.length - 1]
           if (last?.updated_at) {
@@ -183,17 +180,19 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
           }
         }
 
-        // Ack last consumed (updated_at, id) — not wall-clock server_time
-        if (done && lastMailSince) {
-          setSyncAck(formatSyncAck(lastMailSince, lastMailId))
-        } else if (done && lastServerTime && !lastMailSince) {
-          // Empty delta page: keep previous ack; nothing new to advance
-        }
+        const cursorMoved =
+          lastMailSince != null &&
+          (lastMailSince !== ack0.since || lastMailId !== ack0.sinceId)
 
-        if (totalMerged > 0) {
-          void mailCache.flushPersist().catch((e) => {
+        if (cursorMoved) {
+          try {
+            if (totalMerged > 0) {
+              await mailCache.flushPersist()
+            }
+            setSyncAck(formatSyncAck(lastMailSince, lastMailId))
+          } catch (e) {
             console.warn('[openmail] mail cache flush after delta failed', e)
-          })
+          }
         }
 
         lastMerged.value = totalMerged

@@ -11,6 +11,7 @@ import email.utils
 import imaplib
 import re
 import socket
+import base64
 from datetime import datetime, timezone
 from email import policy as email_policy
 from email.message import EmailMessage, Message as CompatMessage
@@ -53,29 +54,59 @@ _NETEASE_IMAP_HOST_MARKERS = (
 
 
 def _imap_utf7_encode(name: str) -> str:
-    """RFC 3501 modified UTF-7 for mailbox names (non-ASCII → &...-)."""
+    """RFC 3501 modified UTF-7 for mailbox names."""
     if not name:
         return name
-    try:
-        name.encode("ascii")
-        return name
-    except UnicodeEncodeError:
-        pass
-    # Standard utf-7 then map +…- → &…- and unescape &
-    encoded = name.encode("utf-7").decode("ascii")
-    return encoded.replace("+", "&").replace("&-", "&")
+    out: list[str] = []
+    i = 0
+    n = len(name)
+    while i < n:
+        ch = name[i]
+        o = ord(ch)
+        if 0x20 <= o <= 0x7E:
+            out.append("&-" if ch == "&" else ch)
+            i += 1
+            continue
+        j = i
+        while j < n and not (0x20 <= ord(name[j]) <= 0x7E):
+            j += 1
+        raw = name[i:j].encode("utf-16-be")
+        b64 = base64.b64encode(raw).decode("ascii").rstrip("=").replace("/", ",")
+        out.append("&" + b64 + "-")
+        i = j
+    return "".join(out)
 
 
 def _imap_utf7_decode(name: str) -> str:
-    """Decode modified UTF-7 mailbox name for matching."""
+    """Decode RFC 3501 modified UTF-7 mailbox name."""
     if not name or "&" not in name:
         return name
-    try:
-        std = name.replace("&", "+")
-        # '&' alone as literal was '&-'; after replace becomes '+-' which utf-7 treats as '+'
-        return std.encode("ascii").decode("utf-7")
-    except Exception:
-        return name
+    out: list[str] = []
+    i = 0
+    n = len(name)
+    while i < n:
+        amp = name.find("&", i)
+        if amp < 0:
+            out.append(name[i:])
+            break
+        out.append(name[i:amp])
+        if amp + 1 < n and name[amp + 1] == "-":
+            out.append("&")
+            i = amp + 2
+            continue
+        end = name.find("-", amp + 1)
+        if end < 0:
+            out.append(name[amp:])
+            break
+        b64 = name[amp + 1 : end].replace(",", "/")
+        pad = (-len(b64)) % 4
+        try:
+            raw = base64.b64decode(b64 + ("=" * pad))
+            out.append(raw.decode("utf-16-be"))
+        except Exception:
+            out.append(name[amp : end + 1])
+        i = end + 1
+    return "".join(out)
 
 
 def _mailbox_select_variants(name: str) -> list[str]:
@@ -120,6 +151,20 @@ def _has_control_chars(*values: str | None) -> bool:
     return any(
         ch in (v or "") for v in values for ch in ("\r", "\n", "\x00")
     )
+
+
+_UID_RE = re.compile(r"^[0-9]+$")
+
+
+def _safe_uids(tokens: list[Any]) -> list[str]:
+    """Accept only numeric IMAP UIDs; drop wildcards, ranges, and CRLF."""
+    out: list[str] = []
+    for tok in tokens:
+        s = tok.decode() if isinstance(tok, (bytes, bytearray)) else str(tok)
+        s = s.strip()
+        if _UID_RE.fullmatch(s):
+            out.append(s)
+    return out
 
 
 class _IMAP4SSLSni(imaplib.IMAP4_SSL):
@@ -640,7 +685,24 @@ class ImapProvider:
                 server_hostname=tls_name,
                 timeout=self.timeout,
             )
-        return imaplib.IMAP4(connect_host, connect_port, timeout=self.timeout)
+        conn = imaplib.IMAP4(connect_host, connect_port, timeout=self.timeout)
+        try:
+            typ, _ = conn.starttls()
+        except Exception as exc:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"IMAP STARTTLS failed / IMAP 未能升级到 TLS: {exc}"
+            ) from exc
+        if typ != "OK":
+            try:
+                conn.logout()
+            except Exception:
+                pass
+            raise RuntimeError("IMAP STARTTLS rejected / 服务器拒绝 STARTTLS")
+        return conn
 
     def _login_connect(
         self,
@@ -677,6 +739,8 @@ class ImapProvider:
                     conn.logout()
                 except Exception:
                     pass
+            except RuntimeError:
+                raise
             except imaplib.IMAP4.error as exc:
                 last_err = exc
                 if conn is not None:
@@ -976,7 +1040,7 @@ class ImapProvider:
             return []
         all_uids = data[0].split()[-limit:]
         all_uids.reverse()
-        return [u.decode() if isinstance(u, bytes) else str(u) for u in all_uids]
+        return _safe_uids(all_uids)
 
     def _uids_before(self, conn: imaplib.IMAP4, before: str, limit: int) -> list[str]:
         """Load older page: messages strictly before `before` (newest-first slice of older set).
@@ -1024,7 +1088,7 @@ class ImapProvider:
         all_uids = data[0].split()
         all_uids = all_uids[-candidate_budget:]
         all_uids.reverse()
-        return [u.decode() if isinstance(u, bytes) else str(u) for u in all_uids]
+        return _safe_uids(all_uids)
 
     def _recent_uids(self, conn: imaplib.IMAP4, limit: int) -> list[str]:
         try:
@@ -1049,18 +1113,18 @@ class ImapProvider:
                 except Exception:
                     pass
                 uids.append(seq.decode() if isinstance(seq, bytes) else str(seq))
-            return uids
+            return _safe_uids(uids)
 
         if typ != "OK" or not data or not data[0]:
             return []
         all_uids = data[0].split()
         recent = all_uids[-limit:]
         recent.reverse()  # newest first
-        return [
-            u.decode() if isinstance(u, bytes) else str(u) for u in recent
-        ]
+        return _safe_uids(recent)
 
     def _fetch_rfc822(self, conn: imaplib.IMAP4, uid: str) -> bytes | None:
+        if not _UID_RE.fullmatch(str(uid).strip()):
+            return None
         try:
             typ, data = conn.uid("fetch", uid, "(RFC822)")
         except imaplib.IMAP4.error:

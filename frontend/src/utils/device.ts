@@ -77,8 +77,9 @@ export function deviceHeaders(): Record<string, string> {
 
 /**
  * Async headers with HMAC proof when vault unlocked.
- * Message: `${ts}.${method}.${path}.${body_sha256_hex}`
- * Always sets X-Device-Body-Sha256 (sha256 of empty string when no body).
+ * Message: `${ts}.${method}.${path}.${body_sha256_hex}.${nonce}`
+ * Always sets X-Device-Body-Sha256 (sha256 of empty string when no body)
+ * and a unique X-Device-Nonce so two requests in the same second are distinct.
  *
  * @param bodyText Raw request body string as sent on the wire (e.g. JSON.stringify(body)).
  */
@@ -93,12 +94,18 @@ export async function deviceHeadersAsync(
     const ts = String(Math.floor(Date.now() / 1000))
     const pathOnly = path
     const bodyHash = await sha256Hex(bodyText)
-    const msg = `${ts}.${method.toUpperCase()}.${pathOnly}.${bodyHash}`
+    const nonceBytes = new Uint8Array(12)
+    crypto.getRandomValues(nonceBytes)
+    const nonce = Array.from(nonceBytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+    const msg = `${ts}.${method.toUpperCase()}.${pathOnly}.${bodyHash}.${nonce}`
     const sig = await hmacSha256Hex(vaultSecretB64, msg)
     h['X-Device-Id'] = `vk_${vaultPublicId.slice(0, 40)}`
     h['X-Device-Ts'] = ts
     h['X-Device-Sign'] = sig
     h['X-Device-Body-Sha256'] = bodyHash
+    h['X-Device-Nonce'] = nonce
   } catch {
     /* ignore */
   }

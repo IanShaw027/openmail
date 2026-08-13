@@ -4,7 +4,8 @@ Clients with a vault send:
   X-Device-Id: vk_<sha256(secret)[:40]>
   X-Device-Ts: unix seconds
   X-Device-Body-Sha256: lowercase hex(SHA-256(raw body bytes))
-  X-Device-Sign: hex(HMAC-SHA256(secret, f"{ts}.{METHOD}.{path}.{body_sha256}"))
+  X-Device-Nonce: optional unique request id (bound into the HMAC)
+  X-Device-Sign: hex(HMAC-SHA256(secret, f"{ts}.{METHOD}.{path}.{body_sha256}[.{nonce}]"))
 
 Empty body (GET/HEAD/DELETE without payload): sha256 of empty string.
 Legacy bare `dev_*` IDs are **rejected** for cloud/account operations (forgeable).
@@ -14,6 +15,8 @@ Backward compatibility: if X-Device-Body-Sha256 is absent, old signature
 format ``{ts}.{METHOD}.{path}`` is still accepted for GET/HEAD only.
 Mutating methods (POST/PUT/PATCH/DELETE/…) require the body-hash header when
 HMAC is required (use sha256 of empty body when there is no payload).
+A nonce, when sent, is appended to the signed message so two legitimate
+requests in the same second are not treated as replays.
 """
 
 from __future__ import annotations
@@ -47,12 +50,20 @@ _status: dict[str, str] = {}
 _created_at: dict[str, float] = {}
 _lock = Lock()
 _loaded = False
+# HMAC replay cache: key → expiry unix seconds (mutating methods only).
+_seen_hmac: dict[str, float] = {}
+# POST /register attempts: ip → timestamps
+_register_by_ip: dict[str, list[float]] = {}
 
 _MAX_SKEW_SEC = 300
 STATUS_TRUSTED = "trusted"
 STATUS_PENDING = "pending"
 _ADMISSION_OPEN = "open"
 _ADMISSION_FIRST_TRUST = "first_trust"
+MAX_PENDING_DEVICES = 32
+REGISTER_MAX_PER_IP = 20
+REGISTER_WINDOW_SEC = 3600
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -199,15 +210,27 @@ def load_registry() -> None:
             _loaded = True
             return
         if not master_key_configured():
-            logger.warning("device registry file present but master key missing")
-            _loaded = True
-            return
-        try:
-            _read_registry_file_unlocked()
-            logger.info("loaded %d device registrations", len(_secrets))
-        except Exception:
-            logger.exception("failed to load device registry")
+            raise RuntimeError("device registry present but master key missing")
+        # Fail closed: a decrypt miss must not look like an empty registry
+        # (first_trust would otherwise auto-trust a new device).
+        _read_registry_file_unlocked(strict=True)
+        logger.info("loaded %d device registrations", len(_secrets))
         _loaded = True
+
+
+def rewrite_registry_with_primary_key() -> int:
+    """Re-encrypt on-disk secrets under the current primary master key.
+
+    Decrypt uses OPENMAIL_MASTER_KEY_FALLBACKS when needed. Returns the number
+    of entries rewritten. Raises if the file exists but cannot be decrypted.
+    """
+    load_registry()
+    with _lock, _registry_file_lock():
+        _read_registry_file_unlocked(strict=True)
+        n = len(_secrets)
+        if n:
+            _persist_unlocked()
+        return n
 
 
 def public_id_from_header(device_id: str | None) -> str | None:
@@ -374,6 +397,11 @@ def register_device_secret(public_id: str, secret_b64: str) -> str:
             # first_trust: empty registry → bootstrap; otherwise wait for approval.
             status = STATUS_TRUSTED if _count_trusted_unlocked() == 0 else STATUS_PENDING
 
+        if status == STATUS_PENDING:
+            pending_n = sum(1 for s in _status.values() if s == STATUS_PENDING)
+            if pending_n >= MAX_PENDING_DEVICES:
+                raise ValueError("too many pending devices")
+
         _secrets[expected] = secret
         _registry[expected] = sh
         _status[expected] = status
@@ -394,6 +422,19 @@ def _normalize_body_sha256(value: str | None) -> str | None:
     return h
 
 
+def _normalize_nonce(value: str | None) -> str | None:
+    if value is None:
+        return None
+    n = value.strip()
+    if not n:
+        return None
+    if len(n) > 64 or any(
+        c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in n
+    ):
+        return None
+    return n
+
+
 def verify_request(
     public_id: str | None,
     ts: str | None,
@@ -404,6 +445,7 @@ def verify_request(
     require_hmac: bool = True,
     require_trusted: bool = True,
     body_sha256: str | None = None,
+    nonce: str | None = None,
 ) -> tuple[bool, str | None]:
     """Verify device identity.
 
@@ -461,11 +503,21 @@ def verify_request(
     if body_sha256 is not None and body_hash is None:
         return False, "invalid X-Device-Body-Sha256"
 
+    nonce_n = _normalize_nonce(nonce)
+    if nonce is not None and str(nonce).strip() and nonce_n is None:
+        return False, "invalid X-Device-Nonce"
+
     if body_hash is not None:
-        msg = f"{ts}.{method_u}.{request_path}.{body_hash}".encode("utf-8")
+        msg_s = f"{ts}.{method_u}.{request_path}.{body_hash}"
+        if nonce_n:
+            msg_s = f"{msg_s}.{nonce_n}"
+        msg = msg_s.encode("utf-8")
     elif method_u in ("GET", "HEAD"):
         # Backward compatible signature without body binding
-        msg = f"{ts}.{method_u}.{request_path}".encode("utf-8")
+        msg_s = f"{ts}.{method_u}.{request_path}"
+        if nonce_n:
+            msg_s = f"{msg_s}.{nonce_n}"
+        msg = msg_s.encode("utf-8")
     else:
         # POST/PUT/PATCH/DELETE and other mutating methods require body hash
         # (sha256 of empty body is fine when there is no payload).
@@ -473,12 +525,45 @@ def verify_request(
 
     expected = hmac.new(secret, msg, hashlib.sha256).hexdigest()
     sig = signature.strip()
-    if not hmac.compare_digest(expected, sig.lower()) and not hmac.compare_digest(expected, sig):
+    try:
+        sig_ok = hmac.compare_digest(expected, sig.lower())
+        if not sig_ok and sig != sig.lower():
+            sig_ok = hmac.compare_digest(expected, sig)
+    except (ValueError, TypeError):
         return False, "invalid device signature"
+    if not sig_ok:
+        return False, "invalid device signature"
+
+    if method_u in _MUTATING_METHODS:
+        replay_key = (
+            f"{pid}|{ts}|{method_u}|{request_path}|{body_hash or ''}|{sig.lower()}"
+        )
+        with _lock:
+            now_f = float(now)
+            expired = [k for k, exp in _seen_hmac.items() if exp <= now_f]
+            for k in expired:
+                _seen_hmac.pop(k, None)
+            if replay_key in _seen_hmac:
+                return False, "replayed device signature"
+            _seen_hmac[replay_key] = now_f + _MAX_SKEW_SEC
 
     if require_trusted and status == STATUS_PENDING:
         return False, "device pending approval from a trusted device"
     return True, None
+
+
+def note_register_attempt(client_ip: str | None) -> None:
+    """Record an unauthenticated register hit. Raises ValueError if over cap."""
+    ip = (client_ip or "unknown").strip() or "unknown"
+    now = time.time()
+    window_start = now - REGISTER_WINDOW_SEC
+    with _lock:
+        hits = [t for t in _register_by_ip.get(ip, []) if t > window_start]
+        if len(hits) >= REGISTER_MAX_PER_IP:
+            _register_by_ip[ip] = hits
+            raise ValueError("register rate limit exceeded")
+        hits.append(now)
+        _register_by_ip[ip] = hits
 
 
 def require_device(
@@ -491,6 +576,7 @@ def require_device(
     require_hmac: bool = True,
     require_trusted: bool = True,
     body_sha256: str | None = None,
+    nonce: str | None = None,
 ) -> str:
     """Return device id or raise ValueError with message."""
     ok, err = verify_request(
@@ -502,6 +588,7 @@ def require_device(
         require_hmac=require_hmac,
         require_trusted=require_trusted,
         body_sha256=body_sha256,
+        nonce=nonce,
     )
     if not ok:
         raise ValueError(err or "device proof failed")

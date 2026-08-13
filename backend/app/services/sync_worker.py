@@ -674,6 +674,7 @@ def _sync_folder(
     rounds = 0
     before: str | None = None
     page_limit = PAGE_CATCHUP
+    window_complete = False
 
     for _round in range(MAX_CATCHUP_ROUNDS):
         rounds += 1
@@ -710,13 +711,10 @@ def _sync_folder(
 
             batch_time, batch_ids = _high_water_from_messages(msgs)
             hw_time, hw_ids = _merge_high_water(hw_time, hw_ids, batch_time, batch_ids)
-            if hw_time is not None:
-                save_cursor_time_high_water(
-                    db, account.id, folder, hw_time, hw_ids
-                )
 
         # Short page or empty → window exhausted (newest-first)
         if not msgs or msg_count < page_limit:
+            window_complete = True
             break
 
         # Full page: walk older within the same since-window
@@ -733,6 +731,12 @@ def _sync_folder(
             except Exception:
                 pass
         before = oldest_iso
+
+    # Newest-first: never persist high-water until the since-window is exhausted.
+    # A failed later page (or MAX_CATCHUP_ROUNDS) must keep the previous cursor
+    # so mail still inside the window is not skipped on the next poll.
+    if window_complete and hw_time is not None:
+        save_cursor_time_high_water(db, account.id, folder, hw_time, hw_ids)
 
     return {
         "folder": folder,

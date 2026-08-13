@@ -35,6 +35,7 @@ export interface FetchResult {
   mailboxes?: string[] | null
   /** IMAP folder UIDVALIDITY for this fetch */
   uidvalidity?: number | null
+  credential_updates?: { refresh_token?: string; access_token?: string } | null
 }
 
 /** Body for proxy fetch (credentials not stored server-side). */
@@ -223,6 +224,7 @@ export interface SendMailResult {
   ok: boolean
   error?: string | null
   detail?: string | null
+  credential_updates?: { refresh_token?: string; access_token?: string } | null
 }
 
 /** Send with credentials in body (local accounts). */

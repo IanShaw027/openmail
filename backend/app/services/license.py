@@ -75,10 +75,13 @@ def is_licensed(
             fp.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        if hmac.compare_digest(expected, token.lower()) or hmac.compare_digest(
-            expected, token
-        ):
-            return True
+        try:
+            if hmac.compare_digest(expected, token.lower()) or hmac.compare_digest(
+                expected, token
+            ):
+                return True
+        except ValueError:
+            return False
     return False
 
 

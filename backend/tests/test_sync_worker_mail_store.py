@@ -277,6 +277,70 @@ def test_sync_folder_full_page_all_known_pages_older(db_session: Session) -> Non
     assert "p:older-1" in sids
 
 
+def test_sync_folder_page2_failure_does_not_advance_high_water(db_session: Session) -> None:
+    """Newest-first: a failed later page must not raise the time cursor to page-1 newest.
+
+    Otherwise mail still inside the since-window is skipped forever on the next poll.
+    """
+    from app.services.mail_store import save_cursor_time_high_water
+    from app.services.sync_worker import PAGE_CATCHUP
+
+    acc = _make_account(db_session, email="hw-fail@example.com")
+    account_id = acc.id
+    old_hw = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+    save_cursor_time_high_water(
+        db_session, account_id, "inbox", old_hw, high_water_ids=["p:old"]
+    )
+    db_session.commit()
+
+    page1 = [
+        Message(
+            id=f"new-{i}",
+            subject=f"New {i}",
+            from_="n@e.com",
+            date=f"2026-08-01T12:{i:02d}:00+00:00",
+            body_text=f"body {i}",
+        )
+        for i in range(PAGE_CATCHUP)
+    ]
+
+    def _fake_fetch(db, account, **kwargs):  # type: ignore[no-untyped-def]
+        folder = str(kwargs.get("folder", "inbox")).lower()
+        if folder != "inbox":
+            return FetchServiceResult(ok=True, messages=[], message_count=0, folder=folder)
+        if kwargs.get("before") is None:
+            return FetchServiceResult(
+                ok=True,
+                messages=page1,
+                message_count=len(page1),
+                folder=folder,
+                account_id=account.id,
+                email=account.email,
+            )
+        return FetchServiceResult(
+            ok=False,
+            error="upstream timeout",
+            messages=[],
+            message_count=0,
+            folder=folder,
+        )
+
+    with patch("app.services.sync_worker.fetch_account", side_effect=_fake_fetch):
+        worker = get_sync_worker()
+        worker.sync_one_account(account_id, force=True)
+
+    db_session.expire_all()
+    cur = (
+        db_session.query(SyncCursor)
+        .filter(SyncCursor.account_id == account_id, SyncCursor.folder == "inbox")
+        .one()
+    )
+    data = json.loads(cur.cursor_json or "{}")
+    assert "2026-06-01T00:00:00" in data["high_water_time"]
+    assert "p:old" in (data.get("high_water_ids") or [])
+    assert "2026-08-01" not in data["high_water_time"]
+
+
 def test_weak_stable_id_matches_frontend_material() -> None:
     """Server weak id is wh_ + sha256[:40] of from|date|subject|size."""
     from app.services.mail_store import compute_stable_id

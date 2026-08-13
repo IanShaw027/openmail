@@ -302,12 +302,35 @@ export type EmailLinkClickOptions = {
 }
 
 /**
+ * Confirm-and-open path shared by same-document click handlers and the
+ * sandboxed iframe bridge (which only has an href string, not a MouseEvent).
+ */
+export function openEmailHref(href: string, opts: EmailLinkClickOptions): void {
+  const low = href.trim().toLowerCase()
+  if (low.startsWith('mailto:') || low.startsWith('#') || low.startsWith('tel:')) {
+    return
+  }
+  const dest = resolveEmailLinkTarget(
+    href,
+    typeof location !== 'undefined' ? location.href : undefined,
+  )
+  if (!dest) {
+    opts.onBlocked?.(href)
+    return
+  }
+  if (!opts.confirmNavigate(dest)) return
+  window.open(dest, '_blank', 'noopener,noreferrer')
+}
+
+/**
  * Click handler for containers with sanitized email HTML.
  * Intercepts <a> activations (left, Ctrl/Cmd+click, and middle-click), unwraps
  * trackers, confirms, then opens in a new tab.
  *
- * Bind to BOTH `@click` and `@auxclick`: without `auxclick`, a middle-click (or
- * "open in new tab") opens the raw href and skips the confirmation dialog.
+ * Prefer ``EmailHtmlFrame`` (sandbox iframe) for mail bodies — this remains for
+ * any same-document sink that still uses ``v-html``. Bind to BOTH `@click` and
+ * `@auxclick`: without `auxclick`, a middle-click opens the raw href and skips
+ * the confirmation dialog.
  */
 export function onEmailHtmlClick(ev: MouseEvent, opts: EmailLinkClickOptions): void {
   // Right-click (button 2) → leave the native context menu alone.
@@ -319,26 +342,10 @@ export function onEmailHtmlClick(ev: MouseEvent, opts: EmailLinkClickOptions): v
   if (!a) return
   const href = a.getAttribute('href')
   if (!href) return
-  const low = href.trim().toLowerCase()
-  if (low.startsWith('mailto:') || low.startsWith('#') || low.startsWith('tel:')) {
-    return // let browser handle
-  }
 
   // Prevent the browser's default navigation for every intercepted button,
   // including Ctrl/Cmd+click and middle-click new-tab opens.
   ev.preventDefault()
   ev.stopPropagation()
-
-  const dest = resolveEmailLinkTarget(
-    href,
-    typeof location !== 'undefined' ? location.href : undefined,
-  )
-  if (!dest) {
-    // Nothing safe to open. The default was already prevented, so without this
-    // the click just does nothing and the link looks broken rather than blocked.
-    opts.onBlocked?.(href)
-    return
-  }
-  if (!opts.confirmNavigate(dest)) return
-  window.open(dest, '_blank', 'noopener,noreferrer')
+  openEmailHref(href, opts)
 }

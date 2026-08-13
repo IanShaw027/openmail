@@ -323,7 +323,7 @@ export function parseAccountLine(line: string): ParsedLine {
         apiUrl,
         apiKey: secret,
         password: secret,
-        isApiSource: isPlaceholder || true,
+        isApiSource: isPlaceholder,
         brand: isCf ? 'cf_temp' : 'http_api',
         rawLine: raw,
         note: isPlaceholder

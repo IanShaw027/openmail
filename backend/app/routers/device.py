@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -47,7 +47,7 @@ class StatusOut(BaseModel):
 
 
 @router.post("/register", response_model=DeviceRegisterOut)
-def register_device(body: DeviceRegisterBody) -> DeviceRegisterOut:
+def register_device(request: Request, body: DeviceRegisterBody) -> DeviceRegisterOut:
     """Register vault device secret (server stores secret only for HMAC verify).
 
     Under ``first_trust`` admission the first device is trusted automatically;
@@ -55,9 +55,17 @@ def register_device(body: DeviceRegisterBody) -> DeviceRegisterOut:
     until a trusted device approves them.
     """
     try:
+        device_auth.note_register_attempt(_client_ip(request))
         pid = device_auth.register_device_secret(body.public_id, body.secret_b64)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+        msg = str(e)
+        if "rate limit" in msg:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=msg,
+                headers={"Retry-After": "60"},
+            ) from e
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg) from e
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)) from e
     st = device_auth.device_status(pid) or device_auth.STATUS_TRUSTED
@@ -124,3 +132,9 @@ def revoke_device(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     return StatusOut(ok=True, status="revoked")
+
+
+def _client_ip(request: Request) -> str:
+    """Peer address. Ignores X-Forwarded-For (attacker-controlled)."""
+    client = request.client
+    return client.host if client and client.host else "unknown"

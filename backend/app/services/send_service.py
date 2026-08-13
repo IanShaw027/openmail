@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from app.providers.imap_provider import ImapProvider, normalize_imap_secret
+from app.providers.imap_provider import ImapProvider, _quote_mailbox, normalize_imap_secret
 from app.providers.oauth_graph import DEFAULT_SCOPE, OAuthError, OAuthGraphProvider
 from app.providers.smtp_hosts import resolve_smtp_host
 
@@ -33,6 +33,8 @@ class SendResult:
     detail: str | None = None
     # True when SMTP message was also APPENDed to IMAP Sent (best-effort)
     saved_to_sent: bool = False
+    # Graph may rotate refresh_token; local-first clients must persist it.
+    credential_updates: dict[str, str] | None = None
 
 
 def _provider_value(account: Any) -> str:
@@ -100,7 +102,18 @@ def send_via_graph(
         with httpx.Client(timeout=30.0, proxy=proxy) as client:
             resp = client.post(f"{GRAPH_BASE}/me/sendMail", headers=headers, json=payload)
         if resp.status_code in (200, 202):
-            return SendResult(ok=True, detail="sent via graph")
+            updates: dict[str, str] = {}
+            new_refresh = token_body.get("refresh_token")
+            if new_refresh:
+                updates["refresh_token"] = str(new_refresh)
+            new_access = token_body.get("access_token")
+            if new_access:
+                updates["access_token"] = str(new_access)
+            return SendResult(
+                ok=True,
+                detail="sent via graph",
+                credential_updates=updates or None,
+            )
         if resp.status_code in (401, 403):
             return SendResult(
                 ok=False,
@@ -176,10 +189,10 @@ def append_to_sent_imap(
         if not selected:
             return False, select_err or "no sent folder"
 
-        # APPEND requires a mailbox name; some servers want SELECT first (done above).
-        # Flags: \\Seen so it doesn't look unread in Sent.
+        # APPEND does not need a writable SELECT; quote the mailbox so names
+        # with spaces (Gmail "[Gmail]/Sent Mail") stay one IMAP argument.
         now = imaplib.Time2Internaldate(time.time())
-        typ, _ = conn.append(selected, r"(\Seen)", now, raw)
+        typ, _ = conn.append(_quote_mailbox(selected), r"(\Seen)", now, raw)
         if typ != "OK":
             return False, f"APPEND {typ}"
         return True, None
@@ -318,6 +331,18 @@ def send_mail(
     creds = dict(credential or {})
     if password and not creds.get("password"):
         creds["password"] = password
+    nested_proxy = str(creds.get("proxy") or "").strip()
+    if nested_proxy:
+        from app.services.ssrf import SsrfError, validate_proxy_url
+
+        try:
+            nested_proxy = validate_proxy_url(nested_proxy, allow_private=False)
+        except SsrfError as exc:
+            return SendResult(
+                ok=False,
+                error=f"Invalid proxy / 代理地址无效: {getattr(exc, 'message', None) or exc}",
+            )
+        creds["proxy"] = nested_proxy
     if proxy and not creds.get("proxy"):
         creds["proxy"] = proxy
     if email and not creds.get("email"):
