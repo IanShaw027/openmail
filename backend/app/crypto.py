@@ -146,6 +146,16 @@ def decrypt_str(token: str, *, settings: Settings | None = None) -> str:
     return decrypt_bytes(blob, settings=settings).decode("utf-8")
 
 
+def decrypt_str_or_plain(token: str | None, *, settings: Settings | None = None) -> str | None:
+    """Decrypt a stored token; return it unchanged if it is legacy plaintext."""
+    if token is None or token == "":
+        return token
+    try:
+        return decrypt_str(token, settings=settings)
+    except CryptoError:
+        return token
+
+
 def encrypt_json(value: Any, *, settings: Settings | None = None) -> str:
     import json
 

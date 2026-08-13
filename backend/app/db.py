@@ -327,6 +327,25 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
             except Exception:
                 logger.exception("migrate: failed to add fetch_lock_state.lease_token")
 
+    if "mail_items" in tables:
+        try:
+            code_col = next(
+                c for c in insp.get_columns("mail_items") if c["name"] == "verification_code"
+            )
+            code_len = getattr(code_col.get("type"), "length", None)
+            if code_len is not None:
+                if dialect == "postgresql":
+                    conn.execute(
+                        text("ALTER TABLE mail_items ALTER COLUMN verification_code TYPE TEXT")
+                    )
+                elif dialect in ("mysql", "mariadb"):
+                    conn.execute(text("ALTER TABLE mail_items MODIFY verification_code TEXT"))
+                logger.info("migrate: widened mail_items.verification_code to TEXT")
+        except StopIteration:
+            pass
+        except Exception:
+            logger.exception("migrate: failed to widen mail_items.verification_code")
+
 
 # Runtime overrides for settings that no longer exist. `admin_password` is the
 # reason this list exists: dropping it from OVERRIDABLE_KEYS stopped anything

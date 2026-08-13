@@ -15,7 +15,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.crypto import encrypt_str
+from app.crypto import CryptoError, decrypt_str, decrypt_str_or_plain, encrypt_str
 from app.models import Account, MailItem, SyncCursor, _new_id, _utcnow
 
 # Contract constants (time-cursor overlap lives in poll layer; delta page size here)
@@ -341,6 +341,10 @@ def upsert_messages(
 
         body_text_enc = encrypt_str(body_text, settings=s) if body_text else None
         body_html_enc = encrypt_str(body_html, settings=s) if body_html else None
+        preview_plain = fields.get("preview")
+        code_plain = fields.get("verification_code")
+        preview_enc = encrypt_str(preview_plain, settings=s) if preview_plain else None
+        code_enc = encrypt_str(code_plain, settings=s) if code_plain else None
 
         sid = fields["stable_id"]
         row = by_sid.get(sid)
@@ -357,8 +361,8 @@ def upsert_messages(
                 from_addr=fields.get("from_addr"),
                 to_addrs=fields.get("to_addrs"),
                 subject=fields.get("subject"),
-                preview=fields.get("preview"),
-                verification_code=fields.get("verification_code"),
+                preview=preview_enc,
+                verification_code=code_enc,
                 body_text_enc=body_text_enc,
                 body_html_enc=body_html_enc,
                 has_attachments=bool(fields.get("has_attachments")),
@@ -385,8 +389,8 @@ def upsert_messages(
         row.from_addr = fields.get("from_addr")
         row.to_addrs = fields.get("to_addrs")
         row.subject = fields.get("subject")
-        row.preview = fields.get("preview")
-        row.verification_code = fields.get("verification_code")
+        row.preview = preview_enc
+        row.verification_code = code_enc
         # Prefer non-empty body on update
         if body_text_enc is not None:
             row.body_text_enc = body_text_enc
@@ -436,12 +440,13 @@ def list_delta(
     since: datetime | str | None = None,
     since_id: str | None = None,
     limit: int = DELTA_PAGE,
-    include_body: bool = False,
+    include_body: bool = True,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     """Keyset delta of mail_items for accounts owned by device_id.
 
-    Pagination key: (updated_at, id). Default omits full body (preview + meta + code).
+    Pagination key: (updated_at, id). Default includes decrypted bodies.
+    Preview and verification_code are decrypted (legacy plaintext still accepted).
     """
     s = settings or get_settings()
     lim = max(1, min(int(limit or DELTA_PAGE), 500))
@@ -486,8 +491,6 @@ def list_delta(
         body_text = None
         body_html = None
         if include_body:
-            from app.crypto import CryptoError, decrypt_str
-
             if item.body_text_enc:
                 try:
                     body_text = decrypt_str(item.body_text_enc, settings=s)
@@ -510,8 +513,8 @@ def list_delta(
                 "from_addr": item.from_addr,
                 "to_addrs": to_list,
                 "date": item.received_at.isoformat() if item.received_at else None,
-                "preview": item.preview,
-                "verification_code": item.verification_code,
+                "preview": decrypt_str_or_plain(item.preview, settings=s),
+                "verification_code": decrypt_str_or_plain(item.verification_code, settings=s),
                 "body_text": body_text,
                 "body_html": body_html,
                 "updated_at": item.updated_at.isoformat() if item.updated_at else None,

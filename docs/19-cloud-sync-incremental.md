@@ -62,8 +62,10 @@ Transaction order:
 
 - `id` PK, `account_id` FK CASCADE, `folder`, `stable_id`
 - `provider_id`, `message_id`, `content_hash` nullable
-- `received_at`, `from_addr`, `to_addrs` (JSON/text), `subject`, `preview`
-- `verification_code` nullable
+- `received_at`, `from_addr`, `to_addrs` (JSON/text), `subject`
+- `preview`, `verification_code` nullable — **encrypted at rest** (master-key
+  AES-GCM, same as bodies). Delta decrypts for the device; legacy plaintext
+  rows still read. Subject / from stay plaintext.
 - `body_text_enc`, `body_html_enc` nullable (master-key JSON/text encrypt helpers)
 - `has_attachments` bool, `size` int nullable
 - `fetched_at`, `updated_at` (delta clock — bump on any content change)

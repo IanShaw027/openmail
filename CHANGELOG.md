@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Frontend `glob` is pinned to 10.5.0** (CVE-2025-64756 CLI command
   injection). It is a transitive devDependency of `js-beautify`; the SPA does
   not invoke the glob CLI.
+- **Server-polled `mail_items.preview` and `verification_code` are encrypted
+  at rest** with the same master-key AES-GCM as bodies. Subject and from stay
+  plaintext for list UI. Delta decrypts for trusted devices; existing plaintext
+  rows still read. `verification_code` is widened to TEXT so ciphertext fits.
 
 ### Fixed
 

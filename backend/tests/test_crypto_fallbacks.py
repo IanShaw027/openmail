@@ -12,6 +12,7 @@ from app.crypto import (
     CryptoError,
     clear_key_cache,
     decrypt_str,
+    decrypt_str_or_plain,
     encrypt_str,
     reencrypt_token,
 )
@@ -107,3 +108,12 @@ def test_encrypt_always_primary(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         == "x"
     )
+
+
+def test_decrypt_str_or_plain_accepts_legacy_plaintext() -> None:
+    key = _b64_key()
+    s = Settings.model_construct(openmail_master_key=key, openmail_master_key_fallbacks="")
+    assert decrypt_str_or_plain("112233", settings=s) == "112233"
+    assert decrypt_str_or_plain(None, settings=s) is None
+    token = encrypt_str("888777", settings=s)
+    assert decrypt_str_or_plain(token, settings=s) == "888777"

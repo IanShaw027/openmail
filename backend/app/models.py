@@ -268,7 +268,7 @@ class MailItem(Base):
     to_addrs: Mapped[str | None] = mapped_column(Text, nullable=True)
     subject: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     preview: Mapped[str | None] = mapped_column(Text, nullable=True)
-    verification_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    verification_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     body_text_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     body_html_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     has_attachments: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

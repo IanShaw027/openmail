@@ -127,7 +127,9 @@ def test_upsert_insert_then_unchanged(db_session):
     assert n == 1
     row = db_session.query(MailItem).one()
     assert row.stable_id == "p:p1"
-    assert row.verification_code == "111111"
+    assert row.subject == "Hello"
+    assert row.verification_code != "111111"
+    assert row.preview != "body one"
     assert row.body_text_enc  # encrypted
     assert row.body_text_enc != "body one"
     updated_at_1 = row.updated_at
@@ -168,7 +170,9 @@ def test_upsert_dedupe_and_content_update(db_session):
     rows = db_session.query(MailItem).filter(MailItem.account_id == acc.id).all()
     assert len(rows) == 1
     assert rows[0].subject == "v2"
-    assert rows[0].verification_code == "999999"
+    assert rows[0].verification_code != "999999"
+    page = list_delta(db_session, acc.owner_user_id, since=None, limit=10, settings=settings)
+    assert page["mails"][0]["verification_code"] == "999999"
 
 
 def test_upsert_junk_maps_to_spam_folder(db_session):
@@ -226,7 +230,11 @@ def test_delta_keyset_pagination(db_session):
     assert page1["has_more"] is True
     assert page1["server_time"]
     assert all(m["email"] == "delta@example.com" for m in page1["mails"])
-    assert all(m["body_text"] is None for m in page1["mails"])  # default omit body
+    assert all(m["body_text"] is None for m in page1["mails"])  # no body_text on these msgs
+    page1_plain = list_delta(
+        db_session, device, since=None, limit=2, include_body=False, settings=settings
+    )
+    assert all(m["body_text"] is None for m in page1_plain["mails"])
 
     last = page1["mails"][-1]
     page2 = list_delta(
@@ -258,6 +266,80 @@ def test_delta_keyset_pagination(db_session):
 
     all_ids = ids1 | ids2 | {m["id"] for m in page3["mails"]}
     assert len(all_ids) == 5
+
+
+def test_upsert_encrypts_preview_and_code_delta_returns_plaintext(db_session):
+    settings = get_settings()
+    acc = _make_account(db_session, owner="vk_enc_preview", email="enc@example.com")
+    msgs = [
+        Message(
+            id="enc1",
+            subject="OTP 888777",
+            from_="noreply@svc.com",
+            from_address="noreply@svc.com",
+            date="2026-04-01T00:00:00Z",
+            body_preview="your code is 888777 please enter",
+            body_text="Your code is 888777",
+            body_html="<p>888777</p>",
+            verification_code="888777",
+        )
+    ]
+    upsert_messages(db_session, acc.id, "inbox", msgs, settings=settings)
+    db_session.commit()
+
+    row = db_session.query(MailItem).one()
+    assert row.subject == "OTP 888777"
+    assert row.from_addr == "noreply@svc.com"
+    assert row.preview != "your code is 888777 please enter"
+    assert row.verification_code != "888777"
+    assert "888777" not in (row.preview or "")
+    assert "888777" not in (row.verification_code or "")
+
+    from app.crypto import decrypt_str
+
+    assert decrypt_str(row.preview, settings=settings) == "your code is 888777 please enter"
+    assert decrypt_str(row.verification_code, settings=settings) == "888777"
+
+    out = list_delta(db_session, acc.owner_user_id, since=None, limit=10, settings=settings)
+    m = out["mails"][0]
+    assert m["preview"] == "your code is 888777 please enter"
+    assert m["verification_code"] == "888777"
+    assert m["body_text"] == "Your code is 888777"
+    assert m["body_html"] == "<p>888777</p>"
+
+    omitted = list_delta(
+        db_session,
+        acc.owner_user_id,
+        since=None,
+        limit=10,
+        include_body=False,
+        settings=settings,
+    )
+    assert omitted["mails"][0]["body_text"] is None
+    assert omitted["mails"][0]["body_html"] is None
+    assert omitted["mails"][0]["preview"] == "your code is 888777 please enter"
+    assert omitted["mails"][0]["verification_code"] == "888777"
+
+
+def test_list_delta_reads_legacy_plaintext_preview_and_code(db_session):
+    settings = get_settings()
+    acc = _make_account(db_session, owner="vk_legacy_plain", email="legacy@example.com")
+    row = MailItem(
+        account_id=acc.id,
+        folder="inbox",
+        stable_id="p:legacy1",
+        subject="Old code",
+        from_addr="old@ex.com",
+        preview="plain preview 112233",
+        verification_code="112233",
+    )
+    db_session.add(row)
+    db_session.commit()
+
+    out = list_delta(db_session, acc.owner_user_id, since=None, limit=10, settings=settings)
+    m = out["mails"][0]
+    assert m["preview"] == "plain preview 112233"
+    assert m["verification_code"] == "112233"
 
 
 def test_cursor_get_or_create_and_high_water(db_session):
