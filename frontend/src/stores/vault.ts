@@ -589,6 +589,18 @@ export const useVaultStore = defineStore('vault', () => {
     }
   }
 
+  /** Check the vault password without replacing the in-memory DEK / session. */
+  async function verifyPassword(password: string): Promise<boolean> {
+    const m = (meta.value || loadMeta()) as VaultMetaV2 | null
+    if (!m || !password) return false
+    try {
+      await unlockWithPassword(password, m)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   async function unlockWithRecovery(recoveryKey: string): Promise<void> {
     if (!cryptoOk) throw new VaultCryptoError('crypto_unavailable')
     const m = (meta.value || loadMeta()) as VaultMetaV2 | null
@@ -825,6 +837,7 @@ export const useVaultStore = defineStore('vault', () => {
     createVault,
     unlock,
     unlockWithRecovery,
+    verifyPassword,
     enableRecovery,
     dismissRecoveryKey,
     lock,

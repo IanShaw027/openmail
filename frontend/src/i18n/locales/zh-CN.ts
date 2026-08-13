@@ -59,7 +59,8 @@ export default {
     useRecovery: '忘记主密码？用恢复密钥解锁',
     usePassword: '改用库主密码解锁',
     viewRecovery: '查看恢复密钥',
-    viewRecoveryHint: '仅在本机解锁后可查看；请勿截图上传或发给他人。',
+    viewRecoveryHint: '再次输入库主密码后显示；请勿截图上传或发给他人。',
+    viewRecoveryPassword: '输入库主密码以查看恢复密钥',
     recoveryNotCached:
       '本机尚未缓存恢复密钥明文（可能是升级前创建的库）。用「恢复密钥解锁」成功一次后，会自动保存在设置中供查看；或确认创建时已抄写离线备份。',
     hideRecovery: '隐藏恢复密钥',
@@ -127,6 +128,8 @@ export default {
     import: '批量导入',
     exportUri: '导出链接',
     exportJson: '导出 JSON',
+    exportPassword: '输入库主密码以导出密钥',
+    exportNeedPassword: '导出前请输入库主密码',
     scan: '扫码',
     stopScan: '关闭相机',
     scanFile: '上传图片识别',

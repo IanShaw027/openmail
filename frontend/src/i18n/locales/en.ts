@@ -63,7 +63,9 @@ export default {
     useRecovery: 'Forgot password? Unlock with recovery key',
     usePassword: 'Use vault password instead',
     viewRecovery: 'Show recovery key',
-    viewRecoveryHint: 'Visible only while this device vault is unlocked. Do not share it.',
+    viewRecoveryHint:
+      'Re-enter the vault password to view the key. Do not screenshot or share it.',
+    viewRecoveryPassword: 'Vault password to show recovery key',
     recoveryNotCached:
       'No recovery key is stored for viewing yet (vault may predate this feature). Unlock once with the recovery key to cache it in Settings, or use the offline copy from setup.',
     hideRecovery: 'Hide recovery key',
@@ -131,6 +133,8 @@ export default {
     import: 'Bulk import',
     exportUri: 'Export URIs',
     exportJson: 'Export JSON',
+    exportPassword: 'Vault password to export secrets',
+    exportNeedPassword: 'Enter your vault password to export',
     scan: 'Scan QR',
     stopScan: 'Stop camera',
     scanFile: 'Upload image',

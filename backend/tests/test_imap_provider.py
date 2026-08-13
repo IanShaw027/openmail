@@ -359,6 +359,59 @@ def test_before_paging_filters_exact_time_within_same_day() -> None:
     assert [message.subject for message in result.messages] == ["older one", "older two"]
 
 
+def test_imap_fetch_passes_credential_proxy() -> None:
+    provider = ImapProvider()
+    captured: dict[str, object] = {}
+
+    def fake_login(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        raise OSError("stop after capturing proxy")
+
+    with (
+        patch.object(provider, "_login_connect", side_effect=fake_login),
+        patch(
+            "app.providers.imap_provider.resolve_imap_host",
+            return_value=SimpleNamespace(host="imap.example.com", port=993, ssl=True),
+        ),
+    ):
+        result = provider.fetch(
+            SimpleNamespace(provider="imap", email="u@example.com", proxy=None),
+            credentials={
+                "password": "secret",
+                "proxy": "socks5://10.0.0.1:1080",
+            },
+        )
+    assert result.ok is False
+    assert captured.get("kwargs", {}).get("proxy") == "socks5://10.0.0.1:1080"  # type: ignore[union-attr]
+
+
+def test_imap_connect_opens_proxied_socket() -> None:
+    fake_sock = object()
+    with (
+        patch(
+            "app.services.ssrf.resolve_mail_endpoint",
+            return_value=("93.184.216.34", 993, "imap.example.com"),
+        ),
+        patch("app.services.tcp_proxy.open_proxied_tcp", return_value=fake_sock) as op,
+        patch("app.providers.imap_provider._imap4_ssl_with_sni") as ssl_fn,
+    ):
+        ssl_fn.return_value = MagicMock()
+        ImapProvider()._connect(
+            "imap.example.com",
+            993,
+            True,
+            proxy="socks5://127.0.0.1:1080",
+        )
+    op.assert_called_once()
+    assert op.call_args[0][0] == "socks5://127.0.0.1:1080"
+    assert op.call_args[0][1] == "93.184.216.34"
+    assert op.call_args[0][2] == 993
+    assert ssl_fn.call_args.kwargs.get("sock") is fake_sock or (
+        "sock" in ssl_fn.call_args.kwargs
+    )
+
+
 def test_domain_table_keys_present() -> None:
     for d in ("qq.com", "163.com", "126.com", "gmail.com", "outlook.com"):
         assert d in DOMAIN_IMAP_HOSTS

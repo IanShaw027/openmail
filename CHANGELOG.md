@@ -49,6 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OTP that lives only in HTML is not skipped.
 - **Production image installs from `uv.lock`.** WARP sidecars default to a
   versioned tag (`2026.6.880.0-2.12.0`) instead of `:latest`.
+- **CORS defaults to empty** so a same-origin deploy does not allow Vite
+  origins. Split-origin dev must set `CORS_ORIGINS` explicitly.
+- **Parent CSP drops unused `script-src 'unsafe-inline'` and Cloudflare
+  Insights hosts.** `unsafe-eval` remains for vue-i18n; `style-src` still
+  allows inline styles.
+- **Viewing the recovery key and exporting 2FA secrets re-asks the vault
+  password** (unlock alone is not enough).
+- **IMAP fetch and SMTP send tunnel through `credentials["proxy"]`** (SOCKS5
+  or HTTP CONNECT to the SSRF-pinned IP), matching Graph/cookie WARP egress.
 
 ### Fixed
 

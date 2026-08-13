@@ -73,7 +73,7 @@ See repo root [`.env.example`](../.env.example). Common:
 |----------|---------|
 | `OPENMAIL_MASTER_KEY` | Server crypto |
 | `OPENMAIL_DATABASE_URL` | Default SQLite file |
-| `CORS_ORIGINS` | Dev Vite origin if split |
+| `CORS_ORIGINS` | Empty by default; set Vite origin if the UI is split from the API |
 | `PROXY_POOL` | SOCKS/HTTP channels |
 | `LICENSE_TOKENS` | Optional quota unlock codes |
 | `PUBLIC_BASE_URL` | Absolute base for legacy code-API URLs |

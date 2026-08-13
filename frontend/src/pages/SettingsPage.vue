@@ -118,6 +118,9 @@ const lockMin = ref(vault.lockMinutes)
 const enablePw = ref('')
 const recoveryReveal = ref('')
 const showRecovery = ref(false)
+const viewPw = ref('')
+const viewPwErr = ref('')
+const awaitingViewPw = ref(false)
 const vaultErr = ref('')
 const showFactoryReset = ref(false)
 const resetConfirm = ref('')
@@ -248,6 +251,35 @@ function dismissReveal() {
   recoveryReveal.value = ''
   vault.dismissRecoveryKey()
   showRecovery.value = false
+  awaitingViewPw.value = false
+  viewPw.value = ''
+  viewPwErr.value = ''
+}
+
+async function onToggleRecovery() {
+  viewPwErr.value = ''
+  if (showRecovery.value) {
+    showRecovery.value = false
+    awaitingViewPw.value = false
+    viewPw.value = ''
+    return
+  }
+  if (!awaitingViewPw.value) {
+    awaitingViewPw.value = true
+    return
+  }
+  if (!viewPw.value) {
+    viewPwErr.value = t('vault.errEmpty')
+    return
+  }
+  const ok = await vault.verifyPassword(viewPw.value)
+  if (!ok) {
+    viewPwErr.value = t('vault.errBadPassword')
+    return
+  }
+  viewPw.value = ''
+  awaitingViewPw.value = false
+  showRecovery.value = true
 }
 
 async function copyRecovery() {
@@ -449,7 +481,7 @@ onMounted(() => {
                 <button
                   type="button"
                   class="btn btn-outline btn-sm"
-                  @click="showRecovery = !showRecovery"
+                  @click="onToggleRecovery"
                 >
                   {{ showRecovery ? t('vault.hideRecovery') : t('vault.viewRecovery') }}
                 </button>
@@ -460,6 +492,25 @@ onMounted(() => {
                   @click="copyRecovery"
                 >
                   {{ t('vault.copyRecovery') }}
+                </button>
+              </div>
+              <div v-if="awaitingViewPw && !showRecovery" class="field" style="margin-top: 8px">
+                <label class="label">{{ t('vault.viewRecoveryPassword') }}</label>
+                <input
+                  v-model="viewPw"
+                  class="input"
+                  type="password"
+                  autocomplete="current-password"
+                  @keydown.enter="onToggleRecovery"
+                />
+                <p v-if="viewPwErr" class="hint" style="color: var(--danger)">{{ viewPwErr }}</p>
+                <button
+                  type="button"
+                  class="btn btn-outline btn-sm"
+                  style="margin-top: 8px"
+                  @click="onToggleRecovery"
+                >
+                  {{ t('vault.viewRecovery') }}
                 </button>
               </div>
               <div v-if="showRecovery && recoveryDisplay" class="recovery-reveal">

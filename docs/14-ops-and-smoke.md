@@ -41,7 +41,7 @@ Or: `make dev-frontend`
 | Variable | Notes |
 |----------|--------|
 | `OPENMAIL_MASTER_KEY` | **Required** for device registry / server crypto |
-| `CORS_ORIGINS` | e.g. `http://127.0.0.1:5173` when Vite is split from API |
+| `CORS_ORIGINS` | Empty by default (same-origin SPA). Set e.g. `http://127.0.0.1:5173` when Vite is split from the API |
 | `PROXY_POOL` | Multi-line or `\|`-separated SOCKS/HTTP proxies |
 | `LICENSE_TOKENS` | Optional codes to raise poll quota |
 | `PUBLIC_BASE_URL` | Only if you still serve legacy `/api/v1/code/{token}` links |

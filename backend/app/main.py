@@ -27,8 +27,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     Compatibility (cannot use ultra-strict script-src yet):
     - vue-i18n compiles messages via new Function → requires 'unsafe-eval'
-    - Cloudflare Web Analytics injects beacon + inline bootstrap → requires
-      static.cloudflareinsights.com and 'unsafe-inline' (hash changes over time)
+    The SPA does not load Cloudflare Web Analytics, so script-src must not
+    include 'unsafe-inline' or insights hosts.
     """
 
     async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
@@ -36,13 +36,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Force-set so we replace any previous too-strict CSP from older deploys
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' 'unsafe-inline' "
-            "https://static.cloudflareinsights.com; "
+            "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob: https:; "
             "font-src 'self' data:; "
-            "connect-src 'self' https://cloudflareinsights.com "
-            "https://*.cloudflareinsights.com; "
+            "connect-src 'self'; "
             "media-src 'self' blob:; "
             "worker-src 'self' blob:; "
             "frame-ancestors 'none'; "

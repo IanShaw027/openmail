@@ -26,6 +26,73 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 SEND_SCOPE = "https://graph.microsoft.com/Mail.Send offline_access Mail.Read"
 
 
+class _SMTP(smtplib.SMTP):
+    """SMTP that can reuse a pre-connected proxy tunnel."""
+
+    def __init__(
+        self,
+        host: str = "",
+        port: int = 0,
+        local_hostname: str | None = None,
+        timeout: float = 30.0,
+        source_address: tuple[str, int] | None = None,
+        *,
+        sock: Any = None,
+    ) -> None:
+        self._pre_sock = sock
+        super().__init__(
+            host,
+            port,
+            local_hostname,
+            timeout=timeout,
+            source_address=source_address,
+        )
+
+    def _get_socket(self, host, port, timeout):  # type: ignore[no-untyped-def]
+        if self._pre_sock is not None:
+            sock = self._pre_sock
+            self._pre_sock = None
+            return sock
+        return super()._get_socket(host, port, timeout)
+
+
+class _SMTP_SSL(smtplib.SMTP_SSL):
+    """SMTP_SSL that can reuse a pre-connected proxy tunnel and pin SNI."""
+
+    def __init__(
+        self,
+        host: str = "",
+        port: int = 0,
+        local_hostname: str | None = None,
+        *,
+        timeout: float = 30.0,
+        source_address: tuple[str, int] | None = None,
+        context: ssl.SSLContext | None = None,
+        sock: Any = None,
+        server_hostname: str | None = None,
+    ) -> None:
+        self._pre_sock = sock
+        self._tls_server_hostname = (server_hostname or host or "").strip() or host
+        super().__init__(
+            host,
+            port,
+            local_hostname,
+            timeout=timeout,
+            source_address=source_address,
+            context=context,
+        )
+
+    def _get_socket(self, host, port, timeout):  # type: ignore[no-untyped-def]
+        if self._pre_sock is not None:
+            raw = self._pre_sock
+            self._pre_sock = None
+        else:
+            raw = smtplib.SMTP._get_socket(self, host, port, timeout)
+        return self.context.wrap_socket(
+            raw, server_hostname=self._tls_server_hostname
+        )
+
+
 @dataclass
 class SendResult:
     ok: bool
@@ -154,6 +221,7 @@ def append_to_sent_imap(
     imap_host: str | None = None,
     imap_port: int | None = None,
     imap_ssl: bool | None = None,
+    proxy: str | None = None,
 ) -> tuple[bool, str | None]:
     """APPEND a just-sent message into the Sent mailbox (best-effort).
 
@@ -180,7 +248,7 @@ def append_to_sent_imap(
             imap_ssl=imap_ssl,
         )
         conn = provider._login_connect(  # noqa: SLF001 — shared login + NetEase ID
-            hint.host, hint.port, hint.ssl, email_addr, password
+            hint.host, hint.port, hint.ssl, email_addr, password, proxy=proxy
         )
         if conn is None:
             return False, "IMAP login failed"
@@ -222,6 +290,7 @@ def send_via_smtp(
     imap_host: str | None = None,
     imap_port: int | None = None,
     save_to_sent: bool = True,
+    proxy: str | None = None,
 ) -> SendResult:
     if not email_addr or not password:
         return SendResult(ok=False, error="缺少发件邮箱或密码")
@@ -251,12 +320,20 @@ def send_via_smtp(
         context = ssl.create_default_context()
         # TCP may use pinned IP; set _host so STARTTLS/hostname checks use real name.
         tls_host = sni or hint.host
+        sock = None
+        proxy_url = (proxy or "").strip() or None
+        if proxy_url:
+            from app.services.tcp_proxy import open_proxied_tcp
+
+            sock = open_proxied_tcp(proxy_url, connect_host, connect_port, timeout=30)
         if hint.use_ssl:
-            with smtplib.SMTP_SSL(
+            with _SMTP_SSL(
                 connect_host,
                 connect_port,
                 timeout=30,
                 context=context,
+                sock=sock,
+                server_hostname=tls_host,
             ) as smtp:
                 try:
                     smtp._host = tls_host  # type: ignore[attr-defined]
@@ -265,7 +342,13 @@ def send_via_smtp(
                 smtp.login(email_addr, password)
                 smtp.send_message(msg)
         else:
-            with smtplib.SMTP(connect_host, connect_port, timeout=30) as smtp:
+            smtp_cls = _SMTP if sock is not None else smtplib.SMTP
+            with smtp_cls(
+                connect_host,
+                connect_port,
+                timeout=30,
+                **({"sock": sock} if sock is not None else {}),
+            ) as smtp:
                 try:
                     smtp._host = tls_host  # type: ignore[attr-defined]
                 except Exception:
@@ -298,6 +381,7 @@ def send_via_smtp(
             raw_message=msg,
             imap_host=imap_host,
             imap_port=imap_port,
+            proxy=proxy,
         )
         saved = ok_append
         if ok_append:
@@ -421,6 +505,7 @@ def send_mail(
             imap_host=str(imap_host) if imap_host else None,
             imap_port=int(imap_port) if imap_port is not None else None,
             save_to_sent=True,
+            proxy=proxy or (str(creds.get("proxy")) if creds.get("proxy") else None),
         )
 
     if prov == "http_api":

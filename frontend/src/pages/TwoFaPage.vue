@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import jsQR from 'jsqr'
 import { useTwoFaStore, type TwoFaEntry } from '@/stores/twofa'
+import { useVaultStore } from '@/stores/vault'
 import { copyText } from '@/utils/clipboard'
 import { useToast } from '@/composables/useToast'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
@@ -23,6 +24,7 @@ import { normalizeServiceLogoId } from '@/utils/twofaServiceIcons'
 
 const { t } = useI18n()
 const twofa = useTwoFaStore()
+const vault = useVaultStore()
 const { flashMsg } = useToast()
 
 const q = ref('')
@@ -32,6 +34,8 @@ const showForm = ref(false)
 const editingId = ref<string | null>(null)
 const importText = ref('')
 const showImport = ref(false)
+const exportPw = ref('')
+const exportErr = ref('')
 const cameraOn = ref(false)
 const videoEl = ref<HTMLVideoElement | null>(null)
 const canvasEl = ref<HTMLCanvasElement | null>(null)
@@ -334,13 +338,30 @@ function doImport() {
   }
 }
 
-function exportUris() {
+async function requireExportPassword(): Promise<boolean> {
+  exportErr.value = ''
+  if (!exportPw.value) {
+    exportErr.value = t('twofa.exportNeedPassword')
+    return false
+  }
+  const ok = await vault.verifyPassword(exportPw.value)
+  if (!ok) {
+    exportErr.value = t('vault.errBadPassword')
+    return false
+  }
+  exportPw.value = ''
+  return true
+}
+
+async function exportUris() {
+  if (!(await requireExportPassword())) return
   const text = twofa.exportText()
   downloadBlob(text, `openmail-2fa-${Date.now()}.txt`, 'text/plain')
   flashMsg(t('twofa.exported'))
 }
 
-function exportJson() {
+async function exportJson() {
+  if (!(await requireExportPassword())) return
   const text = twofa.exportJson()
   downloadBlob(text, `openmail-2fa-${Date.now()}.json`, 'application/json')
   flashMsg(t('twofa.exported'))
@@ -709,6 +730,13 @@ onUnmounted(() => {
         <button type="button" class="btn btn-outline btn-sm" @click="showImport = true">
           {{ t('twofa.import') }}
         </button>
+        <input
+          v-model="exportPw"
+          class="input export-pw"
+          type="password"
+          autocomplete="current-password"
+          :placeholder="t('twofa.exportPassword')"
+        />
         <button type="button" class="btn btn-outline btn-sm" @click="exportUris">
           {{ t('twofa.exportUri') }}
         </button>
@@ -735,6 +763,7 @@ onUnmounted(() => {
           @change="onFileQr"
         />
       </div>
+      <p v-if="exportErr" class="hint export-err">{{ exportErr }}</p>
     </div>
 
     <!-- Service type filter chips -->
@@ -1017,6 +1046,15 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+.export-pw {
+  width: 200px;
+  min-width: 140px;
+}
+.export-err {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger);
 }
 .camera {
   padding: 12px;

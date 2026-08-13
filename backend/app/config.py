@@ -33,7 +33,7 @@ class Settings(BaseSettings):
         validation_alias="OPENMAIL_DATABASE_URL",
     )
     cors_origins: str = Field(
-        default="http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000",
+        default="",
         validation_alias="CORS_ORIGINS",
     )
     # No cookie/session settings live here any more: the app authenticates with

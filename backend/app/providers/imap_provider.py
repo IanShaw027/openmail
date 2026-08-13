@@ -182,22 +182,48 @@ class _IMAP4SSLSni(imaplib.IMAP4_SSL):
         timeout: float | None = None,
         ssl_context: Any = None,
         server_hostname: str | None = None,
+        sock: Any = None,
     ) -> None:
         import ssl as _ssl
 
         self._tls_server_hostname = (server_hostname or host or "").strip() or host
+        self._pre_sock = sock
         ctx = ssl_context or _ssl.create_default_context()
         # Parent stores ssl_context; open() uses host for TCP connect.
         super().__init__(host, port, timeout=timeout, ssl_context=ctx)
 
     def _create_socket(self, timeout):  # type: ignore[no-untyped-def]
         # IMAP4._create_socket → plain TCP to self.host (may be pinned IP)
-        sock = imaplib.IMAP4._create_socket(self, timeout)
+        # Use __dict__: IMAP4.__getattr__ treats unknown names as IMAP commands.
+        sock = self.__dict__.pop("_pre_sock", None)
+        if sock is None:
+            sock = imaplib.IMAP4._create_socket(self, timeout)
         assert self.ssl_context is not None
         return self.ssl_context.wrap_socket(
             sock,
             server_hostname=self._tls_server_hostname,
         )
+
+
+class _IMAP4Sock(imaplib.IMAP4):
+    """Plain IMAP4 that uses a pre-connected socket (SOCKS/HTTP CONNECT)."""
+
+    def __init__(
+        self,
+        host: str = "",
+        port: int = imaplib.IMAP4_PORT,
+        *,
+        timeout: float | None = None,
+        sock: Any = None,
+    ) -> None:
+        self._pre_sock = sock
+        super().__init__(host, port, timeout=timeout)
+
+    def _create_socket(self, timeout):  # type: ignore[no-untyped-def]
+        sock = self.__dict__.pop("_pre_sock", None)
+        if sock is not None:
+            return sock
+        return super()._create_socket(timeout)
 
 
 def _imap4_ssl_with_sni(
@@ -206,6 +232,7 @@ def _imap4_ssl_with_sni(
     *,
     server_hostname: str,
     timeout: float,
+    sock: Any = None,
 ) -> imaplib.IMAP4:
     import ssl as _ssl
 
@@ -217,6 +244,7 @@ def _imap4_ssl_with_sni(
             timeout=timeout,
             ssl_context=ctx,
             server_hostname=server_hostname,
+            sock=sock,
         )
     except TypeError:
         # Extremely old Python — last resort without pin-aware SNI
@@ -549,7 +577,10 @@ class ImapProvider:
 
         conn: imaplib.IMAP4 | None = None
         try:
-            conn = self._login_connect(hint.host, hint.port, hint.ssl, email_addr, password)
+            proxy = str(creds.get("proxy") or getattr(account, "proxy", None) or "").strip() or None
+            conn = self._login_connect(
+                hint.host, hint.port, hint.ssl, email_addr, password, proxy=proxy
+            )
             if conn is None:
                 return FetchResult(ok=False, folder=folder, error="IMAP 登录失败")
 
@@ -664,6 +695,7 @@ class ImapProvider:
         use_ssl: bool,
         *,
         server_hostname: str | None = None,
+        proxy: str | None = None,
     ) -> imaplib.IMAP4:
         """Connect to host (may be pinned IP). server_hostname used for TLS SNI/cert.
 
@@ -671,6 +703,7 @@ class ImapProvider:
         IP. Certificate verification must still use the original hostname
         (e.g. imap.gmail.com), otherwise TLS fails with hostname/IP mismatch
         (often reported as CERTIFICATE_VERIFY_FAILED / self-signed).
+        When *proxy* is set, TCP goes through SOCKS5/HTTP CONNECT to the pinned IP.
         """
         from app.services.ssrf import resolve_mail_endpoint
 
@@ -678,14 +711,29 @@ class ImapProvider:
             host, port, use_ssl=use_ssl
         )
         tls_name = (server_hostname or sni or host).strip()
+        sock = None
+        proxy_url = (proxy or "").strip() or None
+        if proxy_url:
+            from app.services.tcp_proxy import open_proxied_tcp
+
+            sock = open_proxied_tcp(
+                proxy_url, connect_host, connect_port, timeout=self.timeout
+            )
         if use_ssl:
             return _imap4_ssl_with_sni(
                 connect_host,
                 connect_port,
                 server_hostname=tls_name,
                 timeout=self.timeout,
+                sock=sock,
             )
-        conn = imaplib.IMAP4(connect_host, connect_port, timeout=self.timeout)
+        conn: imaplib.IMAP4
+        if sock is not None:
+            conn = _IMAP4Sock(
+                connect_host, connect_port, timeout=self.timeout, sock=sock
+            )
+        else:
+            conn = imaplib.IMAP4(connect_host, connect_port, timeout=self.timeout)
         try:
             typ, _ = conn.starttls()
         except Exception as exc:
@@ -711,6 +759,8 @@ class ImapProvider:
         use_ssl: bool,
         email_addr: str,
         password: str,
+        *,
+        proxy: str | None = None,
     ) -> imaplib.IMAP4 | None:
         """Connect and login; try full email then local-part (iCloud)."""
         # imaplib sends LOGIN's username unquoted, and `_quote()` on the password
@@ -729,7 +779,9 @@ class ImapProvider:
         for user in candidates:
             conn: imaplib.IMAP4 | None = None
             try:
-                conn = self._connect(host, port, use_ssl, server_hostname=host)
+                conn = self._connect(
+                    host, port, use_ssl, server_hostname=host, proxy=proxy
+                )
                 typ, _ = conn.login(user, password)
                 if typ == "OK":
                     # NetEase and other ID-capable servers: identify client after login
