@@ -29,6 +29,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Iterator
@@ -534,27 +535,98 @@ def verify_request(
     if not sig_ok:
         return False, "invalid device signature"
 
+    # Pending devices never consume a replay slot. Recording first let an
+    # untrusted client fill the cache (and the durable table) then starve
+    # the same signature after approval.
+    if require_trusted and status == STATUS_PENDING:
+        return False, "device pending approval from a trusted device"
+
     if method_u in _MUTATING_METHODS:
         replay_key = (
             f"{pid}|{ts}|{method_u}|{request_path}|{body_hash or ''}|{sig.lower()}"
         )
-        with _lock:
-            now_f = float(now)
-            expired = [k for k, exp in _seen_hmac.items() if exp <= now_f]
-            for k in expired:
-                _seen_hmac.pop(k, None)
-            if replay_key in _seen_hmac:
-                return False, "replayed device signature"
-            _seen_hmac[replay_key] = now_f + _MAX_SKEW_SEC
-
-    if require_trusted and status == STATUS_PENDING:
-        return False, "device pending approval from a trusted device"
+        if _claim_hmac_replay(replay_key, now):
+            return False, "replayed device signature"
     return True, None
 
 
+def _try_db_replay(digest: str, expires_at: datetime, now: int) -> bool | None:
+    """True if replay, False if first seen, None if the table is unavailable."""
+    try:
+        from sqlalchemy.exc import IntegrityError
+
+        from app.db import SessionLocal
+        from app.models import DeviceAuthReplay
+    except Exception:
+        return None
+    try:
+        db = SessionLocal()
+    except Exception:
+        return None
+    try:
+        db.add(DeviceAuthReplay(replay_hash=digest, expires_at=expires_at))
+        db.commit()
+        if (hash(digest) ^ now) % 32 == 0:
+            try:
+                cutoff = datetime.fromtimestamp(now, tz=timezone.utc)
+                db.query(DeviceAuthReplay).filter(
+                    DeviceAuthReplay.expires_at <= cutoff
+                ).delete(synchronize_session=False)
+                db.commit()
+            except Exception:
+                db.rollback()
+        return False
+    except IntegrityError:
+        db.rollback()
+        return True
+    except Exception:
+        db.rollback()
+        return None
+    finally:
+        db.close()
+
+
+def _claim_hmac_replay(replay_key: str, now: int) -> bool:
+    """Return True if this mutating signature was already accepted."""
+    digest = hashlib.sha256(replay_key.encode("utf-8")).hexdigest()
+    expires_at = datetime.fromtimestamp(now + _MAX_SKEW_SEC, tz=timezone.utc)
+    db_hit = _try_db_replay(digest, expires_at, now)
+    if db_hit is not None:
+        return db_hit
+    with _lock:
+        now_f = float(now)
+        expired = [k for k, exp in _seen_hmac.items() if exp <= now_f]
+        for k in expired:
+            _seen_hmac.pop(k, None)
+        if replay_key in _seen_hmac:
+            return True
+        _seen_hmac[replay_key] = now_f + _MAX_SKEW_SEC
+        return False
+
+
 def note_register_attempt(client_ip: str | None) -> None:
-    """Record an unauthenticated register hit. Raises ValueError if over cap."""
+    """Record an unauthenticated register hit. Raises ValueError if over cap.
+
+    Prefers the durable hourly quota table so multi-worker processes share the
+    cap. Falls back to the in-process list when that table is missing (unit
+    tests that never call ``create_all``).
+    """
     ip = (client_ip or "unknown").strip() or "unknown"
+    key = "register:" + hashlib.sha256(ip.encode("utf-8")).hexdigest()[:40]
+    try:
+        from app.services.license import check_event_quota
+
+        ok, err = check_event_quota(key, limit=REGISTER_MAX_PER_IP)
+        if ok:
+            return
+        if err and "unavailable" in err:
+            pass
+        else:
+            raise ValueError("register rate limit exceeded")
+    except ValueError:
+        raise
+    except Exception:
+        pass
     now = time.time()
     window_start = now - REGISTER_WINDOW_SEC
     with _lock:

@@ -125,4 +125,13 @@ describe('vault idle auto-lock', () => {
     await advance(60_000 + 5 * 60_000 + TICK_MS)
     expect(vault.unlocked).toBe(false)
   })
+
+  it('does not treat vault persist as user activity', async () => {
+    const vault = await unlockedVault(1)
+    await advance(TICK_MS * 3)
+    expect(vault.unlocked).toBe(true)
+    await vault.saveAccounts([])
+    await advance(TICK_MS * 2)
+    expect(vault.unlocked).toBe(false)
+  })
 })

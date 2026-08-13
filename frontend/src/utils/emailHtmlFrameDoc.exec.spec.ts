@@ -6,6 +6,9 @@
  * silently does nothing, and that gap is exactly where a regression would hide.
  */
 import { describe, expect, it, vi } from 'vitest'
+// jsdom is untyped in this repo; the exec harness only needs the constructor.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error -- no @types/jsdom
 import { JSDOM } from 'jsdom'
 import { EMAIL_FRAME_MSG, buildEmailFrameSrcdoc } from '@/utils/emailHtmlFrameDoc'
 

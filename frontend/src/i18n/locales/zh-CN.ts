@@ -323,6 +323,7 @@ export default {
     collapseBody: '收起',
     copyBody: '复制正文',
     mailNoBody: '（无正文）',
+    showRemoteImages: '显示远程图片',
     quickFetch: '取件',
     mailEmpty: '暂无邮件 — 点击取件',
     mailDetailEmpty: '选择左侧邮件查看正文',

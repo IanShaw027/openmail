@@ -127,6 +127,50 @@ def test_migrate_reencrypt_all_rewrites_registry(tmp_path, monkeypatch):
     assert decrypt_str(new_enc, settings=primary_only) == b64
 
 
+def test_migrate_encrypts_plaintext_otp_without_fallbacks(db_session, monkeypatch):
+    """Leftover plaintext OTP must be sealed even when no key rotation is configured."""
+    from app.crypto import decrypt_str
+    from app.models import Account, AccountPool, AccountStatus, MailItem, ProviderType
+    from app.services.crypto_migrate import migrate_reencrypt_all
+
+    monkeypatch.setenv("OPENMAIL_MASTER_KEY_FALLBACKS", "")
+    get_settings.cache_clear()
+    acc = Account(
+        email="otp-plain@example.com",
+        provider=ProviderType.imap,
+        pool=AccountPool.user_private,
+        owner_user_id="vk_otp_plain",
+        status=AccountStatus.ok,
+        latest_verification_code="123456",
+    )
+    db_session.add(acc)
+    db_session.commit()
+    db_session.refresh(acc)
+    item = MailItem(
+        account_id=acc.id,
+        folder="inbox",
+        stable_id="p:otp-plain",
+        subject="code",
+        from_addr="a@b.com",
+        preview="your code is 654321",
+        verification_code="654321",
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    totals = migrate_reencrypt_all(db_session)
+    db_session.refresh(acc)
+    db_session.refresh(item)
+    assert totals.get("otp_accounts", 0) >= 1
+    assert totals.get("otp_mail_items", 0) >= 1
+    assert acc.latest_verification_code != "123456"
+    assert decrypt_str(acc.latest_verification_code) == "123456"
+    assert item.verification_code != "654321"
+    assert decrypt_str(item.verification_code) == "654321"
+    assert item.preview != "your code is 654321"
+    assert decrypt_str(item.preview) == "your code is 654321"
+
+
 class _FakeDb:
     """migrate_reencrypt_all walks Account rows; empty query is enough here."""
 
@@ -135,3 +179,6 @@ class _FakeDb:
 
     def all(self):
         return []
+
+    def commit(self):
+        return None

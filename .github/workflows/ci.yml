@@ -7,6 +7,11 @@ on:
     branches: [main, master]
   # Called by docker.yml / release.yml so a publish cannot outrun the tests.
   workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to test (tag, branch, or SHA). Empty uses github.sha."
+        required: false
+        type: string
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -21,6 +26,8 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -43,6 +50,8 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: astral-sh/setup-uv@v5
       # A lock file that silently drifts from pyproject.toml is worse than none:
       # it looks like a reproducible build while resolving something else.
@@ -58,6 +67,8 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -65,4 +76,5 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm test
+      - run: npx vue-tsc -p tsconfig.vitest.json --noEmit
       - run: npm run build

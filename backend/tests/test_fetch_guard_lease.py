@@ -203,6 +203,59 @@ def test_code_cache_ttl_hits_fresh():
     assert result.code == "654321"
 
 
+def test_code_cache_returns_plaintext_from_encrypted_latest_code():
+    from app.config import get_settings
+    from app.crypto import encrypt_str
+    from app.services.fetch_service import fetch_account
+    from unittest.mock import MagicMock
+
+    now = datetime.now(timezone.utc)
+    settings = get_settings()
+    account = _code_account(
+        latest_verification_code=encrypt_str("654321", settings=settings),
+        latest_code_at=now - timedelta(seconds=10),
+    )
+    cache_settings = SimpleNamespace(
+        code_api_cache_ttl_seconds=90.0,
+        fetch_min_interval_seconds=0.0,
+        fetch_lock_lease_seconds=180.0,
+        openmail_master_key=settings.openmail_master_key,
+        openmail_master_key_fallbacks=getattr(settings, "openmail_master_key_fallbacks", "") or "",
+    )
+    result = fetch_account(
+        MagicMock(),
+        account,  # type: ignore[arg-type]
+        use_cache=True,
+        force=False,
+        settings=cache_settings,  # type: ignore[arg-type]
+    )
+    assert result.ok is True
+    assert result.cached is True
+    assert result.code == "654321"
+
+
+def test_write_short_cache_encrypts_latest_code(db_session):
+    from app.crypto import decrypt_str
+    from app.models import Account, AccountPool, AccountStatus, ProviderType
+    from app.services.fetch_service import _write_short_cache
+
+    acc = Account(
+        email="otp@example.com",
+        provider=ProviderType.imap,
+        pool=AccountPool.user_private,
+        owner_user_id="vk_otp_enc",
+        status=AccountStatus.ok,
+    )
+    db_session.add(acc)
+    db_session.commit()
+    db_session.refresh(acc)
+    _write_short_cache(db_session, acc, [], "123456", folder="inbox")
+    db_session.commit()
+    assert acc.latest_verification_code
+    assert acc.latest_verification_code != "123456"
+    assert decrypt_str(acc.latest_verification_code) == "123456"
+
+
 def test_code_cache_folder_mismatch_does_not_hit():
     from app.services.fetch_service import fetch_account
     from unittest.mock import MagicMock, patch

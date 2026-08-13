@@ -132,6 +132,7 @@ def test_admin_issue_list_revoke_and_usage(client: TestClient, monkeypatch):
 
     r = client.get("/api/admin/licenses", headers=admin_h("GET", "/api/admin/licenses"))
     assert r.status_code == 200
+    assert r.headers.get("Cache-Control") == "no-store"
     rows = r.json()["licenses"]
     assert len(rows) == 1
     assert rows[0]["token"] == token

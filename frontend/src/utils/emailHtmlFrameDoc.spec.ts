@@ -43,4 +43,15 @@ describe('buildEmailFrameSrcdoc', () => {
     const b64 = btoa(String.fromCharCode(...new Uint8Array(digest)))
     expect(doc).toContain(`script-src 'sha256-${b64}'`)
   })
+
+  it('blocks remote images by default', () => {
+    const doc = buildEmailFrameSrcdoc('<img src="https://evil.test/x.png">')
+    expect(doc).toMatch(/img-src data: cid:/)
+    expect(doc).not.toMatch(/img-src data: https:/)
+  })
+
+  it('allows remote https images when opted in', () => {
+    const doc = buildEmailFrameSrcdoc('<p>x</p>', { allowRemoteImages: true })
+    expect(doc).toMatch(/img-src data: https: cid:/)
+  })
 })

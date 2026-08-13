@@ -328,6 +328,7 @@ export default {
     collapseBody: 'Collapse',
     copyBody: 'Copy body',
     mailNoBody: '(no body)',
+    showRemoteImages: 'Show remote images',
     quickFetch: 'Fetch',
     mailEmpty: 'No messages yet — click Fetch',
     mailDetailEmpty: 'Select a message to read the body',

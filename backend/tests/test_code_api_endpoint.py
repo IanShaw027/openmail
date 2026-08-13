@@ -159,6 +159,33 @@ def test_query_keyword_overrides_token_default(token_client, monkeypatch):
     assert captured[0].get("folder") == "junk"
 
 
+def test_query_regex_is_ignored_public_code_api(token_client, monkeypatch):
+    """Caller-supplied regex is not executed; only the token's stored pattern is."""
+    _set_limits(monkeypatch, fetch="0")
+    factory = token_client.db_session_factory  # type: ignore[attr-defined]
+    db = factory()
+    try:
+        row = db.query(CodeApiToken).filter(CodeApiToken.token == "tok_live").one()
+        row.default_regex = r"\d{6}"
+        db.commit()
+    finally:
+        db.close()
+
+    captured: list[dict] = []
+
+    def _fake_fetch(db_, acc_, **kwargs):
+        captured.append(kwargs)
+        return FetchServiceResult(ok=True, code="111222", email=acc_.email)
+
+    monkeypatch.setattr("app.routers.code_api.fetch_account", _fake_fetch)
+    resp = token_client.get(
+        "/api/v1/code/tok_live",
+        params={"regex": r"(a+)+$"},
+    )
+    assert resp.status_code == 200
+    assert captured[0].get("custom_regex") == r"\d{6}"
+
+
 def test_hmac_disable_stops_public_fetch(client, monkeypatch, tmp_path):
     import base64
     import hashlib

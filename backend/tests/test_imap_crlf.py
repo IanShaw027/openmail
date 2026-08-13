@@ -82,3 +82,21 @@ def test_has_control_chars_helper() -> None:
     assert _has_control_chars("x\r", None) is True
     assert _has_control_chars(None, "y\n") is True
     assert _has_control_chars("z\x00") is True
+    assert _has_control_chars("a\nb") is True
+
+
+def test_read_uidvalidity_status_quotes_mailbox() -> None:
+    conn = MagicMock()
+    conn.untagged_responses = {}
+    conn.response = None
+    conn._current_folder = "INBOX"
+    captured: list[str] = []
+
+    def status(mailbox: str, _items: str):  # type: ignore[no-untyped-def]
+        captured.append(mailbox)
+        return "OK", [b'* STATUS "INBOX" (UIDVALIDITY 42)']
+
+    conn.status.side_effect = status
+    n = ImapProvider()._read_uidvalidity(conn)
+    assert captured == ['"INBOX"']
+    assert n == 42

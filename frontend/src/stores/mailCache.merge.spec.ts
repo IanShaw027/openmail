@@ -4,9 +4,10 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import type { MailMessage } from '@/api/accounts'
 import { useMailCacheStore } from '@/stores/mailCache'
 
-function msg(partial: Record<string, unknown>) {
+function msg(partial: Partial<MailMessage> & Pick<MailMessage, 'id'>): MailMessage {
   return {
     subject: 's',
     from: 'a@b.c',

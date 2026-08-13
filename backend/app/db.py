@@ -176,7 +176,7 @@ def _sqlite_rebuild_accounts_drop_users_fk(conn) -> None:  # type: ignore[no-unt
             status VARCHAR(32) NOT NULL,
             last_fetch_at DATETIME,
             last_error VARCHAR(512),
-            latest_verification_code VARCHAR(64),
+            latest_verification_code TEXT,
             latest_code_at DATETIME,
             latest_code_folder VARCHAR(32),
             sync_enabled BOOLEAN NOT NULL DEFAULT 0,
@@ -217,7 +217,7 @@ _ACCOUNTS_EXTRA_COLUMNS: list[tuple[str, str]] = [
     ("last_sync_error", "VARCHAR(512)"),
     ("sync_enabled", "BOOLEAN DEFAULT FALSE"),
     ("proxy", "VARCHAR(512)"),
-    ("latest_verification_code", "VARCHAR(64)"),
+    ("latest_verification_code", "TEXT"),
     ("latest_code_at", "TIMESTAMP"),
     ("latest_code_folder", "VARCHAR(32)"),
     ("last_fetch_at", "TIMESTAMP"),
@@ -346,6 +346,32 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
         except Exception:
             logger.exception("migrate: failed to widen mail_items.verification_code")
 
+    if "accounts" in tables:
+        try:
+            code_col = next(
+                c
+                for c in insp.get_columns("accounts")
+                if c["name"] == "latest_verification_code"
+            )
+            code_len = getattr(code_col.get("type"), "length", None)
+            if code_len is not None:
+                if dialect == "postgresql":
+                    conn.execute(
+                        text(
+                            "ALTER TABLE accounts ALTER COLUMN "
+                            "latest_verification_code TYPE TEXT"
+                        )
+                    )
+                elif dialect in ("mysql", "mariadb"):
+                    conn.execute(
+                        text("ALTER TABLE accounts MODIFY latest_verification_code TEXT")
+                    )
+                logger.info("migrate: widened accounts.latest_verification_code to TEXT")
+        except StopIteration:
+            pass
+        except Exception:
+            logger.exception("migrate: failed to widen accounts.latest_verification_code")
+
 
 # Runtime overrides for settings that no longer exist. `admin_password` is the
 # reason this list exists: dropping it from OVERRIDABLE_KEYS stopped anything
@@ -390,7 +416,7 @@ def _sqlite_migrate(conn) -> None:  # type: ignore[no-untyped-def]
             ("last_sync_error", "VARCHAR(512)"),
             ("sync_enabled", "BOOLEAN DEFAULT 0"),
             ("proxy", "VARCHAR(512)"),
-            ("latest_verification_code", "VARCHAR(64)"),
+            ("latest_verification_code", "TEXT"),
             ("latest_code_at", "DATETIME"),
             ("latest_code_folder", "VARCHAR(32)"),
             ("last_fetch_at", "DATETIME"),

@@ -2,7 +2,10 @@
 
 export const EMAIL_FRAME_MSG = 'openmail-email-frame'
 
-export function buildEmailFrameSrcdoc(bodyHtml: string): string {
+export function buildEmailFrameSrcdoc(
+  bodyHtml: string,
+  opts?: { allowRemoteImages?: boolean },
+): string {
   const bridgeJs = `(function () {
   var MSG = ${JSON.stringify(EMAIL_FRAME_MSG)};
   function report() {
@@ -42,8 +45,9 @@ export function buildEmailFrameSrcdoc(bodyHtml: string): string {
   const close = String.fromCharCode(60) + '/script>'
   const bridge = open + bridgeJs + close
   // sha256 of bridgeJs UTF-8; keep in sync (emailHtmlFrameDoc.spec.ts checks).
+  const imgSrc = opts?.allowRemoteImages ? 'img-src data: https: cid:' : 'img-src data: cid:'
   const csp =
-    "default-src 'none'; img-src data: https: cid:; style-src 'unsafe-inline'; " +
+    `default-src 'none'; ${imgSrc}; style-src 'unsafe-inline'; ` +
     "script-src 'sha256-IwZqvhUobX3jAiEybFnqG/e66ZJioVN+8dsJz6m+jKk='; " +
     "object-src 'none'; base-uri 'none'; form-action 'none';"
 

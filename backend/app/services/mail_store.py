@@ -15,7 +15,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.crypto import CryptoError, decrypt_str, decrypt_str_or_plain, encrypt_str
+from app.crypto import CryptoError, decrypt_str, decrypt_str_or_plain, encrypt_str, is_encrypted_str
 from app.models import Account, MailItem, SyncCursor, _new_id, _utcnow
 
 # Contract constants (time-cursor overlap lives in poll layer; delta page size here)
@@ -376,8 +376,12 @@ def upsert_messages(
             inserted += 1
             continue
 
-        # Unchanged content → skip write
+        # Unchanged content → skip rewrite, except leftover plaintext OTP/preview
         if row.content_hash == content_hash and row.deleted_at is None:
+            if preview_enc and preview_plain and not is_encrypted_str(row.preview, settings=s):
+                row.preview = preview_enc
+            if code_enc and code_plain and not is_encrypted_str(row.verification_code, settings=s):
+                row.verification_code = code_enc
             unchanged += 1
             continue
 

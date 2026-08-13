@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app.crypto import decrypt_str
@@ -79,11 +79,17 @@ def _license_out(db, row: LicenseCode) -> LicenseOut:
     )
 
 
+def _no_store(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+
+
 @router.get("/licenses", response_model=LicenseListOut)
 def list_licenses(
     db: DbDep,
+    response: Response,
     _device_id: str = Depends(device_id_admin),
 ) -> LicenseListOut:
+    _no_store(response)
     rows = db.query(LicenseCode).order_by(LicenseCode.created_at.desc()).all()
     return LicenseListOut(ok=True, licenses=[_license_out(db, row) for row in rows])
 
@@ -92,8 +98,10 @@ def list_licenses(
 def create_license(
     body: LicenseCreateBody,
     db: DbDep,
+    response: Response,
     device_id: str = Depends(device_id_admin),
 ) -> LicenseOut:
+    _no_store(response)
     try:
         row = issue_license_code(db, created_by=device_id, note=body.note)
         db.commit()
@@ -112,8 +120,10 @@ def create_license(
 def revoke_license(
     license_id: str,
     db: DbDep,
+    response: Response,
     device_id: str = Depends(device_id_admin),
 ) -> LicenseOut:
+    _no_store(response)
     row = db.get(LicenseCode, license_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="license not found")

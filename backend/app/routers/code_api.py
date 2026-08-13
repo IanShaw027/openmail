@@ -115,7 +115,11 @@ def public_code_fetch(
     refresh: int = Query(default=0),
     folder: str | None = Query(default=None),
     keyword: str | None = Query(default=None),
-    regex: str | None = Query(default=None),
+    _caller_regex: str | None = Query(
+        default=None,
+        alias="regex",
+        description="Ignored. Only the token's stored default_regex is used.",
+    ),
 ) -> Response:
     row = db.query(CodeApiToken).filter(CodeApiToken.token == token).one_or_none()
     if row is None or not row.enabled:
@@ -144,7 +148,10 @@ def public_code_fetch(
     use_cache = refresh != 1
     folder_q = (folder or "inbox").strip() or "inbox"
     keyword_q = keyword if keyword is not None else row.default_keyword
-    regex_q = regex if regex is not None else row.default_regex
+    # Public callers must not supply a regex: a crafted pattern is ReDoS against
+    # full message bodies. Only the token's stored default_regex is used.
+    _ = _caller_regex
+    regex_q = row.default_regex
     fmt = (format or row.default_format or "json").strip().lower()
     result = fetch_account(
         db,

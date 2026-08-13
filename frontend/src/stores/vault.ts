@@ -731,7 +731,6 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   async function saveAccounts(list: unknown[]): Promise<void> {
-    touch()
     await persistBlob(ACCOUNTS_ENC_KEY, list)
     try {
       localStorage.removeItem(LEGACY_ACCOUNTS)
@@ -741,13 +740,11 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   async function loadAccounts(): Promise<unknown[]> {
-    touch()
     const data = await loadBlob<unknown[]>(ACCOUNTS_ENC_KEY, [])
     return Array.isArray(data) ? data : []
   }
 
   async function saveTwoFa(list: unknown[]): Promise<void> {
-    touch()
     await persistBlob(TWOFA_ENC_KEY, list)
     try {
       localStorage.removeItem(LEGACY_TWOFA)
@@ -757,13 +754,11 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   async function loadTwoFa(): Promise<unknown[]> {
-    touch()
     const data = await loadBlob<unknown[]>(TWOFA_ENC_KEY, [])
     return Array.isArray(data) ? data : []
   }
 
   async function saveMailCache(map: Record<string, unknown>): Promise<void> {
-    touch()
     await persistBlob(MAILCACHE_ENC_KEY, map)
     try {
       localStorage.removeItem(LEGACY_MAIL)
@@ -773,7 +768,6 @@ export const useVaultStore = defineStore('vault', () => {
   }
 
   async function loadMailCache(): Promise<Record<string, unknown>> {
-    touch()
     const data = await loadBlob<Record<string, unknown>>(MAILCACHE_ENC_KEY, {})
     return data && typeof data === 'object' ? data : {}
   }

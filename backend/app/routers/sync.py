@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.crypto import decrypt_str_or_plain
 from app.deps import DbDep
 from app.deps_device import device_id_strict
 from app.models import Account, MailItem
@@ -98,7 +99,7 @@ def _accounts_meta_for_delta(
         {
             "id": acc.id,
             "email": acc.email,
-            "latest_verification_code": acc.latest_verification_code,
+            "latest_verification_code": decrypt_str_or_plain(acc.latest_verification_code),
             "latest_code_at": _iso(acc.latest_code_at),
             "last_sync_at": _iso(acc.last_sync_at),
             "last_sync_error": acc.last_sync_error,

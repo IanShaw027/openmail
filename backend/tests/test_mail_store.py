@@ -342,6 +342,45 @@ def test_list_delta_reads_legacy_plaintext_preview_and_code(db_session):
     assert m["verification_code"] == "112233"
 
 
+def test_upsert_rewrites_legacy_plaintext_when_content_unchanged(db_session):
+    from app.crypto import decrypt_str
+    from app.services.mail_store import compute_content_hash, message_to_fields
+
+    settings = get_settings()
+    acc = _make_account(db_session, owner="vk_plain_rewrite", email="rw@example.com")
+    msg = Message(
+        id="legacy1",
+        subject="Old code",
+        from_="old@ex.com",
+        date="2026-04-01T00:00:00Z",
+        body_preview="plain preview 112233",
+        body_text="body",
+        verification_code="112233",
+    )
+    fields = message_to_fields(msg)
+    row = MailItem(
+        account_id=acc.id,
+        folder="inbox",
+        stable_id=fields["stable_id"],
+        content_hash=compute_content_hash(fields),
+        subject=fields["subject"],
+        from_addr=fields["from_addr"],
+        preview="plain preview 112233",
+        verification_code="112233",
+    )
+    db_session.add(row)
+    db_session.commit()
+
+    r = upsert_messages(db_session, acc.id, "inbox", [msg], settings=settings)
+    db_session.commit()
+    assert r["unchanged"] == 1
+    row2 = db_session.query(MailItem).one()
+    assert row2.verification_code != "112233"
+    assert decrypt_str(row2.verification_code, settings=settings) == "112233"
+    assert row2.preview != "plain preview 112233"
+    assert decrypt_str(row2.preview, settings=settings) == "plain preview 112233"
+
+
 def test_cursor_get_or_create_and_high_water(db_session):
     acc = _make_account(db_session)
     c1 = get_or_create_cursor(db_session, acc.id, "junk")

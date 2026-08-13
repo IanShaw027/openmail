@@ -83,7 +83,7 @@ class Account(Base):
     )
     last_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    latest_verification_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latest_verification_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_code_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     latest_code_folder: Mapped[str | None] = mapped_column(String(32), nullable=True)
     sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -185,6 +185,17 @@ class DevicePollQuotaState(Base):
     device_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class DeviceAuthReplay(Base):
+    """Durable HMAC replay keys so multi-worker processes share the window."""
+
+    __tablename__ = "device_auth_replays"
+
+    replay_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
     )
 
 

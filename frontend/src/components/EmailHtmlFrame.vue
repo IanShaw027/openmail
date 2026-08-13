@@ -11,8 +11,12 @@
  * that lands an inline event handler or <script> could call window.open()
  * directly and skip the confirm dialog entirely, defeating the reason this
  * frame exists.
+ *
+ * Remote https images are off by default (tracking pixels). The user can
+ * opt in per message; switching mail resets the choice.
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { i18n } from '@/i18n'
 import { openEmailHref, type EmailLinkClickOptions } from '@/utils/emailLinks'
 import { EMAIL_FRAME_MSG, buildEmailFrameSrcdoc } from '@/utils/emailHtmlFrameDoc'
 
@@ -22,9 +26,15 @@ const props = defineProps<{
   onBlocked?: EmailLinkClickOptions['onBlocked']
 }>()
 
+function t(key: string): string {
+  return String((i18n.global as { t: (k: string) => unknown }).t(key))
+}
 const iframeRef = ref<HTMLIFrameElement | null>(null)
 const heightPx = ref(120)
-const srcdoc = computed(() => buildEmailFrameSrcdoc(props.html || ''))
+const allowRemoteImages = ref(false)
+const srcdoc = computed(() =>
+  buildEmailFrameSrcdoc(props.html || '', { allowRemoteImages: allowRemoteImages.value }),
+)
 
 function onMessage(ev: MessageEvent) {
   const data = ev.data
@@ -58,28 +68,53 @@ watch(
   () => props.html,
   () => {
     heightPx.value = 120
+    allowRemoteImages.value = false
   },
 )
 </script>
 
 <template>
-  <iframe
-    ref="iframeRef"
-    class="email-html-frame"
-    :srcdoc="srcdoc"
-    :style="{ height: heightPx + 'px' }"
-    sandbox="allow-scripts"
-    referrerpolicy="no-referrer"
-    title="Email body"
-  />
+  <div class="email-html-frame-wrap">
+    <iframe
+      ref="iframeRef"
+      class="email-html-frame"
+      :srcdoc="srcdoc"
+      :style="{ height: heightPx + 'px' }"
+      sandbox="allow-scripts"
+      referrerpolicy="no-referrer"
+      title="Email body"
+    />
+    <button
+      v-if="!allowRemoteImages"
+      type="button"
+      class="remote-img-btn"
+      @click="allowRemoteImages = true"
+    >
+      {{ t('console.showRemoteImages') }}
+    </button>
+  </div>
 </template>
 
 <style scoped>
+.email-html-frame-wrap {
+  position: relative;
+}
 .email-html-frame {
   display: block;
   width: 100%;
   border: 0;
   background: transparent;
   min-height: 80px;
+}
+.remote-img-btn {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link, #1d4ed8);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
 }
 </style>

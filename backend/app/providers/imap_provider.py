@@ -917,7 +917,7 @@ class ImapProvider:
                 if n is not None:
                     return n
             folder_name = getattr(conn, "_current_folder", None) or "INBOX"
-            typ, data = conn.status(str(folder_name), "(UIDVALIDITY)")
+            typ, data = conn.status(_quote_mailbox(str(folder_name)), "(UIDVALIDITY)")
             if typ == "OK" and data:
                 blob = data[0]
                 if isinstance(blob, (bytes, bytearray)):

@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.crypto import CryptoError
+from app.crypto import CryptoError, decrypt_str_or_plain, encrypt_str
 from app.fetch_guard import (
     FetchInFlightError,
     FetchTooSoonError,
@@ -199,6 +199,10 @@ def _pick_best_code(
     return None, filtered[0] if filtered else None
 
 
+def _latest_code_plain(account: Account, settings: Settings | None = None) -> str | None:
+    return decrypt_str_or_plain(account.latest_verification_code, settings=settings)
+
+
 def _write_short_cache(
     db: Session,
     account: Account,
@@ -214,7 +218,7 @@ def _write_short_cache(
     if account.status == AccountStatus.error:
         account.status = AccountStatus.ok
     if code:
-        account.latest_verification_code = code
+        account.latest_verification_code = encrypt_str(code)
         account.latest_code_at = now
         account.latest_code_folder = _folder_key(folder)
     account.updated_at = now
@@ -313,7 +317,7 @@ def fetch_account(
     if use_cache and not force and _cached_code_fresh(account, folder, s):
         return FetchServiceResult(
             ok=True,
-            code=account.latest_verification_code,
+            code=_latest_code_plain(account, s),
             email=email,
             account_id=account.id,
             folder=folder,
@@ -540,7 +544,7 @@ def fetch_account(
         if _cached_code_fresh(account, folder, s):
             return FetchServiceResult(
                 ok=True,
-                code=account.latest_verification_code,
+                code=_latest_code_plain(account, s),
                 email=email,
                 account_id=account.id,
                 folder=folder,
@@ -563,7 +567,7 @@ def fetch_account(
         if _cached_code_fresh(account, folder, s):
             return FetchServiceResult(
                 ok=True,
-                code=account.latest_verification_code,
+                code=_latest_code_plain(account, s),
                 email=email,
                 account_id=account.id,
                 folder=folder,

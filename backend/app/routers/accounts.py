@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.crypto import encrypt_json, encrypt_str, master_key_configured
+from app.crypto import decrypt_str_or_plain, encrypt_json, encrypt_str, master_key_configured
 from app.deps import DbDep, SettingsDep
 from app.deps_device import device_id_strict
 from app.models import Account, AccountPool, AccountSession, AccountStatus, ProviderType
@@ -58,7 +58,7 @@ def _to_out(acc: Account) -> AccountOut:
         status=acc.status,
         last_fetch_at=acc.last_fetch_at,
         last_error=acc.last_error,
-        latest_verification_code=acc.latest_verification_code,
+        latest_verification_code=decrypt_str_or_plain(acc.latest_verification_code),
         latest_code_at=acc.latest_code_at,
         latest_code_folder=acc.latest_code_folder,
         sync_enabled=acc.sync_enabled,

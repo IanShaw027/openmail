@@ -156,6 +156,17 @@ def decrypt_str_or_plain(token: str | None, *, settings: Settings | None = None)
         return token
 
 
+def is_encrypted_str(token: str | None, *, settings: Settings | None = None) -> bool:
+    """True when ``token`` decrypts under the current master key (or fallbacks)."""
+    if not token:
+        return False
+    try:
+        decrypt_str(token, settings=settings)
+        return True
+    except CryptoError:
+        return False
+
+
 def encrypt_json(value: Any, *, settings: Settings | None = None) -> str:
     import json
 

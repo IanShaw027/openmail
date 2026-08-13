@@ -12,9 +12,10 @@ socksio>=1.0.0
 # TLS fingerprint for mail.com cookie provider; code falls back to httpx if absent
 curl_cffi>=0.15.0
 
-# ── Test-only (excluded from the production image; see Dockerfile) ───
-# Everything below this header is stripped from the image. The Dockerfile keys
-# off this exact line, so do not reword it, and do not add runtime deps below it.
+# ── Test-only (local pytest / CI; the production image does not use this file) ───
+# Production installs from pyproject.toml + uv.lock (see Dockerfile).
+# Keep runtime deps above this header so `pip install -r requirements.txt`
+# still matches what tests import.
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
 # Starlette TestClient (FastAPI tests) — required since starlette 1.3 deprecation

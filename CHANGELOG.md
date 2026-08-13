@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list, and revoke codes from Settings. Issued codes paste into the existing
   license field (same as `LICENSE_TOKENS`), can be shared across devices, and
   record HMAC-proven usage. Ciphertext at rest; logs only hashes. Empty
-  allowlist means nobody is admin.
+  allowlist means nobody is admin. List/create/revoke responses send
+  `Cache-Control: no-store`.
 
 ### Fixed
 
@@ -24,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Admin devices are auto-licensed** (no code in Settings). `/api/config/public`
   now verifies `X-Device-Nonce`, so issued-code usage is recorded after HMAC
   (the browser always sends a nonce; without it the count stayed at 0).
+- **Idle auto-lock is no longer reset by vault persist.** Saving accounts / 2FA
+  / mail cache no longer counts as user activity, so a flush before lock cannot
+  cancel the timer.
+- **Mail HTML remote images are off by default.** The iframe CSP is
+  `img-src data: cid:`; a per-message “Show remote images” control opts into
+  `https:`.
 
 ### Security
 
@@ -47,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an attacker host, which then received a plaintext password or had its
   response parsed back as mail. IMAP mailbox names were sent unquoted, so a
   folder containing CR/LF could inject a second command into the same write.
-  HTTP fetches re-resolved DNS between the SSRF check and the connection,
+  `STATUS` for UIDVALIDITY now quotes the mailbox the same way. HTTP fetches re-resolved DNS between the SSRF check and the connection,
   leaving a rebinding window; each hop is now pinned to the address it was
   checked against.
 - **Outbound policy now also blocks CGNAT / Aliyun metadata (`100.64.0.0/10`),
@@ -55,14 +62,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `imap_ssl=false` upgrades with STARTTLS before LOGIN. Client-supplied nested
   proxies are validated the same way as the top-level `proxy` field.
 - **Device HMAC rejects replays** of the same mutating signature inside the
-  5-minute timestamp window. `POST /api/device/register` is per-IP rate-limited
-  and pending devices are capped. Master-key rotation re-encrypts
-  `device_registry.json`; a decrypt miss no longer looks like an empty registry.
+  5-minute timestamp window, **after** the pending-device check so an
+  untrusted client cannot fill the replay table. Replay keys and
+  `POST /api/device/register` per-IP caps are stored in the database so
+  multi-worker processes share them (in-memory fallback when the table is
+  missing). Master-key rotation re-encrypts `device_registry.json`; a decrypt
+  miss no longer looks like an empty registry.
 - **Client-supplied proxy hostnames are pinned to the checked IP** (DNS
   rebinding). Graph send returns a rotated `refresh_token` so the browser can
   persist it. Cookie fetch no longer re-rejects operator WARP pool URLs.
 - **Legacy code-api tokens** honour stored `default_keyword` / `default_regex`
   and can be disabled with HMAC (`POST /api/accounts/{id}/code-api/disable`).
+  The public `regex` query is ignored (caller-supplied patterns were ReDoS).
 - **Graph fetch expands the full page body**, not only the first 25 rows, so
   OTP that lives only in HTML is not skipped.
 - **Production image installs from `uv.lock`.** WARP sidecars default to a
@@ -80,15 +91,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   injection). It is a transitive devDependency of `js-beautify`; the SPA does
   not invoke the glob CLI.
 - **Server-polled `mail_items.preview` and `verification_code` are encrypted
-  at rest** with the same master-key AES-GCM as bodies. Subject and from stay
-  plaintext for list UI. Delta decrypts for trusted devices; existing plaintext
-  rows still read. `verification_code` is widened to TEXT so ciphertext fits.
+  at rest** with the same master-key AES-GCM as bodies, including leftover
+  plaintext rows (startup migrate, and upsert when content is otherwise
+  unchanged). `accounts.latest_verification_code` is encrypted the same way
+  and widened to TEXT; HMAC-trusted APIs still return plaintext. Subject and
+  from stay plaintext for list UI. Delta decrypts for trusted devices.
 - **Cloud delta includes bodies by default** (`include_body=true`). The
   browser always requests them so OTP that lives only in HTML is not missing
   from the local cache.
 
 ### Fixed
 
+- **Release CI checks out the tag being published** (`workflow_dispatch` used
+  to test the dispatched branch while packaging a different tag). Spec files
+  are typechecked with `vue-tsc -p tsconfig.vitest.json`.
 - **Cloud sync no longer silently drops mail.** Server catch-up keeps the
   previous time cursor until the since-window is exhausted (a failed later
   page no longer raises high-water to page-1 newest). `since` stays set when

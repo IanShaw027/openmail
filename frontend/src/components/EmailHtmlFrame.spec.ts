@@ -55,4 +55,9 @@ describe('EmailHtmlFrame sandbox', () => {
     const wrapper = mountFrame('<p>distinctive-marker-123</p>')
     expect(wrapper.get('iframe').attributes('srcdoc')).toContain('distinctive-marker-123')
   })
+
+  it('does not allow remote images in the default srcdoc', () => {
+    const wrapper = mountFrame('<img src="https://evil.test/x.png">')
+    expect(wrapper.get('iframe').attributes('srcdoc')).not.toMatch(/img-src data: https:/)
+  })
 })

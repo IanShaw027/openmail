@@ -313,6 +313,68 @@ def test_mutating_hmac_replay_rejected(da):
     assert err2 and "replay" in err2.lower()
 
 
+def test_pending_mutating_hmac_does_not_count_as_replay(da):
+    """A rejected pending POST must not consume the anti-replay slot.
+
+    Recording the signature before the pending check lets an untrusted device
+    fill the replay cache (and, with a durable store, the table) then starve
+    later legitimate retries of the same key after approval.
+    """
+    s1, b1, p1 = _secret_pair()
+    s2, b2, p2 = _secret_pair()
+    da.register_device_secret(p1, b1)
+    da.register_device_secret(p2, b2)
+    ts = str(int(time.time()))
+    body_hash = hashlib.sha256(b"").hexdigest()
+    msg = f"{ts}.POST./api/accounts.{body_hash}".encode()
+    sig = hmac.new(s2, msg, hashlib.sha256).hexdigest()
+    kwargs = dict(
+        public_id=p2,
+        ts=ts,
+        signature=sig,
+        method="POST",
+        path="/api/accounts",
+        require_hmac=True,
+        require_trusted=True,
+        body_sha256=body_hash,
+    )
+    ok, err = da.verify_request(**kwargs)
+    assert ok is False
+    assert err and "pending" in err.lower()
+    ok2, err2 = da.verify_request(**kwargs)
+    assert ok2 is False
+    assert err2 and "pending" in err2.lower()
+    assert "replay" not in err2.lower()
+    assert not any(p2 in k for k in da._seen_hmac)
+
+
+def test_hmac_replay_survives_cleared_memory(client):
+    """Replay keys must live in the shared DB, not only this process's dict."""
+    import app.services.device_auth as da
+
+    secret, b64, pid = _secret_pair()
+    assert da.register_device_secret(pid, b64) == pid
+    ts = str(int(time.time()))
+    body_hash = hashlib.sha256(b'{"a":1}').hexdigest()
+    msg = f"{ts}.POST./api/fetch/send.{body_hash}".encode()
+    sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    kwargs = dict(
+        public_id=pid,
+        ts=ts,
+        signature=sig,
+        method="POST",
+        path="/api/fetch/send",
+        require_hmac=True,
+        body_sha256=body_hash,
+    )
+    ok, err = da.verify_request(**kwargs)
+    assert ok is True, err
+    da._seen_hmac.clear()
+    ok2, err2 = da.verify_request(**kwargs)
+    assert ok2 is False
+    assert err2 and "replay" in err2.lower()
+
+
 def test_nonce_allows_same_second_identical_body(da):
     secret, b64, pid = _secret_pair()
     out = da.register_device_secret(pid, b64)
