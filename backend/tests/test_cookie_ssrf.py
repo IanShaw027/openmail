@@ -95,11 +95,22 @@ def test_allowlisted_client_blocks_redirect_off_property() -> None:
     inner.get.return_value = redirect
 
     client = _AllowlistedClient(inner)
-    with pytest.raises(ValueError, match="mail.com|非"):
-        client.get("https://www.mail.com/")
+    # Do not hit live DNS for www.mail.com — the allowlist + redirect check
+    # is what this test covers.
+    with patch("app.services.ssrf._resolve_host", return_value=["93.184.216.34"]):
+        with pytest.raises(ValueError, match="mail.com|非"):
+            client.get("https://www.mail.com/")
     # The inner client was asked for the allowlisted URL only — never the metadata IP.
     called_urls = [c.args[0] for c in inner.get.call_args_list]
     assert called_urls == ["https://www.mail.com/"]
+
+
+def test_assert_mailcom_url_rejects_when_dns_is_private() -> None:
+    with (
+        patch("app.services.ssrf._resolve_host", return_value=["10.0.0.1"]),
+        pytest.raises(ValueError, match="blocked|禁止|private|解析"),
+    ):
+        assert_mailcom_url("https://www.mail.com/", resolve_dns=True)
 
 
 def test_fetch_refuses_evil_site_before_any_http() -> None:

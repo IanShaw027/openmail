@@ -28,12 +28,14 @@ Does **not** replace threat modeling for multi-tenant SaaS.
 
 ### Security
 
-- Device HMAC: `{ts}.{METHOD}.{path}.{body_sha256}` + `X-Device-Body-Sha256`
+- Device HMAC: `{ts}.{METHOD}.{path}.{body_sha256}[.{nonce}]` + `X-Device-Body-Sha256`; mutating replays inside the timestamp window are rejected
 - GET/HEAD legacy path-only HMAC still accepted without body hash
-- HTML email sanitizer: CSS allowlist, strip `url()`, `expression`, etc.
+- HTML email sanitizer: CSS allowlist, strip `url()`, `expression`, etc. Mail bodies render in a sandboxed iframe (no `allow-same-origin` / `allow-popups`)
 - Secret copy UX: explicit “full secret copied” toast
 - Code API short-cache TTL (`CODE_API_CACHE_TTL_SECONDS`, default 90s)
 - Fetch lock lease + token ownership (crash recovery; no permanent stuck lock)
+- `CORS_ORIGINS` empty by default; parent CSP has no unused `unsafe-inline` / Cloudflare Insights
+- IMAP/SMTP egress honours `credentials["proxy"]` (SOCKS5 / HTTP CONNECT to the SSRF-pinned IP)
 
 ### Ops / multi-worker
 
@@ -46,11 +48,13 @@ Does **not** replace threat modeling for multi-tenant SaaS.
 |------|--------|
 | Multi-tab vault last-writer-wins | No BroadcastChannel merge |
 | pagehide async encrypt | Best-effort; critical paths already await |
-| HMAC no nonce store | Body hash stops tamper; pure replay within skew still possible if captured |
-| Proxy URL SSRF | User-supplied proxy still powerful; document operator trust |
+| Session wrap ≈ DEK in sessionStorage | Same-origin XSS that can read sessionStorage recovers the DEK; lock deletes the wrap. Not a confidentiality boundary against XSS. |
+| Parent CSP still needs `unsafe-eval` | vue-i18n compiles messages via `new Function`. `script-src` no longer includes `unsafe-inline` or Cloudflare Insights. |
 | Cookie true pagination | Local filter only; not infinite history |
 | IndexedDB mail cache | Still localStorage ciphertext blobs |
 | Redis fetch lock | Optional; DB lease is enough for typical multi-worker SQLite/Postgres |
+
+HMAC mutating requests now bind an optional `X-Device-Nonce` and reject replays of the same signature inside the timestamp window. Client-supplied proxies are SSRF-checked and hostname-pinned; IMAP/SMTP as well as Graph/cookie honour `credentials["proxy"]` (operator WARP pool included). `CORS_ORIGINS` defaults to empty (same-origin SPA). Viewing the recovery key and exporting 2FA re-ask the vault password.
 
 ## Suggested operator settings
 

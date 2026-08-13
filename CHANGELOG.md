@@ -58,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   password** (unlock alone is not enough).
 - **IMAP fetch and SMTP send tunnel through `credentials["proxy"]`** (SOCKS5
   or HTTP CONNECT to the SSRF-pinned IP), matching Graph/cookie WARP egress.
+- **Frontend `glob` is pinned to 10.5.0** (CVE-2025-64756 CLI command
+  injection). It is a transitive devDependency of `js-beautify`; the SPA does
+  not invoke the glob CLI.
 
 ### Fixed
 
@@ -81,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DROP TABLE users`, so the leftover FK no longer blocks migration.
 - **Cloud mail rows without IMAP UIDVALIDITY no longer use a bare UID as**
   `stable_id` (mailbox rebuild would otherwise overwrite the wrong message).
+- **Cookie SSRF tests no longer need live DNS** for `www.mail.com`.
 
 - **Upgrade from a root-run install no longer crash-loops.** Images before this
   change ran as root and created `data/openmail.db` as `root:root`; the switch to
