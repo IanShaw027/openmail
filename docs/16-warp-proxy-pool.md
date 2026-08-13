@@ -6,7 +6,7 @@
 - 批量取件（前端并发）
 - 服务端定时同步 / 个人面板收件（`SYNC_CONCURRENCY`）
 
-**不需要** 再单独部署一套代理产品；也 **不需要** Cloudflare Workers / 开发者账号。WARP 使用官方客户端镜像（`caomingjun/warp`）。
+**不需要** 再单独部署一套代理产品；也 **不需要** Cloudflare Workers / 开发者账号。WARP 使用 `caomingjun/warp` 的**版本标签**（compose 默认 `2026.6.880.0-2.12.0`，不要跟 `:latest`）。覆盖：`WARP_IMAGE=caomingjun/warp@sha256:…`。
 
 ## 架构
 

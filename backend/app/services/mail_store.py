@@ -88,6 +88,11 @@ def _normalize_message_id(raw: str | None) -> str | None:
     return s or None
 
 
+def _looks_like_imap_uid(value: Any) -> bool:
+    s = _as_str(value)
+    return bool(s) and s.isdigit()
+
+
 def _provider_id_from_msg(msg: Any) -> str | None:
     """Best provider-native id (Graph id, IMAP uidvalidity:uid, etc.)."""
     # Explicit fields
@@ -104,12 +109,19 @@ def _provider_id_from_msg(msg: Any) -> str | None:
     raw_refs = _attr(msg, "raw_refs", default=None) or {}
     if isinstance(raw_refs, dict):
         for key in ("graph_id", "provider_id", "mail_id", "uid"):
-            if raw_refs.get(key):
-                if key == "uid" and uidvalidity is not None:
+            if not raw_refs.get(key):
+                continue
+            if key == "uid":
+                if uidvalidity is not None:
                     return f"{uidvalidity}:{raw_refs[key]}"
-                return _as_str(raw_refs[key])
+                # Bare IMAP UID is reused after mailbox rebuild — not a stable id.
+                continue
+            return _as_str(raw_refs[key])
 
     if pid is not None and _as_str(pid):
+        # Digit-only ids are IMAP UIDs; without UIDVALIDITY they are not stable.
+        if _looks_like_imap_uid(pid) and uidvalidity is None:
+            return None
         return _as_str(pid)
     return None
 

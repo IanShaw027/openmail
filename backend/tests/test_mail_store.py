@@ -53,6 +53,13 @@ def test_stable_id_provider_priority():
     m2 = Message(id="42", subject="Hi", uidvalidity=99)
     assert compute_stable_id(m2) == "p:99:42"
 
+    # Numeric IMAP UID without UIDVALIDITY is not stable across mailbox rebuilds.
+    m_bare = Message(id="42", subject="Hi", from_="x@y.com", date="2026-01-01T00:00:00Z")
+    bare_sid = compute_stable_id(m_bare)
+    assert bare_sid != "p:42"
+    assert not bare_sid.startswith("p:42")
+    assert bare_sid.startswith("wh_")
+
     # message_id when no strong provider id (empty id)
     m3 = {
         "id": "",

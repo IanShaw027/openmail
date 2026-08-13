@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   persist it. Cookie fetch no longer re-rejects operator WARP pool URLs.
 - **Legacy code-api tokens** honour stored `default_keyword` / `default_regex`
   and can be disabled with HMAC (`POST /api/accounts/{id}/code-api/disable`).
+- **Graph fetch expands the full page body**, not only the first 25 rows, so
+  OTP that lives only in HTML is not skipped.
+- **Production image installs from `uv.lock`.** WARP sidecars default to a
+  versioned tag (`2026.6.880.0-2.12.0`) instead of `:latest`.
 
 ### Fixed
 
@@ -66,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows with a real mailbox are no longer marked as API source shells.
 - **Postgres upgrades drop `accounts.owner_user_id` → `users` before**
   `DROP TABLE users`, so the leftover FK no longer blocks migration.
+- **Cloud mail rows without IMAP UIDVALIDITY no longer use a bare UID as**
+  `stable_id` (mailbox rebuild would otherwise overwrite the wrong message).
 
 - **Upgrade from a root-run install no longer crash-loops.** Images before this
   change ran as root and created `data/openmail.db` as `root:root`; the switch to

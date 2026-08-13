@@ -32,17 +32,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY backend/requirements.txt ./
-# Production: install only what appears above the test-only marker.
-#
-# This used to exclude packages by name with an unanchored pattern, which meant
-# a future `pytest-cov` or `httpx2-extra` would have been dropped silently —
-# and a missing runtime dependency does not show up until the image runs.
-# Splitting on the section header the file already declares keeps the two lists
-# in one place, and the build fails loudly if that header ever goes away.
-RUN awk '/^# ── Test-only/{found=1; exit} /^[^#]/ && NF {print} END{if(!found) exit 1}' \
-        requirements.txt > /tmp/requirements-prod.txt \
-    && pip install --no-cache-dir -r /tmp/requirements-prod.txt
+COPY backend/pyproject.toml backend/uv.lock ./
+# Install the locked runtime set (no pytest). `--frozen` fails the build if
+# uv.lock is stale; CI already runs `uv lock --check`.
+COPY --from=ghcr.io/astral-sh/uv:0.10.11 /uv /usr/local/bin/uv
+RUN uv sync --frozen --no-dev --no-install-project \
+    && rm -f /usr/local/bin/uv
+
+ENV VIRTUAL_ENV=/app/.venv \
+    PATH="/app/.venv/bin:$PATH"
 
 COPY backend/app ./app
 COPY --from=frontend /frontend/dist/ ./app/static/

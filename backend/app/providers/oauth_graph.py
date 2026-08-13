@@ -3,8 +3,8 @@
 Flow:
 1. POST login.microsoftonline.com/.../token with grant_type=refresh_token
 2. GET graph.microsoft.com/v1.0/me/mailFolders/{inbox|junkemail}/messages
-3. Optionally expand body for top messages
-4. Map to Message; return CredentialUpdates if new refresh_token
+3. Map to Message (list includes body; fill gaps per-message)
+4. Return CredentialUpdates if new refresh_token
 """
 
 from __future__ import annotations
@@ -37,9 +37,13 @@ _FOLDER_MAP = {
     "sent mail": "sentitems",
 }
 
-# List endpoint: body is heavy — expand per-message. bodyPreview is list-safe.
+# Request body on the list so OTP in HTML is not dropped after row 25.
+# Per-message GET still fills any row Graph omitted.
 # See https://learn.microsoft.com/en-us/graph/api/resources/message
-_SELECT = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments"
+_SELECT = (
+    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,"
+    "isRead,hasAttachments,body,uniqueBody"
+)
 _TIMEOUT = 30.0
 
 
@@ -355,13 +359,13 @@ class OAuthGraphProvider:
                 items = []
 
             messages: list[Message] = []
-            # List endpoint omits full body; expand HTML for UI (more rows than before)
-            body_limit = min(top, 12 if quick else 25)
-            for i, item in enumerate(items):
+            for item in items:
                 if not isinstance(item, dict):
                     continue
                 msg_id = item.get("id")
-                if msg_id and i < body_limit:
+                body_obj = item.get("body") if isinstance(item.get("body"), dict) else {}
+                has_body = bool(str(body_obj.get("content") or "").strip())
+                if msg_id and not has_body:
                     try:
                         br = client.get(
                             f"{GRAPH_BASE}/me/messages/{msg_id}"
