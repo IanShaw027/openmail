@@ -185,6 +185,10 @@ def is_licensed(
 ) -> bool:
     """Return True if request presents a valid unlimited license."""
     s = settings or get_settings()
+    fp = _as_str(device_id)
+    admin_ids = getattr(s, "admin_device_id_set", None) or set()
+    if fp and fp in admin_ids:
+        return True
     token = _as_str(license_token)
     if not token:
         return False

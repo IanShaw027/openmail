@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings shows the **full** device id with a copy button. The list previously
   truncated `vk_…` to 18 characters, which made `OPENMAIL_ADMIN_DEVICE_IDS`
   unusable from the UI.
+- **Admin devices are auto-licensed** (no code in Settings). `/api/config/public`
+  now verifies `X-Device-Nonce`, so issued-code usage is recorded after HMAC
+  (the browser always sends a nonce; without it the count stayed at 0).
 
 ### Security
 

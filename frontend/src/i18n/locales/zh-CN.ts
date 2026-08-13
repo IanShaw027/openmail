@@ -783,6 +783,12 @@ export default {
     adminLastUsed: '最近使用',
     adminNever: '尚未使用',
     adminEmpty: '还没有签发过授权码。',
+    adminAutoLicensedHint:
+      '当前设备在 OPENMAIL_ADMIN_DEVICE_IDS 中，已自动不限配额，无需填写授权码。',
+    adminInstanceHint:
+      '未授权设备配额：本机 {local} · 云端 {cloud} · 每小时取件 {poll}。设备准入：{admission}。改配额或管理员名单需改服务器 .env 后重建容器。',
+    adminAdmissionFirstTrust: '先信任第一台，之后需批准',
+    adminAdmissionOpen: '开放注册',
   },
   me: {
     mailsLocalSubtitle: '搜索本机已拉取邮件（无需登录）',

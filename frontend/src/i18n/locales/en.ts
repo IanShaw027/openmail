@@ -790,6 +790,12 @@ export default {
     adminLastUsed: 'Last used',
     adminNever: 'Never',
     adminEmpty: 'No codes issued yet.',
+    adminAutoLicensedHint:
+      'This device is listed in OPENMAIL_ADMIN_DEVICE_IDS, so quotas are already unlimited — no license code needed.',
+    adminInstanceHint:
+      'Unlicensed caps: local {local} · cloud {cloud} · polls/hour {poll}. Admission: {admission}. Change caps or the admin list in the server .env, then recreate the container.',
+    adminAdmissionFirstTrust: 'first device trusted, later need approval',
+    adminAdmissionOpen: 'open registration',
   },
   me: {
     mailsLocalSubtitle: 'Search local mail history (no login)',

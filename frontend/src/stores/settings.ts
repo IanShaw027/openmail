@@ -66,6 +66,12 @@ export interface PublicQuota {
   mail_retention_days?: number
 }
 
+export interface QuotaDefaults {
+  max_local_accounts: number
+  max_cloud_accounts: number
+  max_poll_per_hour: number
+}
+
 function defaults(): UserSettings {
   return {
     retentionDays: 90,
@@ -210,6 +216,7 @@ function safeSetItem(key: string, value: string): boolean {
 export const useSettingsStore = defineStore('settings', () => {
   const s = ref<UserSettings>(load())
   const quota = ref<PublicQuota | null>(null)
+  const quotaDefaults = ref<QuotaDefaults | null>(null)
   const publicConfigLoaded = ref(false)
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -358,6 +365,8 @@ export const useSettingsStore = defineStore('settings', () => {
       const data = await apiRequest<{
         quota?: Partial<PublicQuota>
         licensed?: boolean
+        quota_defaults?: Partial<QuotaDefaults>
+        device_admission?: string
       }>('/api/config/public')
       const snap: PublicQuota = {
         licensed: Boolean(data.licensed ?? data.quota?.licensed),
@@ -378,6 +387,14 @@ export const useSettingsStore = defineStore('settings', () => {
         mail_retention_days: data.quota?.mail_retention_days,
       }
       quota.value = snap
+      const d = data.quota_defaults
+      if (d && typeof d.max_local_accounts === 'number') {
+        quotaDefaults.value = {
+          max_local_accounts: d.max_local_accounts,
+          max_cloud_accounts: d.max_cloud_accounts ?? 0,
+          max_poll_per_hour: d.max_poll_per_hour ?? 0,
+        }
+      }
       publicConfigLoaded.value = true
       return snap
     } catch {
@@ -412,6 +429,7 @@ export const useSettingsStore = defineStore('settings', () => {
   return {
     s,
     quota,
+    quotaDefaults,
     publicConfigLoaded,
     markFetched,
     pruneFetchMaps,

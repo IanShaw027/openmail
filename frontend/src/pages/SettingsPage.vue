@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/settings'
 import { useVaultStore } from '@/stores/vault'
@@ -207,7 +207,9 @@ function saveLicense() {
   setLicenseToken(licenseInput.value)
   settings.s.licenseToken = licenseInput.value
   flashMsg(t('settings.saved'))
-  void loadConfig()
+  void loadConfig().then(() => {
+    void loadAdminLicenses()
+  })
 }
 
 // Fetch-policy fields are edited as drafts and only committed on save. Binding
@@ -365,6 +367,8 @@ function onFactoryReset() {
   vault.factoryResetLocal()
 }
 
+let licensePoll: ReturnType<typeof setInterval> | null = null
+
 onMounted(async () => {
   licenseInput.value = getLicenseToken()
   // Prefer 0 (no idle lock) for existing users who still have old default 30
@@ -374,6 +378,13 @@ onMounted(async () => {
   await vault.refreshDeviceStatus()
   void loadDevices()
   void loadAdminLicenses()
+  licensePoll = setInterval(() => {
+    void loadAdminLicenses()
+  }, 15_000)
+})
+
+onUnmounted(() => {
+  if (licensePoll) clearInterval(licensePoll)
 })
 </script>
 
@@ -650,41 +661,61 @@ onMounted(async () => {
 
       <section class="block">
         <h2>{{ t('settings.licenseTitle') }}</h2>
-        <p class="hint">{{ t('settings.licenseHint') }}</p>
-        <div class="field">
-          <label class="label">{{ t('settings.licenseToken') }}</label>
-          <input
-            v-model="licenseInput"
-            class="input mono"
-            type="text"
-            spellcheck="false"
-            :placeholder="t('settings.licenseTokenPh')"
-          />
-        </div>
-        <button type="button" class="btn btn-outline btn-sm" @click="saveLicense">
-          {{ t('settings.saveLicense') }}
-        </button>
-        <div v-if="quota" class="quota">
-          <div>
-            {{ t('settings.licensed') }}:
-            <strong :class="quota.licensed ? 'ok' : ''">{{
-              quota.licensed ? t('common.yes') : t('common.no')
-            }}</strong>
+        <template v-if="vault.isAdmin">
+          <p class="hint">{{ t('settings.adminAutoLicensedHint') }}</p>
+          <div v-if="quota" class="quota">
+            <div>
+              {{ t('settings.licensed') }}:
+              <strong class="ok">{{ t('common.yes') }}</strong>
+            </div>
+            <div class="hint">{{ t('settings.quotaUnlimited') }}</div>
           </div>
-          <div v-if="quota.licensed" class="hint">{{ t('settings.quotaUnlimited') }}</div>
-          <div v-else>
-            {{ t('settings.quotaLocal') }}: {{ quota.max_local_accounts ?? '—' }} ·
-            {{ t('settings.quotaCloud') }}:
-            {{ quota.cloud_used ?? 0 }}/{{ quota.max_cloud_accounts ?? '—' }} ·
-            {{ t('settings.quotaPoll') }}: {{ quota.poll_used_hour ?? 0 }}/{{ quota.max_poll_per_hour ?? '—' }}
+        </template>
+        <template v-else>
+          <p class="hint">{{ t('settings.licenseHint') }}</p>
+          <div class="field">
+            <label class="label">{{ t('settings.licenseToken') }}</label>
+            <input
+              v-model="licenseInput"
+              class="input mono"
+              type="text"
+              spellcheck="false"
+              :placeholder="t('settings.licenseTokenPh')"
+            />
           </div>
-          <p class="hint">{{ t('settings.quotaHint') }}</p>
-        </div>
+          <button type="button" class="btn btn-outline btn-sm" @click="saveLicense">
+            {{ t('settings.saveLicense') }}
+          </button>
+          <div v-if="quota" class="quota">
+            <div>
+              {{ t('settings.licensed') }}:
+              <strong :class="quota.licensed ? 'ok' : ''">{{
+                quota.licensed ? t('common.yes') : t('common.no')
+              }}</strong>
+            </div>
+            <div v-if="quota.licensed" class="hint">{{ t('settings.quotaUnlimited') }}</div>
+            <div v-else>
+              {{ t('settings.quotaLocal') }}: {{ quota.max_local_accounts ?? '—' }} ·
+              {{ t('settings.quotaCloud') }}:
+              {{ quota.cloud_used ?? 0 }}/{{ quota.max_cloud_accounts ?? '—' }} ·
+              {{ t('settings.quotaPoll') }}: {{ quota.poll_used_hour ?? 0 }}/{{ quota.max_poll_per_hour ?? '—' }}
+            </div>
+            <p class="hint">{{ t('settings.quotaHint') }}</p>
+          </div>
+        </template>
       </section>
 
       <section v-if="vault.isAdmin" class="block">
         <h2>{{ t('settings.adminLicensesTitle') }}</h2>
         <p class="hint">{{ t('settings.adminLicensesHint') }}</p>
+        <div v-if="settings.quotaDefaults" class="hint">
+          {{ t('settings.adminInstanceHint', {
+            admission: vault.deviceAdmission === 'open' ? t('settings.adminAdmissionOpen') : t('settings.adminAdmissionFirstTrust'),
+            local: settings.quotaDefaults.max_local_accounts,
+            cloud: settings.quotaDefaults.max_cloud_accounts,
+            poll: settings.quotaDefaults.max_poll_per_hour,
+          }) }}
+        </div>
         <div class="field">
           <label class="label">{{ t('settings.adminNote') }}</label>
           <input

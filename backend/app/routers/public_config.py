@@ -26,6 +26,7 @@ def public_config(
     x_device_ts: str | None = Header(default=None, alias="X-Device-Ts"),
     x_device_sign: str | None = Header(default=None, alias="X-Device-Sign"),
     x_device_body_sha256: str | None = Header(default=None, alias="X-Device-Body-Sha256"),
+    x_device_nonce: str | None = Header(default=None, alias="X-Device-Nonce"),
 ) -> dict:
     """Frontend bootstrap: quotas, flags, license status.
 
@@ -53,6 +54,7 @@ def public_config(
             f"{request.url.path}?{request.url.query}" if request.url.query else request.url.path,
             require_hmac=True,
             body_sha256=body_sha256,
+            nonce=x_device_nonce,
         )
         # Mismatched body-hash header must not authenticate even if legacy sig matches
         if ok and header_body_ok:
@@ -80,6 +82,11 @@ def public_config(
         "fetch_lookback_days": settings.fetch_default_lookback_days,
         "mail_retention_days": settings.mail_retention_days,
         "quota": snap,
+        "quota_defaults": {
+            "max_local_accounts": settings.quota_max_local_accounts,
+            "max_cloud_accounts": settings.quota_max_cloud_accounts,
+            "max_poll_per_hour": settings.quota_max_poll_per_hour,
+        },
         "licensed": is_licensed(
             device_id=x_device_id if cloud_used is not None else None,
             license_token=x_license_token,

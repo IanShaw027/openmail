@@ -23,6 +23,7 @@ def _pair():
 
 
 def _sign(secret: bytes, method: str, path: str, body: bytes | str | None = None) -> dict[str, str]:
+    """Match the browser: {ts}.{METHOD}.{path}.{body_sha256}.{nonce}."""
     if body is None:
         body_bytes = b""
     elif isinstance(body, str):
@@ -31,12 +32,14 @@ def _sign(secret: bytes, method: str, path: str, body: bytes | str | None = None
         body_bytes = body
     body_hash = hashlib.sha256(body_bytes).hexdigest()
     ts = str(int(time.time()))
-    msg = f"{ts}.{method.upper()}.{path}.{body_hash}".encode()
+    nonce = os.urandom(8).hex()
+    msg = f"{ts}.{method.upper()}.{path}.{body_hash}.{nonce}".encode()
     sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
     return {
         "X-Device-Ts": ts,
         "X-Device-Sign": sig,
         "X-Device-Body-Sha256": body_hash,
+        "X-Device-Nonce": nonce,
     }
 
 
@@ -205,3 +208,22 @@ def test_admin_routes_require_hmac(client: TestClient, monkeypatch):
     _as_admin(monkeypatch, pid)
     r = client.get("/api/admin/licenses", headers={"X-Device-Id": pid})
     assert r.status_code == 401
+
+
+def test_admin_device_is_licensed_without_token(client: TestClient, monkeypatch):
+    headers, pid, _ = _register(client)
+    _as_admin(monkeypatch, pid)
+    r = client.get("/api/config/public", headers=headers("GET", "/api/config/public"))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["licensed"] is True
+    assert body["quota"]["licensed"] is True
+    assert "cloud_used" in (body.get("quota") or {})
+
+
+def test_non_admin_trusted_is_not_auto_licensed(client: TestClient, monkeypatch):
+    headers, _pid, _ = _register(client)
+    _as_admin(monkeypatch, "vk_not_this_device_xxxxxxxxxxxxxxxxxxxx")
+    r = client.get("/api/config/public", headers=headers("GET", "/api/config/public"))
+    assert r.status_code == 200
+    assert r.json()["licensed"] is False
