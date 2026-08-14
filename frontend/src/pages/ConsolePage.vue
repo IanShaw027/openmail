@@ -36,6 +36,7 @@ import { getDeviceId, getLicenseToken, setLicenseToken } from '@/utils/device'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
 import { formatLinkPreview } from '@/utils/emailLinks'
 import EmailHtmlFrame from '@/components/EmailHtmlFrame.vue'
+import { htmlHasRemoteImages } from '@/utils/emailHtmlFrameDoc'
 import {
   type MailGroup,
   DEFAULT_GROUP_ID,
@@ -427,6 +428,20 @@ const detailHtml = computed(() => {
   const html = (m.body_html || '').trim()
   return html ? sanitizeHtml(html) : ''
 })
+
+const allowRemoteImages = ref(false)
+watch(
+  () => selectedMessage.value?.id,
+  () => {
+    allowRemoteImages.value = false
+  },
+)
+const showRemoteImagesBtn = computed(
+  () =>
+    Boolean(detailHtml.value) &&
+    !allowRemoteImages.value &&
+    htmlHasRemoteImages(detailHtml.value),
+)
 
 /** Confirm then open unwrapped http(s) links from email HTML (tracking redirectUrl etc.). */
 function confirmMailNavigate(url: string) {
@@ -3827,6 +3842,15 @@ onUnmounted(() => {
                 </h3>
                 <div class="detail-head-actions">
                   <button
+                    v-if="showRemoteImagesBtn"
+                    type="button"
+                    class="btn btn-ghost btn-xs"
+                    :title="t('console.showRemoteImages')"
+                    @click="allowRemoteImages = true"
+                  >
+                    {{ t('console.showRemoteImages') }}
+                  </button>
+                  <button
                     type="button"
                     class="btn btn-ghost btn-xs"
                     :title="t('console.copyBody')"
@@ -3867,6 +3891,7 @@ onUnmounted(() => {
                   v-if="detailHtml"
                   class="detail-body detail-html"
                   :html="detailHtml"
+                  :allow-remote-images="allowRemoteImages"
                   :confirm-navigate="confirmMailNavigate"
                   :on-blocked="onMailLinkBlocked"
                 />
@@ -4368,6 +4393,15 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
           </h2>
           <div class="body-modal-actions">
             <button
+              v-if="showRemoteImagesBtn"
+              type="button"
+              class="btn btn-ghost btn-sm"
+              :title="t('console.showRemoteImages')"
+              @click="allowRemoteImages = true"
+            >
+              {{ t('console.showRemoteImages') }}
+            </button>
+            <button
               type="button"
               class="btn btn-ghost btn-sm"
               @click="doCopy('modal-body', detailText || selectedMessage.subject || '')"
@@ -4401,6 +4435,7 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
             v-if="detailHtml"
             class="detail-body detail-html"
             :html="detailHtml"
+            :allow-remote-images="allowRemoteImages"
             :confirm-navigate="confirmMailNavigate"
             :on-blocked="onMailLinkBlocked"
           />

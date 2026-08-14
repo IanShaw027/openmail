@@ -109,9 +109,9 @@ const PER_MAILBOX_CAP = 900
  * Persist-time body limits (chars). Server also slims on fetch; this covers
  * already-cached fat marketing HTML so vault localStorage does not quota-blow.
  */
-const PERSIST_HTML_SOFT = 12_000
-const PERSIST_HTML_HARD = 48_000
-const PERSIST_TEXT_HARD = 16_000
+const PERSIST_HTML_SOFT = 80_000
+const PERSIST_HTML_HARD = 120_000
+const PERSIST_TEXT_HARD = 24_000
 const PERSIST_PREVIEW_HARD = 280
 
 type CacheMap = Record<string, MailMessage[]>
@@ -136,10 +136,8 @@ export function slimMessageForPersist(m: MailMessage, aggressive = false): MailM
     html = html
       .replace(/<!--[\s\S]*?-->/g, '')
       .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
-      .replace(/<svg[\s\S]*?<\/svg>/gi, '')
       .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
-      // data: URIs (base64 images) — main quota killer
+      // data: URIs (base64 images) — main quota killer. Keep <style> for layout.
       .replace(
         /(?:src|href|background|data-src|poster)\s*=\s*(['"])\s*data:[^'"]{200,}\1/gi,
         'src="about:blank"',
@@ -149,7 +147,7 @@ export function slimMessageForPersist(m: MailMessage, aggressive = false): MailM
 
     if (html.length > PERSIST_HTML_SOFT || aggressive) {
       html = html
-        .replace(/\sstyle\s*=\s*(['"]).*?\1/gi, '')
+        .replace(/<svg[\s\S]*?<\/svg>/gi, '')
         .replace(/\s(?:class|id)\s*=\s*(['"]).*?\1/gi, '')
         .replace(/(?:src|href)\s*=\s*(['"])[^'"]{800,}\1/gi, 'href="#"')
     }

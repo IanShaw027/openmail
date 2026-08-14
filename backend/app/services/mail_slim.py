@@ -10,11 +10,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Soft: run heavy strip when HTML exceeds this (chars)
-HTML_SOFT_BYTES = 12_000
-# Hard caps after slimming (chars) — still readable for codes + short mail
-HTML_HARD_MAX = 48_000
-TEXT_HARD_MAX = 16_000
+# Soft: only then drop class/id / huge attrs. Keep layout CSS below this.
+HTML_SOFT_BYTES = 80_000
+# Hard caps after slimming (chars). Quota persist can still drop HTML later.
+HTML_HARD_MAX = 120_000
+TEXT_HARD_MAX = 24_000
 PREVIEW_MAX = 280
 
 # Always drop these blocks (case-insensitive, non-greedy enough for mail)
@@ -62,28 +62,23 @@ def slim_html(html: str | None, *, hard_max: int = HTML_HARD_MAX) -> str | None:
     if not s.strip():
         return None
 
-    # Always remove non-content blocks
+    # Always remove active / non-display blocks. Keep <style> so HTML mail
+    # still lays out; data-URI images are the quota problem, not CSS.
     s = _RE_COMMENT.sub("", s)
     s = _RE_SCRIPT.sub("", s)
-    s = _RE_STYLE.sub("", s)
-    s = _RE_SVG.sub("", s)
     s = _RE_NOSCRIPT.sub("", s)
     s = _RE_DATA_URI.sub(r'src="about:blank"', s)
     s = _RE_DATA_URI_CSS.sub("none", s)
     s = _RE_TRACKING_IMG.sub("", s)
 
-    # Soft threshold: more aggressive cleanup
+    # Soft threshold: drop huge decorative SVG / class soup, keep <style>
     if len(s) > HTML_SOFT_BYTES:
-        # Drop remaining src with very long query (open trackers)
+        s = _RE_SVG.sub("", s)
         s = re.sub(
             r"""(?is)(src|href)\s*=\s*(['"])[^'"]{800,}\2""",
             r'\1="#"',
             s,
         )
-        # Remove style= attributes (often huge layout spam)
-        s = re.sub(r"""(?is)\sstyle\s*=\s*(['"]).*?\1""", "", s)
-        s = re.sub(r"(?is)\sstyle\s*=\s*[^\s>]+", "", s)
-        # Drop class/id noise somewhat
         s = re.sub(r"""(?is)\s(?:class|id)\s*=\s*(['"]).*?\1""", "", s)
         s = _RE_WS.sub("  ", s)
 

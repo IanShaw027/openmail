@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EMAIL_FRAME_MSG, buildEmailFrameSrcdoc } from '@/utils/emailHtmlFrameDoc'
+import { EMAIL_FRAME_MSG, buildEmailFrameSrcdoc, htmlHasRemoteImages } from '@/utils/emailHtmlFrameDoc'
 
 describe('buildEmailFrameSrcdoc', () => {
   it('embeds the body HTML verbatim inside the document', () => {
@@ -53,5 +53,10 @@ describe('buildEmailFrameSrcdoc', () => {
   it('allows remote https images when opted in', () => {
     const doc = buildEmailFrameSrcdoc('<p>x</p>', { allowRemoteImages: true })
     expect(doc).toMatch(/img-src data: https: cid:/)
+  })
+
+  it('detects remote http(s) images for the header control', () => {
+    expect(htmlHasRemoteImages('<img src="https://cdn.example/a.png">')).toBe(true)
+    expect(htmlHasRemoteImages('<img src="cid:part1">')).toBe(false)
   })
 })

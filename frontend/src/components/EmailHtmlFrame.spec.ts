@@ -60,4 +60,20 @@ describe('EmailHtmlFrame sandbox', () => {
     const wrapper = mountFrame('<img src="https://evil.test/x.png">')
     expect(wrapper.get('iframe').attributes('srcdoc')).not.toMatch(/img-src data: https:/)
   })
+
+  it('does not put the remote-image control over the body', () => {
+    const wrapper = mountFrame('<img src="https://evil.test/x.png">')
+    expect(wrapper.find('.remote-img-btn').exists()).toBe(false)
+  })
+
+  it('opts into remote images when the parent says so', () => {
+    const wrapper = mount(EmailHtmlFrame, {
+      props: {
+        html: '<img src="https://evil.test/x.png">',
+        confirmNavigate: () => true,
+        allowRemoteImages: true,
+      },
+    })
+    expect(wrapper.get('iframe').attributes('srcdoc')).toMatch(/img-src data: https: cid:/)
+  })
 })

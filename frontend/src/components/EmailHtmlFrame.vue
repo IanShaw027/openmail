@@ -12,11 +12,10 @@
  * directly and skip the confirm dialog entirely, defeating the reason this
  * frame exists.
  *
- * Remote https images are off by default (tracking pixels). The user can
- * opt in per message; switching mail resets the choice.
+ * Remote https images are off by default (tracking pixels). The parent
+ * owns the opt-in control so it can sit in the pane header, not the body.
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { i18n } from '@/i18n'
 import { openEmailHref, type EmailLinkClickOptions } from '@/utils/emailLinks'
 import { EMAIL_FRAME_MSG, buildEmailFrameSrcdoc } from '@/utils/emailHtmlFrameDoc'
 
@@ -24,16 +23,13 @@ const props = defineProps<{
   html: string
   confirmNavigate: EmailLinkClickOptions['confirmNavigate']
   onBlocked?: EmailLinkClickOptions['onBlocked']
+  allowRemoteImages?: boolean
 }>()
 
-function t(key: string): string {
-  return String((i18n.global as { t: (k: string) => unknown }).t(key))
-}
 const iframeRef = ref<HTMLIFrameElement | null>(null)
 const heightPx = ref(120)
-const allowRemoteImages = ref(false)
 const srcdoc = computed(() =>
-  buildEmailFrameSrcdoc(props.html || '', { allowRemoteImages: allowRemoteImages.value }),
+  buildEmailFrameSrcdoc(props.html || '', { allowRemoteImages: Boolean(props.allowRemoteImages) }),
 )
 
 function onMessage(ev: MessageEvent) {
@@ -68,7 +64,6 @@ watch(
   () => props.html,
   () => {
     heightPx.value = 120
-    allowRemoteImages.value = false
   },
 )
 </script>
@@ -84,14 +79,6 @@ watch(
       referrerpolicy="no-referrer"
       title="Email body"
     />
-    <button
-      v-if="!allowRemoteImages"
-      type="button"
-      class="remote-img-btn"
-      @click="allowRemoteImages = true"
-    >
-      {{ t('console.showRemoteImages') }}
-    </button>
   </div>
 </template>
 
@@ -105,16 +92,5 @@ watch(
   border: 0;
   background: transparent;
   min-height: 80px;
-}
-.remote-img-btn {
-  margin-top: 8px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--link, #1d4ed8);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  text-decoration: underline;
 }
 </style>

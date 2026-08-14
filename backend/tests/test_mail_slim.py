@@ -10,22 +10,24 @@ from app.services.mail_slim import (
 )
 
 
-def test_strips_script_style_and_base64_image():
+def test_strips_script_and_base64_image_but_keeps_layout_css():
     huge_b64 = "A" * 5000
     raw = f"""
     <html><head><style>.x{{color:red}}</style>
     <script>alert(1)</script></head>
     <body>
-      <p>Your code is 482910</p>
+      <p style="font-size:16px">Your code is 482910</p>
       <img src="data:image/png;base64,{huge_b64}" width="600"/>
       <img width="1" height="1" src="https://track.example/pixel?x=1"/>
     </body></html>
     """
     out = slim_html(raw)
     assert out is not None
-    assert "script" not in out.lower() or "<script" not in out.lower()
+    assert "<script" not in out.lower()
     assert "data:image" not in out
     assert "482910" in out
+    assert "<style>" in out.lower()
+    assert "font-size:16px" in out
     assert len(out) < len(raw)
 
 

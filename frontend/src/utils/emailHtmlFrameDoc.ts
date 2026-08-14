@@ -2,6 +2,10 @@
 
 export const EMAIL_FRAME_MSG = 'openmail-email-frame'
 
+export function htmlHasRemoteImages(html: string): boolean {
+  return /<img\b[^>]*\bsrc\s*=\s*['"]https?:\/\//i.test(html || '')
+}
+
 export function buildEmailFrameSrcdoc(
   bodyHtml: string,
   opts?: { allowRemoteImages?: boolean },

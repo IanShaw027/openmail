@@ -8,6 +8,7 @@ import { useToast } from '@/composables/useToast'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
 import { formatLinkPreview } from '@/utils/emailLinks'
 import EmailHtmlFrame from '@/components/EmailHtmlFrame.vue'
+import { htmlHasRemoteImages } from '@/utils/emailHtmlFrameDoc'
 import { formatInUserTz, formatInUserTzTitle } from '@/utils/datetime'
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
 import { useSettingsStore } from '@/stores/settings'
@@ -132,6 +133,20 @@ const detailHtml = computed(() => {
   if (!m?.body_html?.trim()) return ''
   return sanitizeHtml(m.body_html)
 })
+
+const allowRemoteImages = ref(false)
+watch(
+  () => selected.value && rowKey(selected.value),
+  () => {
+    allowRemoteImages.value = false
+  },
+)
+const showRemoteImagesBtn = computed(
+  () =>
+    Boolean(detailHtml.value) &&
+    !allowRemoteImages.value &&
+    htmlHasRemoteImages(detailHtml.value),
+)
 
 function confirmMailNavigate(url: string) {
   return window.confirm(t('console.openLinkConfirm', { url: formatLinkPreview(url), full: url }))
@@ -298,7 +313,18 @@ async function copyCode(code?: string | null) {
       <div class="detail card-solid">
         <Transition name="fade" mode="out-in">
           <div v-if="selected" :key="rowKey(selected)" class="detail-inner">
-            <h2>{{ selected.subject || t('console.mailNoSubject') }}</h2>
+            <div class="detail-head">
+              <h2>{{ selected.subject || t('console.mailNoSubject') }}</h2>
+              <button
+                v-if="showRemoteImagesBtn"
+                type="button"
+                class="btn btn-ghost btn-xs"
+                :title="t('console.showRemoteImages')"
+                @click="allowRemoteImages = true"
+              >
+                {{ t('console.showRemoteImages') }}
+              </button>
+            </div>
             <p class="meta">
               {{ selected.accountEmail }}
               · {{ selected.from }}
@@ -320,6 +346,7 @@ async function copyCode(code?: string | null) {
               v-if="detailHtml"
               class="body-html"
               :html="detailHtml"
+              :allow-remote-images="allowRemoteImages"
               :confirm-navigate="confirmMailNavigate"
               :on-blocked="onMailLinkBlocked"
             />
@@ -515,9 +542,17 @@ async function copyCode(code?: string | null) {
   padding: 16px;
   min-height: 0;
 }
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
+}
 .detail h2 {
   font-size: 16px;
-  margin-bottom: 8px;
+  margin: 0;
+  flex: 1;
+  min-width: 0;
 }
 .body-text {
   white-space: pre-wrap;

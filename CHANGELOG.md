@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears it. Existing mail is baselined so history is not marked new.
 - **Thunderbird-style Microsoft tokens can fetch via IMAP XOAUTH2** when
   Graph Mail.Read is missing, and the chosen transport is remembered.
+- **“Show remote images” sits in the mail pane header**, not over the body.
+  HTML mail keeps `<style>` and layout attributes; only scripts, tracking
+  pixels, and huge data-URI images are stripped unless storage quota forces
+  a later drop.
 
 ## [0.3.7] — 2026-08-13
 
