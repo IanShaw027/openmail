@@ -10,7 +10,10 @@ export function mailDataUpdatedAt(
 }
 
 /** Account-row metadata clock (note, tags, secrets). */
-export function accountRowUpdatedAt(acc: { updatedAt?: number }): number | undefined {
+export function accountRowUpdatedAt(acc: {
+  updatedAt?: number
+  lastSyncAt?: number
+}): number | undefined {
   return isFinitePositive(acc.updatedAt) ? acc.updatedAt : undefined
 }
 
