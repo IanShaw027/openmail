@@ -1910,7 +1910,7 @@ async function fetchOne(
         pendingBodyIds: result.pending_body_ids,
         uidvalidity: result.uidvalidity,
         accessToken: accessTokenFromFetchResult(result),
-        error: result.error,
+        error: result.error || undefined,
       }
     }
 
@@ -1927,7 +1927,7 @@ async function fetchOne(
       pendingBodyIds: result.pending_body_ids,
       uidvalidity: result.uidvalidity,
       accessToken: accessTokenFromFetchResult(result),
-      error: result.error,
+      error: result.error || undefined,
     }
   } catch (e) {
     if (isAbortError(e) || opts.softFail) {
