@@ -37,10 +37,8 @@ import { sanitizeHtml } from '@/utils/sanitizeHtml'
 import { formatLinkPreview } from '@/utils/emailLinks'
 import EmailHtmlFrame from '@/components/EmailHtmlFrame.vue'
 import { htmlHasRemoteImages } from '@/utils/emailHtmlFrameDoc'
-import {
-  latestCodePatchForFetch,
-  latestInboxVerificationCode,
-} from '@/utils/latestInboxCode'
+import { latestCodePatchForFetch, latestInboxVerificationCode } from '@/utils/latestInboxCode'
+import { isCookieFetchProvider, resolveFetchProvider } from '@/utils/fetchProvider'
 import { accessTokenFromFetchResult, withOAuthAccessToken } from '@/utils/oauthAccessToken'
 import {
   type PendingBodiesMap,
@@ -589,8 +587,12 @@ function loadMessagesFromCache(
   lastFetchEmpty.value = false
 }
 
-function errorMessage(e: unknown, fallback: string): string {
-  if (isTimeoutError(e)) return t('console.requestTimeout')
+function errorMessage(e: unknown, fallback: string, provider?: string): string {
+  if (isTimeoutError(e)) {
+    return isCookieFetchProvider(provider)
+      ? t('console.requestTimeoutCookie')
+      : t('console.requestTimeout')
+  }
   if (isAbortError(e)) return t('console.requestCancelled')
   if (e instanceof ApiError) {
     if (e.status === 404) return t('console.apiNotReady', { detail: e.message })
@@ -802,7 +804,7 @@ async function revalidateOneDraft(row: ImportDraftRow) {
     const result = await proxyFetchMail(
       {
         email: row.partial.email,
-        provider: row.partial.type === 'unknown' ? 'cookie' : row.partial.type,
+        provider: resolveFetchProvider(row.partial),
         folder: 'inbox',
         quick: true,
         password: row.partial.password || row.partial.authCode,
@@ -849,7 +851,7 @@ async function revalidateOneDraft(row: ImportDraftRow) {
       return
     }
     row.checkStatus = 'error'
-    row.checkError = errorMessage(e, t('console.fetchFailed'))
+    row.checkError = errorMessage(e, t('console.fetchFailed'), resolveFetchProvider(row.partial))
   }
 }
 
@@ -880,7 +882,7 @@ async function validateImportDrafts() {
         const result = await proxyFetchMail(
           {
             email: row.partial.email,
-            provider: row.partial.type === 'unknown' ? 'cookie' : row.partial.type,
+            provider: resolveFetchProvider(row.partial),
             folder: 'inbox',
             quick: true,
             password: row.partial.password || row.partial.authCode,
@@ -927,7 +929,7 @@ async function validateImportDrafts() {
           return
         }
         row.checkStatus = 'error'
-        row.checkError = errorMessage(e, t('console.fetchFailed'))
+        row.checkError = errorMessage(e, t('console.fetchFailed'), resolveFetchProvider(row.partial))
       }
     })
   } finally {
@@ -1636,9 +1638,8 @@ type FetchOneResult = {
   error?: string
 }
 
-function isCookieHeavyAccount(acc: Pick<MailAccount, 'type'>): boolean {
-  const t = String(acc.type || '').toLowerCase()
-  return t === 'cookie' || t === 'unknown'
+function isCookieHeavyAccount(acc: Pick<MailAccount, 'type' | 'email'>): boolean {
+  return isCookieFetchProvider(resolveFetchProvider(acc))
 }
 
 function isHardAuthError(err: string | null | undefined): boolean {
@@ -1761,9 +1762,7 @@ async function fetchOne(
       const provider =
         src.type === 'http_api' || parent?.type === 'http_api'
           ? 'http_api'
-          : src.type === 'unknown'
-            ? 'cookie'
-            : src.type
+          : resolveFetchProvider(src)
       const credential =
         provider === 'http_api'
           ? {
@@ -1935,7 +1934,7 @@ async function fetchOne(
     }
     await accounts.patchAccount(acc.id, {
       status: 'error',
-      lastError: errorMessage(e, t('console.fetchFailed')),
+      lastError: errorMessage(e, t('console.fetchFailed'), resolveFetchProvider(acc)),
     })
     if (manageUi) {
       const mayUpdatePanel =
@@ -1943,7 +1942,7 @@ async function fetchOne(
       if (mayUpdatePanel) {
         if (!messages.value.length) loadMessagesFromCache(acc)
         lastFetchOk.value = false
-        flashMsg(errorMessage(e, t('console.fetchFailed')), 'danger')
+        flashMsg(errorMessage(e, t('console.fetchFailed'), resolveFetchProvider(acc)), 'danger')
       }
     }
     return { ok: false, count: 0 }

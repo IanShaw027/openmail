@@ -123,9 +123,27 @@ const ALLOWED_STYLE_PROPS = new Set([
   'letter-spacing',
   'text-indent',
   'opacity',
+  'background',
+  'border-collapse',
+  'border-spacing',
+  'table-layout',
+  'float',
+  'box-sizing',
+  'list-style',
+  'list-style-type',
 ])
 
-const ALLOWED_DISPLAY = new Set(['block', 'inline', 'inline-block'])
+const ALLOWED_DISPLAY = new Set([
+  'block',
+  'inline',
+  'inline-block',
+  'none',
+  'table',
+  'table-row',
+  'table-cell',
+  'table-header-group',
+  'list-item',
+])
 
 /**
  * Strip dangerous CSS from style attribute.
@@ -183,6 +201,21 @@ function sanitizeStyle(style: string): string {
   return kept.join('; ')
 }
 
+/** Keep email <style> layout; drop fetches and script-like CSS. */
+function sanitizeStyleSheet(css: string): string {
+  if (!css) return ''
+  let s = css.replace(/\\[0-9a-fA-F]{1,6}\s?/g, '').replace(/\\./g, '')
+  s = s.replace(/@import[^;{}]*;?/gi, '')
+  s = s.replace(/url\s*\([^)]*\)?/gi, 'none')
+  s = s.replace(/expression\s*\([^)]*\)?/gi, '')
+  s = s.replace(/-moz-binding\s*:[^;{}]*/gi, '')
+  s = s.replace(/behavior\s*:[^;{}]*/gi, '')
+  s = s.replace(/javascript\s*:/gi, '')
+  s = s.replace(/vbscript\s*:/gi, '')
+  s = s.replace(/data\s*:/gi, '')
+  return s.trim()
+}
+
 function isSafeUrl(raw: string): boolean {
   const v = raw.trim()
   if (!v) return false
@@ -230,10 +263,18 @@ function walk(node: Node, out: DocumentFragment, doc: Document) {
   const el = node as Element
   const tag = el.tagName.toLowerCase()
 
-  // Drop script/style/svg/math/iframe etc. entirely (including children)
+  if (tag === 'style') {
+    const css = sanitizeStyleSheet(el.textContent || '')
+    if (!css) return
+    const neo = doc.createElement('style')
+    neo.textContent = css
+    out.appendChild(neo)
+    return
+  }
+
+  // Drop script/svg/math/iframe etc. entirely (including children)
   if (
     tag === 'script' ||
-    tag === 'style' ||
     tag === 'iframe' ||
     tag === 'object' ||
     tag === 'embed' ||
@@ -311,24 +352,23 @@ function walk(node: Node, out: DocumentFragment, doc: Document) {
 export function sanitizeHtml(html: string): string {
   if (!html || typeof html !== 'string') return ''
   if (typeof DOMParser === 'undefined') {
-    // SSR / non-browser fallback: aggressive strip
     return html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<svg[\s\S]*?<\/svg>/gi, '')
       .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
       .replace(/javascript\s*:/gi, '')
   }
   try {
-    const doc = new DOMParser().parseFromString(
-      `<div id="om-root">${html}</div>`,
-      'text/html',
-    )
-    const root = doc.getElementById('om-root')
-    if (!root) return ''
+    const doc = new DOMParser().parseFromString(html, 'text/html')
     const out = doc.createDocumentFragment()
-    for (const child of Array.from(root.childNodes)) {
-      walk(child, out, doc)
+    for (const style of Array.from(doc.head?.querySelectorAll('style') || [])) {
+      walk(style, out, doc)
+    }
+    const body = doc.body
+    if (body) {
+      for (const child of Array.from(body.childNodes)) {
+        walk(child, out, doc)
+      }
     }
     const wrap = doc.createElement('div')
     wrap.appendChild(out)

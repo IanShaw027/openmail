@@ -1,5 +1,7 @@
 import { apiRequest, ApiError } from '@/api/client'
 import type { AccountType } from '@/types/account'
+import { resolveDomainProfile } from '@/utils/domainBrand'
+import { resolveFetchProvider } from '@/utils/fetchProvider'
 
 export interface MailMessage {
   id: string
@@ -324,7 +326,7 @@ export function credentialFromLocal(acc: {
     if (acc.password) c.password = acc.password
     return Object.keys(c).length ? c : null
   }
-  // cookie / unknown (mail.com): attach rolling session so server can restore
+  // cookie / unknown: mail.com keeps cookies; Gmail/IMAP domains get host hints
   if (acc.type === 'cookie' || acc.type === 'unknown') {
     const c: Record<string, unknown> = {}
     if (acc.sessionCookies?.length) c.cookies = acc.sessionCookies
@@ -332,6 +334,11 @@ export function credentialFromLocal(acc: {
     if (acc.password) c.password = acc.password
     if (acc.smtpHost) c.smtp_host = acc.smtpHost
     if (acc.smtpPort) c.smtp_port = acc.smtpPort
+    if (resolveFetchProvider(acc) === 'imap') {
+      const profile = resolveDomainProfile(acc.email || '')
+      if (profile.imapHost) c.imap_host = acc.imapHost || profile.imapHost
+      if (profile.imapPort) c.imap_port = acc.imapPort || profile.imapPort
+    }
     return Object.keys(c).length ? c : null
   }
   return null
