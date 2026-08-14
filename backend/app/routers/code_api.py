@@ -163,6 +163,7 @@ def public_code_fetch(
         custom_regex=regex_q,
         settings=settings,
         use_cache=use_cache,
+        egress_mode="bulk",
     )
 
     if fmt in ("text", "plain"):

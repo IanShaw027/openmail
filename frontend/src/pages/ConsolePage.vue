@@ -38,6 +38,18 @@ import { formatLinkPreview } from '@/utils/emailLinks'
 import EmailHtmlFrame from '@/components/EmailHtmlFrame.vue'
 import { htmlHasRemoteImages } from '@/utils/emailHtmlFrameDoc'
 import {
+  latestCodePatchForFetch,
+  latestInboxVerificationCode,
+} from '@/utils/latestInboxCode'
+import { accessTokenFromFetchResult, withOAuthAccessToken } from '@/utils/oauthAccessToken'
+import {
+  type PendingBodiesMap,
+  clearPendingBodies,
+  messagesMissingBodies,
+  peekPendingBodies,
+  rememberPendingBodies,
+} from '@/utils/pendingBodies'
+import {
   type MailGroup,
   DEFAULT_GROUP_ID,
   loadGroups,
@@ -47,6 +59,7 @@ import {
 import UiSelect, { type UiSelectOption } from '@/components/UiSelect.vue'
 import { useTwoFaStore } from '@/stores/twofa'
 import { mapPool } from '@/utils/mapPool'
+import { shouldRefreshOpenFolder, shouldUseHeaderBodyPhases } from '@/utils/fetchPhases'
 import {
   providerTimePaging,
   supportsIncrementalSince,
@@ -78,6 +91,23 @@ const { t, locale } = useI18n()
 const accounts = useAccountsStore()
 const userSettings = useSettingsStore()
 const mailCache = useMailCacheStore()
+
+function latestInboxCodeFor(email: string): string | undefined {
+  return latestInboxVerificationCode(mailCache.listFor(email, 'inbox'))
+}
+
+async function patchLatestInboxCode(acc: MailAccount, fetchOk: boolean): Promise<void> {
+  const patch = latestCodePatchForFetch({
+    fetchOk,
+    inboxMessages: mailCache.listFor(acc.email, 'inbox'),
+  })
+  if (!patch) return
+  await accounts.patchAccount(acc.id, patch)
+}
+
+/** First-window bodies that failed stay here until a later fetch fills them. */
+let pendingBodiesByFolder: PendingBodiesMap = {}
+
 const twofa = useTwoFaStore()
 const vault = useVaultStore()
 const { flashMsg } = useToast()
@@ -788,6 +818,7 @@ async function revalidateOneDraft(row: ImportDraftRow) {
           password: row.partial.password,
         }),
         proxy: row.partial.proxy || undefined,
+        egress_mode: 'bulk',
       },
       { timeoutMs: PRECHECK_TIMEOUT_MS },
     )
@@ -865,6 +896,7 @@ async function validateImportDrafts() {
               password: row.partial.password,
             }),
             proxy: row.partial.proxy || undefined,
+            egress_mode: 'bulk',
           },
           { timeoutMs: PRECHECK_TIMEOUT_MS, signal: ctrl.signal },
         )
@@ -1383,14 +1415,12 @@ async function applyFetchResult(
     requestedMax?: number
   } = {},
 ): Promise<boolean> {
-  const code = extractCode(result)
   const msgs = result.messages ?? []
   // Initial gate (re-checked after each await)
   if (panelApplyAllowed(opts)) {
     lastFetchOk.value = result.ok !== false
   }
   const patch: Partial<MailAccount> = {
-    latestCode: code ?? acc.latestCode,
     status: result.ok === false ? 'error' : 'ok',
     lastError: result.ok === false ? result.error || t('console.fetchFailed') : undefined,
   }
@@ -1501,9 +1531,12 @@ async function applyFetchResult(
       }
     }
   }
+  const inboxCode = latestInboxCodeFor(acc.email)
+  await patchLatestInboxCode(acc, result.ok !== false)
+  const fetchedFolder = mailCache.normalizeFolder(result.folder || mailFolder.value)
   if (panelApplyAllowed(opts)) {
-    if (code) {
-      flashMsg(t('console.fetchGotCode', { code }))
+    if (fetchedFolder === 'inbox' && inboxCode) {
+      flashMsg(t('console.fetchGotCode', { code: inboxCode }))
     } else if (result.ok === false && result.error) {
       flashMsg(result.error, 'danger')
     } else {
@@ -1581,9 +1614,27 @@ type FetchOneOpts = {
   manageUi?: boolean
   /** Nested multi-folder step: always silent apply + no UI ownership. */
   nested?: boolean
+  /** Refresh the open tab from cache even when silent (multi-folder paint). */
+  refreshPanel?: boolean
+  phase?: 'full' | 'headers' | 'bodies'
+  bodyIds?: string[]
+  uidvalidity?: number | null
+  signal?: AbortSignal
+  egressMode?: 'interactive' | 'bulk'
+  /** Bodies-only failure must not mark the account error. */
+  softFail?: boolean
+  /** Reuse a Graph access token from an earlier phase in this user action. */
+  accessToken?: string
 }
 
-type FetchOneResult = { ok: boolean; count: number }
+type FetchOneResult = {
+  ok: boolean
+  count: number
+  pendingBodyIds?: string[]
+  uidvalidity?: number | null
+  accessToken?: string
+  error?: string
+}
 
 function isCookieHeavyAccount(acc: Pick<MailAccount, 'type'>): boolean {
   const t = String(acc.type || '').toLowerCase()
@@ -1686,6 +1737,11 @@ async function fetchOne(
         before: opts.before || undefined,
         maxMessages: maxMessages ?? MAIL_FIRST_PAGE,
         full: Boolean(full),
+        phase: opts.phase,
+        bodyIds: opts.bodyIds,
+        uidvalidity: opts.uidvalidity,
+        egressMode: opts.egressMode,
+        timeoutMs: 55_000,
       })
     } else if (!hasLocalSecrets && src.clientSealed) {
       result = {
@@ -1717,28 +1773,34 @@ async function fetchOne(
                 ? { api_key: apiSecret, password: apiSecret, api_auth_style: apiAuthStyle }
                 : { api_auth_style: 'none' }),
             }
-          : credentialFromLocal(src)
+          : withOAuthAccessToken(credentialFromLocal(src), opts.accessToken)
       // Always send an explicit page size so providers do not fall back to tiny quick=5.
       // full=true only for "recent window" (ignore since); load-older uses before only.
-      result = await proxyFetchMail({
-        email: fetchEmail,
-        provider,
-        folder,
-        quick,
-        password: apiSecret || src.password || parent?.password,
-        credential,
-        cookies: src.sessionCookies?.length ? src.sessionCookies : undefined,
-        proxy: src.proxy || parent?.proxy || undefined,
-        since: full || opts.before ? undefined : since || undefined,
-        before: opts.before || undefined,
-        max_messages: maxMessages ?? MAIL_FIRST_PAGE,
-        full: Boolean(full),
-      })
+      result = await proxyFetchMail(
+        {
+          email: fetchEmail,
+          provider,
+          folder,
+          quick,
+          password: apiSecret || src.password || parent?.password,
+          credential,
+          cookies: src.sessionCookies?.length ? src.sessionCookies : undefined,
+          proxy: src.proxy || parent?.proxy || undefined,
+          since: full || opts.before ? undefined : since || undefined,
+          before: opts.before || undefined,
+          max_messages: maxMessages ?? MAIL_FIRST_PAGE,
+          full: Boolean(full),
+          phase: opts.phase,
+          body_ids: opts.bodyIds,
+          uidvalidity: opts.uidvalidity,
+          egress_mode: opts.egressMode,
+        },
+        { signal: opts.signal },
+      )
     }
 
     if (silent || nested) {
       // Apply status/code/cache without toast spam or panel overwrite
-      const code = extractCode(result)
       const msgs = result.messages ?? []
       const mboxes =
         result.mailboxes ||
@@ -1748,10 +1810,11 @@ async function fetchOne(
           : null)
       // Nested multi-folder: soft folder errors (e.g. no Sent) must not mark whole account error
       const failHard =
-        result.ok === false && (!nested || isHardAuthError(result.error || undefined))
+        result.ok === false &&
+        !opts.softFail &&
+        (!nested || isHardAuthError(result.error || undefined))
       // Always write cookies first so the next multi-folder step can reuse session
       await accounts.patchAccount(acc.id, {
-        latestCode: code ?? acc.latestCode,
         ...(result.ok !== false
           ? { status: 'ok' as const, lastError: undefined }
           : failHard
@@ -1824,19 +1887,31 @@ async function fetchOne(
           /* ignore */
         }
       }
+      await patchLatestInboxCode(acc, result.ok !== false)
       // Nested multi-folder: refresh open tab panel from cache without stealing selection
       if (
         nested &&
-        !opts.silent &&
-        accounts.selectedId === expectedAccountId &&
-        mailCache.normalizeFolder(folder) === mailCache.normalizeFolder(mailFolder.value)
+        (opts.refreshPanel || !opts.silent) &&
+        shouldRefreshOpenFolder({
+          selectedAccountId: accounts.selectedId,
+          expectedAccountId,
+          folder: mailCache.normalizeFolder(folder),
+          openFolder: mailCache.normalizeFolder(mailFolder.value),
+        })
       ) {
         loadMessagesFromCache(acc, { preserveVisible: true, resetRemoteFlag: false })
         if (opts.clearFirst) {
           markNoMoreIfShortPage(msgs.length, maxMessages ?? MAIL_FIRST_PAGE)
         }
       }
-      return { ok: result.ok !== false, count: msgs.length }
+      return {
+        ok: result.ok !== false,
+        count: msgs.length,
+        pendingBodyIds: result.pending_body_ids,
+        uidvalidity: result.uidvalidity,
+        accessToken: accessTokenFromFetchResult(result),
+        error: result.error,
+      }
     }
 
     // Interactive fetch: durable merge/replace + panel update
@@ -1846,8 +1921,18 @@ async function fetchOne(
       clearFirst: Boolean(opts.clearFirst),
       requestedMax: maxMessages ?? MAIL_FIRST_PAGE,
     })
-    return { ok: result.ok !== false, count: (result.messages ?? []).length }
+    return {
+      ok: result.ok !== false,
+      count: (result.messages ?? []).length,
+      pendingBodyIds: result.pending_body_ids,
+      uidvalidity: result.uidvalidity,
+      accessToken: accessTokenFromFetchResult(result),
+      error: result.error,
+    }
   } catch (e) {
+    if (isAbortError(e) || opts.softFail) {
+      return { ok: false, count: 0 }
+    }
     await accounts.patchAccount(acc.id, {
       status: 'error',
       lastError: errorMessage(e, t('console.fetchFailed')),
@@ -1912,6 +1997,13 @@ async function fetchFolderCatchUp(
   acc: MailAccount,
   folder: MailFolderKey,
   state: { hardFail: boolean },
+  extra: {
+    signal?: AbortSignal
+    egressMode?: 'interactive' | 'bulk'
+    onHeaders?: () => void
+    accessToken?: string
+    onAccessToken?: (token: string) => void
+  } = {},
 ): Promise<FolderCatchUpResult> {
   if (state.hardFail) return { ok: false, count: 0, hardFail: true }
 
@@ -1922,22 +2014,104 @@ async function fetchFolderCatchUp(
     nested: true,
     manageUi: false,
     folder,
+    refreshPanel: true,
+    signal: extra.signal,
+    egressMode: extra.egressMode,
+    accessToken: extra.accessToken,
+  }
+  const takeToken = (r: FetchOneResult) => {
+    if (r.accessToken) extra.onAccessToken?.(r.accessToken)
+  }
+  const retryPendingBodies = async () => {
+    const pending = peekPendingBodies(pendingBodiesByFolder, live.email, folder)
+    if (!pending?.ids.length) return
+    const still = messagesMissingBodies(mailCache.listFor(live.email, folder), pending.ids)
+    if (!still.length) {
+      pendingBodiesByFolder = clearPendingBodies(pendingBodiesByFolder, live.email, folder)
+      return
+    }
+    const br = await fetchOne(accounts.findById(acc.id) || live, true, {
+      ...baseOpts,
+      forceRecent: true,
+      maxMessages: MAIL_FIRST_PAGE,
+      phase: 'bodies',
+      bodyIds: still,
+      uidvalidity: pending.uidvalidity,
+      softFail: true,
+    })
+    takeToken(br)
+    if (!br.ok && /uidvalidity/i.test(br.error || '')) {
+      pendingBodiesByFolder = clearPendingBodies(pendingBodiesByFolder, live.email, folder)
+      return
+    }
+    const left = messagesMissingBodies(mailCache.listFor(live.email, folder), still)
+    pendingBodiesByFolder = left.length
+      ? rememberPendingBodies(
+          pendingBodiesByFolder,
+          live.email,
+          folder,
+          left,
+          pending.uidvalidity,
+        )
+      : clearPendingBodies(pendingBodiesByFolder, live.email, folder)
   }
 
   // —— Empty cache: first window = latest 20 ——
   if (empty) {
+    const twoPhase = shouldUseHeaderBodyPhases({
+      provider: live.type,
+      emptyFolder: true,
+    })
     const r = await fetchOne(live, true, {
       ...baseOpts,
       forceRecent: true,
       maxMessages: MAIL_FIRST_PAGE,
+      phase: twoPhase ? 'headers' : 'full',
     })
+    takeToken(r)
+    extra.onHeaders?.()
     if (!r.ok) {
       const err = (accounts.findById(acc.id) || live).lastError
       if (isHardAuthError(err)) return { ok: false, count: 0, hardFail: true }
       return { ok: false, count: 0, hardFail: false }
     }
+    if (twoPhase && r.pendingBodyIds?.length) {
+      pendingBodiesByFolder = rememberPendingBodies(
+        pendingBodiesByFolder,
+        live.email,
+        folder,
+        r.pendingBodyIds,
+        r.uidvalidity,
+      )
+      const br = await fetchOne(accounts.findById(acc.id) || live, true, {
+        ...baseOpts,
+        accessToken: r.accessToken || extra.accessToken,
+        forceRecent: true,
+        maxMessages: MAIL_FIRST_PAGE,
+        phase: 'bodies',
+        bodyIds: r.pendingBodyIds,
+        uidvalidity: r.uidvalidity,
+        softFail: true,
+      })
+      takeToken(br)
+      const left = messagesMissingBodies(
+        mailCache.listFor(live.email, folder),
+        r.pendingBodyIds,
+      )
+      pendingBodiesByFolder = left.length
+        ? rememberPendingBodies(
+            pendingBodiesByFolder,
+            live.email,
+            folder,
+            left,
+            r.uidvalidity,
+          )
+        : clearPendingBodies(pendingBodiesByFolder, live.email, folder)
+    }
     return { ok: true, count: r.count, hardFail: false, firstWindowCount: r.count }
   }
+
+  await retryPendingBodies()
 
   // —— Has cache: full catch-up of mail newer than newest local ——
   let total = 0
@@ -1995,7 +2169,7 @@ async function fetchFolderCatchUp(
  */
 async function fetchAccountFolders(
   acc: MailAccount,
-  opts: { silent?: boolean } = {},
+  opts: { silent?: boolean; egressMode?: 'interactive' | 'bulk' } = {},
 ): Promise<boolean> {
   const silent = Boolean(opts.silent)
   if (accountFetchLocks.has(acc.id)) {
@@ -2006,6 +2180,7 @@ async function fetchAccountFolders(
 
   let gen = 0
   const expectedAccountId = acc.id
+  const abort = new AbortController()
   if (!silent) {
     fetchGeneration.value += 1
     gen = fetchGeneration.value
@@ -2022,15 +2197,33 @@ async function fetchAccountFolders(
   let hardFail = false
   let totalNew = 0
   const failState = { hardFail: false }
+  let cycleAccessToken: string | undefined
   /** first-window counts per folder (for short-page → no more older) */
   const firstWindowByFolder = new Map<string, number>()
 
   const runFolder = async (folder: MailFolderKey): Promise<void> => {
     if (failState.hardFail) return
-    const r = await fetchFolderCatchUp(acc, folder, failState)
+    const r = await fetchFolderCatchUp(acc, folder, failState, {
+      signal: abort.signal,
+      egressMode: opts.egressMode,
+      accessToken: cycleAccessToken,
+      onAccessToken: (token) => {
+        cycleAccessToken = token
+      },
+      onHeaders: () => {
+        if (
+          !silent &&
+          gen === fetchGeneration.value &&
+          mailCache.normalizeFolder(folder) === mailCache.normalizeFolder(mailFolder.value)
+        ) {
+          mailLoading.value = false
+        }
+      },
+    })
     if (r.hardFail) {
       failState.hardFail = true
       hardFail = true
+      abort.abort()
     }
     if (r.ok) {
       anyOk = true
@@ -2042,7 +2235,8 @@ async function fetchAccountFolders(
   }
 
   try {
-    if (isCookieHeavyAccount(acc)) {
+    if (isCookieHeavyAccount(acc) || String(acc.type || '').toLowerCase() === 'oauth') {
+      // Cookie: session reuse. OAuth: one refresh, then reuse access_token.
       for (const folder of MAIL_FOLDERS) {
         await runFolder(folder)
         if (hardFail) break
@@ -2250,13 +2444,66 @@ async function onClearAndRefetch() {
   mailLoadingMore.value = false
   mailVisibleCount.value = MAIL_FIRST_PAGE
   mailNoMoreRemote.value = false
-  await fetchOne(acc, true, {
+  pendingBodiesByFolder = clearPendingBodies(
+    pendingBodiesByFolder,
+    acc.email,
+    mailFolder.value,
+  )
+  const twoPhase = shouldUseHeaderBodyPhases({
+    provider: acc.type,
+    emptyFolder: true,
+    clearFirst: true,
+  })
+  const r = await fetchOne(acc, true, {
     silent: false,
     folder: mailFolder.value,
     clearFirst: true,
     forceRecent: true,
     maxMessages: MAIL_FIRST_PAGE,
+    phase: twoPhase ? 'headers' : 'full',
   })
+  if (!twoPhase || !r.ok || !r.pendingBodyIds?.length) return
+  pendingBodiesByFolder = rememberPendingBodies(
+    pendingBodiesByFolder,
+    acc.email,
+    mailFolder.value,
+    r.pendingBodyIds,
+    r.uidvalidity,
+  )
+  const br = await fetchOne(accounts.findById(acc.id) || acc, true, {
+    silent: true,
+    nested: true,
+    refreshPanel: true,
+    manageUi: false,
+    folder: mailFolder.value,
+    forceRecent: true,
+    maxMessages: MAIL_FIRST_PAGE,
+    phase: 'bodies',
+    bodyIds: r.pendingBodyIds,
+    uidvalidity: r.uidvalidity,
+    softFail: true,
+    accessToken: r.accessToken,
+  })
+  const left = messagesMissingBodies(
+    mailCache.listFor(acc.email, mailFolder.value),
+    r.pendingBodyIds,
+  )
+  pendingBodiesByFolder = left.length
+    ? rememberPendingBodies(
+        pendingBodiesByFolder,
+        acc.email,
+        mailFolder.value,
+        left,
+        r.uidvalidity,
+      )
+    : clearPendingBodies(pendingBodiesByFolder, acc.email, mailFolder.value)
+  if (!br.ok && /uidvalidity/i.test(br.error || '')) {
+    pendingBodiesByFolder = clearPendingBodies(
+      pendingBodiesByFolder,
+      acc.email,
+      mailFolder.value,
+    )
+  }
 }
 
 async function onBatchFetch() {
@@ -2271,7 +2518,7 @@ async function onBatchFetch() {
   try {
     const list = ids.map((id) => accounts.findById(id)).filter(Boolean) as MailAccount[]
     await mapPool(list, batchConcurrency.value, async (acc) => {
-      const success = await fetchAccountFolders(acc, { silent: true })
+      const success = await fetchAccountFolders(acc, { silent: true, egressMode: 'bulk' })
       if (success) ok += 1
       else fail += 1
     })

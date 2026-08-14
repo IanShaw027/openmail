@@ -690,6 +690,7 @@ def _sync_folder(
             since=window_since,
             before=before,
             max_messages=page_limit,
+            egress_mode="bulk",
         )
 
         if not result.ok:

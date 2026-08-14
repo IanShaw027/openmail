@@ -125,6 +125,13 @@ def test_imap_non_ssl_aborts_login_if_starttls_fails() -> None:
     mock_conn.login.assert_not_called()
 
 
+def test_direct_imap_timeouts_split_connect_greeting_fetch() -> None:
+    from app.providers.imap_provider import imap_socket_timeouts
+
+    assert imap_socket_timeouts(via_proxy=False, fetch_timeout=30.0) == (10.0, 5.0, 30.0)
+    assert imap_socket_timeouts(via_proxy=True, fetch_timeout=30.0) == (30.0, 30.0, 30.0)
+
+
 def test_imap_ssl_connect_uses_sni_hostname_not_ip() -> None:
     """Pinned IP TCP peer must still verify cert as original hostname (Gmail)."""
     from app.providers.imap_provider import _IMAP4SSLSni
@@ -299,11 +306,27 @@ def test_fetch_with_mocked_imap() -> None:
     mock_conn.select.return_value = ("OK", [b"2"])
     mock_conn.capabilities = ("IMAP4rev1", "ID")
     mock_conn._simple_command.return_value = ("OK", [b"ID completed"])
-    mock_conn.uid.side_effect = [
-        ("OK", [b"10 11"]),  # search
-        ("OK", [(b"11 (RFC822 {n})", raw)]),  # fetch first (newest reversed)
-        ("OK", [(b"10 (RFC822 {n})", raw)]),
-    ]
+    def uid_side_effect(cmd, *args):
+        spec = " ".join(str(a) for a in args)
+        if cmd == "search":
+            return ("OK", [b"10 11"])
+        if "HEADER" in spec or "FLAGS" in spec:
+            return (
+                "OK",
+                [
+                    (b"1 FETCH (UID 11 BODY[HEADER.FIELDS (SUBJECT)] {n}", raw),
+                    (b"2 FETCH (UID 10 BODY[HEADER.FIELDS (SUBJECT)] {n}", raw),
+                ],
+            )
+        return (
+            "OK",
+            [
+                (b"1 FETCH (UID 11 BODY[] {n}", raw),
+                (b"2 FETCH (UID 10 BODY[] {n}", raw),
+            ],
+        )
+
+    mock_conn.uid.side_effect = uid_side_effect
     mock_conn.list.return_value = ("OK", [b'(\\HasNoChildren) "/" INBOX'])
     mock_conn.logout.return_value = ("BYE", [])
 
@@ -386,7 +409,8 @@ def test_before_paging_filters_exact_time_within_same_day() -> None:
     with (
         patch.object(provider, "_login_connect", return_value=conn),
         patch.object(provider, "_uids_before", return_value=["3", "2", "1"]),
-        patch.object(provider, "_fetch_rfc822", side_effect=lambda _conn, uid: payloads[uid]),
+        patch.object(provider, "_fetch_headers_peek", return_value=payloads),
+        patch.object(provider, "_fetch_bodies_peek", return_value=payloads),
     ):
         result = provider.fetch(
                 SimpleNamespace(provider="imap", email="u@qq.com"),
@@ -456,3 +480,173 @@ def test_imap_connect_opens_proxied_socket() -> None:
 def test_domain_table_keys_present() -> None:
     for d in ("qq.com", "163.com", "126.com", "gmail.com", "outlook.com"):
         assert d in DOMAIN_IMAP_HOSTS
+
+
+def test_parse_uid_fetch_literals_keys_by_response_uid() -> None:
+    from app.providers.imap_provider import parse_uid_fetch_literals
+
+    data = [
+        (b"2 FETCH (UID 10 BODY[HEADER.FIELDS (SUBJECT)] {12}", b"Subject: old\r\n"),
+        b")",
+        (b"1 FETCH (UID 11 BODY[HEADER.FIELDS (SUBJECT)] {12}", b"Subject: new\r\n"),
+        b")",
+    ]
+    parsed = parse_uid_fetch_literals(data)
+    assert parsed["10"].startswith(b"Subject: old")
+    assert parsed["11"].startswith(b"Subject: new")
+
+
+def _imap_conn_for_phases(header_raw: bytes, body_raw: bytes) -> MagicMock:
+    mock_conn = MagicMock()
+    mock_conn.login.return_value = ("OK", [b"Logged in"])
+    mock_conn.select.return_value = ("OK", [b"2"])
+    mock_conn.capabilities = ("IMAP4rev1",)
+    mock_conn.list.return_value = ("OK", [b'(\\HasNoChildren) "/" INBOX'])
+    mock_conn.logout.return_value = ("BYE", [])
+    mock_conn.untagged_responses = {"UIDVALIDITY": [b"99"]}
+
+    def uid_side_effect(cmd, *args):
+        spec = " ".join(str(a) for a in args)
+        if cmd == "search":
+            return ("OK", [b"10 11"])
+        if "HEADER" in spec or "FLAGS" in spec:
+            return (
+                "OK",
+                [
+                    (b"1 FETCH (UID 11 BODY[HEADER.FIELDS (SUBJECT FROM)] {20}", header_raw),
+                    (b"2 FETCH (UID 10 BODY[HEADER.FIELDS (SUBJECT FROM)] {20}", header_raw),
+                ],
+            )
+        if "BODY.PEEK[]" in spec or "BODY[]" in spec:
+            return (
+                "OK",
+                [
+                    (b"1 FETCH (UID 11 BODY[] {n}", body_raw),
+                    (b"2 FETCH (UID 10 BODY[] {n}", body_raw),
+                ],
+            )
+        raise AssertionError(f"unexpected IMAP uid command {cmd} {spec}")
+
+    mock_conn.uid.side_effect = uid_side_effect
+    return mock_conn
+
+
+def test_imap_headers_phase_does_not_fetch_rfc822() -> None:
+    header_raw = b"From: s@e.com\r\nSubject: code wait\r\n\r\n"
+    body_raw = (
+        b"From: s@e.com\r\nSubject: code 555666\r\n"
+        b"Content-Type: text/plain\r\n\r\nYour OTP 555666\r\n"
+    )
+    mock_conn = _imap_conn_for_phases(header_raw, body_raw)
+    provider = ImapProvider(timeout=5)
+    with patch.object(provider, "_connect", return_value=mock_conn):
+        result = provider.fetch(
+            SimpleNamespace(provider="imap", email="u@qq.com"),
+            quick=True,
+            credentials={"password": "app-pass", "imap_host": "imap.qq.com"},
+            limits={"phase": "headers", "max_messages": 20},
+        )
+    assert result.ok is True
+    assert result.phase == "headers"
+    assert result.pending_body_ids == ["11", "10"]
+    assert result.uidvalidity == 99
+    assert result.messages[0].subject
+    assert not (result.messages[0].body_text or "").strip()
+    specs = [" ".join(str(a) for a in c.args) for c in mock_conn.uid.call_args_list]
+    assert any("HEADER.FIELDS" in s for s in specs)
+    assert not any("(RFC822)" in s or s.endswith("RFC822") for s in specs)
+    assert not any("BODY.PEEK[]" in s for s in specs)
+
+
+def test_imap_bodies_phase_rejects_uidvalidity_mismatch() -> None:
+    header_raw = b"From: s@e.com\r\nSubject: x\r\n\r\n"
+    body_raw = b"From: s@e.com\r\nSubject: x\r\n\r\nbody\r\n"
+    mock_conn = _imap_conn_for_phases(header_raw, body_raw)
+    provider = ImapProvider(timeout=5)
+    with patch.object(provider, "_connect", return_value=mock_conn):
+        result = provider.fetch(
+            SimpleNamespace(provider="imap", email="u@qq.com"),
+            credentials={"password": "app-pass", "imap_host": "imap.qq.com"},
+            limits={
+                "phase": "bodies",
+                "body_ids": ["11"],
+                "expected_uidvalidity": 1,
+            },
+        )
+    assert result.ok is False
+    assert "UIDVALIDITY" in (result.error or "")
+
+
+def test_imap_bodies_phase_rejects_missing_uidvalidity() -> None:
+    header_raw = b"From: s@e.com\r\nSubject: x\r\n\r\n"
+    body_raw = b"From: s@e.com\r\nSubject: x\r\n\r\nbody\r\n"
+    mock_conn = _imap_conn_for_phases(header_raw, body_raw)
+    provider = ImapProvider(timeout=5)
+    with (
+        patch.object(provider, "_connect", return_value=mock_conn),
+        patch.object(provider, "_read_uidvalidity", return_value=None),
+    ):
+        result = provider.fetch(
+            SimpleNamespace(provider="imap", email="u@qq.com"),
+            credentials={"password": "app-pass", "imap_host": "imap.qq.com"},
+            limits={
+                "phase": "bodies",
+                "body_ids": ["11"],
+                "expected_uidvalidity": 99,
+            },
+        )
+    assert result.ok is False
+    assert "UIDVALIDITY" in (result.error or "")
+
+
+def test_imap_bodies_phase_rejects_missing_expected_uidvalidity() -> None:
+    header_raw = b"From: s@e.com\r\nSubject: x\r\n\r\n"
+    body_raw = b"From: s@e.com\r\nSubject: x\r\n\r\nbody\r\n"
+    mock_conn = _imap_conn_for_phases(header_raw, body_raw)
+    provider = ImapProvider(timeout=5)
+    with patch.object(provider, "_connect", return_value=mock_conn):
+        result = provider.fetch(
+            SimpleNamespace(provider="imap", email="u@qq.com"),
+            credentials={"password": "app-pass", "imap_host": "imap.qq.com"},
+            limits={"phase": "bodies", "body_ids": ["11"]},
+        )
+    assert result.ok is False
+    assert "UIDVALIDITY" in (result.error or "")
+
+
+def test_imap_full_phase_uses_peek_not_rfc822() -> None:
+    header_raw = b"From: s@e.com\r\nSubject: code wait\r\n\r\n"
+    body_raw = (
+        b"From: s@e.com\r\nSubject: code 555666\r\n"
+        b"Content-Type: text/plain\r\n\r\nYour OTP 555666\r\n"
+    )
+    mock_conn = _imap_conn_for_phases(header_raw, body_raw)
+    provider = ImapProvider(timeout=5)
+    with patch.object(provider, "_connect", return_value=mock_conn):
+        result = provider.fetch(
+            SimpleNamespace(provider="imap", email="u@qq.com"),
+            credentials={"password": "app-pass", "imap_host": "imap.qq.com"},
+        )
+    assert result.ok is True
+    assert result.messages[0].verification_code == "555666"
+    specs = [" ".join(str(a) for a in c.args) for c in mock_conn.uid.call_args_list]
+    assert any("BODY.PEEK[]" in s for s in specs)
+    assert not any("(RFC822)" in s or s.endswith("RFC822") for s in specs)
+
+
+def test_imap_full_phase_reports_pending_when_body_missing() -> None:
+    header_raw = b"From: s@e.com\r\nSubject: code wait\r\n\r\n"
+    body_raw = b"From: s@e.com\r\nSubject: x\r\n\r\n"
+    mock_conn = _imap_conn_for_phases(header_raw, body_raw)
+    provider = ImapProvider(timeout=5)
+    with (
+        patch.object(provider, "_connect", return_value=mock_conn),
+        patch.object(provider, "_fetch_bodies_peek", return_value={}),
+    ):
+        result = provider.fetch(
+            SimpleNamespace(provider="imap", email="u@qq.com"),
+            credentials={"password": "app-pass", "imap_host": "imap.qq.com"},
+        )
+    assert result.ok is True
+    assert result.pending_body_ids == ["11", "10"]
+    assert result.partial is True

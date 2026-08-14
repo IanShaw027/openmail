@@ -31,6 +31,15 @@ _locks_guard = Lock()
 _DEFAULT_LEASE_SECONDS = 180.0
 
 
+def fetch_lock_key(account_id: str, folder: str | None = None) -> str:
+    """DB / in-process lock identity. Folder-aware so inbox/spam/sent can overlap."""
+    if not folder:
+        return account_id
+    from app.services.mail_store import normalize_folder
+
+    return f"{account_id}::{normalize_folder(folder)}"
+
+
 def _get_lock(account_id: str) -> Lock:
     with _locks_guard:
         if account_id not in _locks:
@@ -71,9 +80,10 @@ def seconds_until_allowed(
     account_id: str,
     *,
     settings: Settings | None = None,
+    folder: str | None = None,
 ) -> float:
     s = settings or get_settings()
-    state = db.get(FetchLockState, account_id)
+    state = db.get(FetchLockState, fetch_lock_key(account_id, folder))
     if state is None or state.last_real_fetch_at is None:
         return 0.0
     last = _as_utc(state.last_real_fetch_at)
@@ -157,11 +167,12 @@ def lease_is_current(
     lease_token: str,
     *,
     settings: Settings | None = None,
+    folder: str | None = None,
 ) -> bool:
-    """True when the caller still owns an active lease for this account."""
+    """True when the caller still owns an active lease for this account/folder."""
     s = settings or get_settings()
     lease_s = _lease_seconds(s)
-    state = db.get(FetchLockState, account_id)
+    state = db.get(FetchLockState, fetch_lock_key(account_id, folder))
     if state is None:
         return False
     if state.lease_token != lease_token:
@@ -176,37 +187,39 @@ def account_fetch_slot(
     *,
     settings: Settings | None = None,
     force: bool = False,
+    folder: str | None = None,
 ) -> Generator[str, None, None]:
     """Acquire serial lock + enforce min-interval for a real upstream fetch.
 
     Usage:
-        with account_fetch_slot(db, account.id):
+        with account_fetch_slot(db, account.id, folder=folder):
             result = provider.fetch(...)
     """
     s = settings or get_settings()
     lease_s = _lease_seconds(s)
-    lock = _get_lock(account_id)
+    lock_id = fetch_lock_key(account_id, folder)
+    lock = _get_lock(lock_id)
     if not lock.acquire(blocking=False):
         # Align with DB-lease path so clients get a consistent backoff hint.
-        wait = seconds_until_allowed(db, account_id, settings=s)
+        wait = seconds_until_allowed(db, account_id, settings=s, folder=folder)
         raise FetchInFlightError(retry_after=wait if wait > 0 else min(5.0, lease_s))
     try:
         if not force:
-            wait = seconds_until_allowed(db, account_id, settings=s)
+            wait = seconds_until_allowed(db, account_id, settings=s, folder=folder)
             if wait > 0:
                 raise FetchTooSoonError(wait)
 
-        lease_token, _ = _acquire_lease(db, account_id, lease_seconds=lease_s)
+        lease_token, _ = _acquire_lease(db, lock_id, lease_seconds=lease_s)
         # Re-check min-interval after winning the lease so two workers that both
         # passed the pre-lease check cannot both complete real fetches too close.
         if not force:
-            wait = seconds_until_allowed(db, account_id, settings=s)
+            wait = seconds_until_allowed(db, account_id, settings=s, folder=folder)
             if wait > 0:
                 try:
                     db.execute(
                         update(FetchLockState)
                         .where(
-                            FetchLockState.account_id == account_id,
+                            FetchLockState.account_id == lock_id,
                             FetchLockState.lease_token == lease_token,
                         )
                         .values(
@@ -243,7 +256,7 @@ def account_fetch_slot(
                 db.execute(
                     update(FetchLockState)
                     .where(
-                        FetchLockState.account_id == account_id,
+                        FetchLockState.account_id == lock_id,
                         FetchLockState.lease_token == lease_token,
                     )
                     .values(**values)

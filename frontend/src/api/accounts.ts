@@ -35,6 +35,9 @@ export interface FetchResult {
   mailboxes?: string[] | null
   /** IMAP folder UIDVALIDITY for this fetch */
   uidvalidity?: number | null
+  phase?: 'full' | 'headers' | 'bodies'
+  pending_body_ids?: string[]
+  partial?: boolean
   credential_updates?: {
     refresh_token?: string
     access_token?: string
@@ -62,6 +65,10 @@ export interface ProxyFetchBody {
   max_messages?: number | null
   /** Force full recent list */
   full?: boolean
+  phase?: 'full' | 'headers' | 'bodies'
+  body_ids?: string[]
+  uidvalidity?: number | null
+  egress_mode?: 'interactive' | 'bulk'
 }
 
 export interface ServerAccountOut {
@@ -154,7 +161,19 @@ export async function deleteServerAccount(id: string): Promise<void> {
 
 export async function fetchServerAccount(
   id: string,
-  opts: { folder?: string; quick?: boolean; since?: string; before?: string; maxMessages?: number; full?: boolean } = {},
+  opts: {
+    folder?: string
+    quick?: boolean
+    since?: string
+    before?: string
+    maxMessages?: number
+    full?: boolean
+    phase?: 'full' | 'headers' | 'bodies'
+    bodyIds?: string[]
+    uidvalidity?: number | null
+    timeoutMs?: number
+    egressMode?: 'interactive' | 'bulk'
+  } = {},
 ): Promise<FetchResult> {
   const q = new URLSearchParams()
   if (opts.folder) q.set('folder', opts.folder)
@@ -163,10 +182,14 @@ export async function fetchServerAccount(
   if (opts.before) q.set('before', opts.before)
   if (opts.maxMessages != null) q.set('max_messages', String(opts.maxMessages))
   if (opts.full != null) q.set('full', opts.full ? 'true' : 'false')
+  if (opts.phase) q.set('phase', opts.phase)
+  if (opts.uidvalidity != null) q.set('uidvalidity', String(opts.uidvalidity))
+  if (opts.bodyIds?.length) q.set('body_ids', opts.bodyIds.join(','))
+  if (opts.egressMode) q.set('egress_mode', opts.egressMode)
   const qs = q.toString()
   return apiRequest<FetchResult>(
     `/api/accounts/${encodeURIComponent(id)}/fetch${qs ? `?${qs}` : ''}`,
-    { method: 'POST' },
+    { method: 'POST', timeoutMs: opts.timeoutMs ?? 55_000 },
   )
 }
 
@@ -208,6 +231,10 @@ export async function proxyFetchMail(
       before: body.before || undefined,
       max_messages: body.max_messages ?? undefined,
       full: body.full || undefined,
+      phase: body.phase || undefined,
+      body_ids: body.body_ids?.length ? body.body_ids : undefined,
+      uidvalidity: body.uidvalidity ?? undefined,
+      egress_mode: body.egress_mode || undefined,
     },
   })
 }

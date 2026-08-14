@@ -35,13 +35,16 @@ def token_client(client: TestClient, monkeypatch):
         db.close()
 
     calls: list[str] = []
+    fetch_kwargs: list[dict] = []
 
     def _fake_fetch(db_, acc_, **kwargs):
         calls.append(acc_.email)
+        fetch_kwargs.append(kwargs)
         return FetchServiceResult(ok=True, code="123456", email=acc_.email)
 
     monkeypatch.setattr("app.routers.code_api.fetch_account", _fake_fetch)
     client.upstream_calls = calls  # type: ignore[attr-defined]
+    client.fetch_kwargs = fetch_kwargs  # type: ignore[attr-defined]
     return client
 
 
@@ -107,6 +110,14 @@ def test_text_format_returns_the_bare_code(token_client, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.text == "123456"
+
+
+def test_public_code_api_uses_bulk_egress(token_client, monkeypatch):
+    _set_limits(monkeypatch, fetch="0")
+    resp = token_client.get("/api/v1/code/tok_live")
+    assert resp.status_code == 200
+    kwargs = token_client.fetch_kwargs[0]  # type: ignore[attr-defined]
+    assert kwargs.get("egress_mode") == "bulk"
 
 
 def test_token_default_keyword_and_regex_are_passed_to_fetch(token_client, monkeypatch):

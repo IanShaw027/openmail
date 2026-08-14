@@ -151,7 +151,7 @@ class CodeApiToken(Base):
 class FetchLockState(Base):
     __tablename__ = "fetch_lock_state"
 
-    account_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    account_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     last_real_fetch_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

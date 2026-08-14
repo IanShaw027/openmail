@@ -326,6 +326,28 @@ def _generic_add_missing_columns(conn) -> None:  # type: ignore[no-untyped-def]
                     )
             except Exception:
                 logger.exception("migrate: failed to add fetch_lock_state.lease_token")
+        try:
+            lock_id_col = next(
+                c for c in insp.get_columns("fetch_lock_state") if c["name"] == "account_id"
+            )
+            lock_id_len = getattr(lock_id_col.get("type"), "length", None)
+            if lock_id_len is not None and lock_id_len < 80:
+                if dialect == "postgresql":
+                    conn.execute(
+                        text(
+                            "ALTER TABLE fetch_lock_state "
+                            "ALTER COLUMN account_id TYPE VARCHAR(80)"
+                        )
+                    )
+                elif dialect in ("mysql", "mariadb"):
+                    conn.execute(
+                        text("ALTER TABLE fetch_lock_state MODIFY account_id VARCHAR(80)")
+                    )
+                logger.info("migrate: widened fetch_lock_state.account_id to VARCHAR(80)")
+        except StopIteration:
+            pass
+        except Exception:
+            logger.exception("migrate: failed to widen fetch_lock_state.account_id")
 
     if "mail_items" in tables:
         try:

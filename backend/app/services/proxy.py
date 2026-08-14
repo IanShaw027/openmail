@@ -165,11 +165,12 @@ def list_proxy_candidates(
     settings: EffectiveSettings | Any,
     force_new_sid: bool = False,
     include_direct: bool = True,
+    prefer_direct: bool = False,
 ) -> list[str | None]:
-    """Ordered egress list: sticky/fixed first, then remaining pool, then direct.
+    """Ordered egress list.
 
-    Used when a channel fails soft (SSO/rate-limit): walk every WARP worker
-    before falling back to the server's own IP (``None``).
+    Default (bulk / cookie): sticky/fixed first, remaining pool, then direct.
+    ``prefer_direct=True`` (interactive IMAP/OAuth): direct first, then sticky pool.
 
     Fixed ``account.proxy`` is never rotated — only that URL is returned.
     """
@@ -204,10 +205,11 @@ def list_proxy_candidates(
         if url and url not in ordered:
             ordered.append(url)
 
-    result: list[str | None] = list(ordered)
-    if include_direct:
-        result.append(None)
-    return result
+    if not include_direct:
+        return list(ordered)
+    if prefer_direct:
+        return [None, *ordered]
+    return [*ordered, None]
 
 
 def resolve_proxy_for_email(

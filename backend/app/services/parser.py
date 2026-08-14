@@ -24,15 +24,35 @@ _ALNUM_TOKEN = re.compile(
 
 # Keywords that introduce a verification code. Avoid bare "one-time" (matches
 # "one-time purchase") and prefer compound phrases over lone "code" where possible.
+# Lone "pin" is too broad (spin / PIN-less notices); require "pin code".
 _KW = (
     r"验证码|校验码|动态码|确认码|临时验证码|"
     r"confirmation\s*code|verification\s*code|security\s*code|"
     r"access\s*code|login\s*code|auth(?:entication)?\s*code|"
     r"temporary\s+(?:login\s+|verification\s+|sign[-\s]?in\s+)?code|"
     r"one[-\s]?time\s+(?:pass(?:word|code)|code|otp|pin)|"
-    r"\botp\b|\bpin\b|"
+    r"\botp\b|pin\s*code|"
     # Lone "code" still needed for "Your code is 123456" but only as a word
     r"(?<![A-Za-z])code(?![A-Za-z])"
+)
+
+# 4–5 digit OTPs only next to these; weak lone "code" needs 6–8 digits.
+_STRONG_DIGIT_KW = re.compile(
+    r"验证码|校验码|动态码|确认码|临时验证码|"
+    r"confirmation\s*code|verification\s*code|security\s*code|"
+    r"access\s*code|login\s*code|auth(?:entication)?\s*code|"
+    r"one[-\s]?time\s+(?:pass(?:word|code)|code|otp|pin)|"
+    r"\botp\b|passcode|pin\s*code|your\s+\w+\s+code",
+    re.IGNORECASE,
+)
+
+# "postal code" / "error code" / "promo code" are not OTPs.
+_FALSE_CODE_PHRASE = re.compile(
+    r"(?:postal|zip|error|status|promo|discount|area|country|source|"
+    r"html|css|coupon|gift|tracking|order|sku|invoice|item|model|"
+    r"version|http|https|preferences|conduct|review|batch|response|"
+    r"exit|return|http\s*status)\s*[-_]?\s*codes?",
+    re.IGNORECASE,
 )
 
 _SUBJECT_NEAR = re.compile(
@@ -184,6 +204,25 @@ def _find_alnum_near(blob: str) -> str | None:
     return None
 
 
+def _scrub_false_code_phrases(text: str) -> str:
+    if not text:
+        return text
+    return _FALSE_CODE_PHRASE.sub(" ", text)
+
+
+def _accept_digit_in_context(token: str | None, blob: str, match: re.Match[str]) -> str | None:
+    """6–8 digits may sit next to weak 'code'; 4–5 need a strong OTP keyword."""
+    if not token or not _is_plausible_digit_code(token):
+        return None
+    if len(token) >= 6:
+        return token
+    start = max(0, match.start() - 40)
+    end = min(len(blob), match.end() + 16)
+    if _STRONG_DIGIT_KW.search(blob[start:end]):
+        return token
+    return None
+
+
 def _digit_from_match(m: re.Match[str] | None) -> str | None:
     if not m:
         return None
@@ -249,40 +288,35 @@ def extract_verification_code(
                 if digits and _is_plausible_digit_code(digits.group(0)):
                     return digits.group(0)
 
+    subject = _scrub_false_code_phrases(subject)
+    body_blob = _scrub_false_code_phrases(body_blob)
+
     # 1) Subject: keyword-adjacent digits
     m = _SUBJECT_NEAR.search(subject)
     if m:
-        g = _digit_from_match(m)
+        g = _accept_digit_in_context(_digit_from_match(m), subject, m)
         if g:
             return g
     # 1b) Subject alphanumeric near confirmation/code keywords
     alnum = _find_alnum_near(subject)
     if alnum:
         return alnum
-    # Bare digits in subject ONLY when subject also looks code-related
+    # Bare digits in subject ONLY when subject also looks code-related.
+    # "login" / "sign-in" alone are too weak (login notices, IP alerts).
     subj_low = subject.lower()
-    if any(
-        k in subj_low
-        for k in (
-            "code",
-            "otp",
-            "验证",
-            "校验",
-            "pin",
-            "login",
-            "sign-in",
-            "signin",
-            "passcode",
-        )
+    if any(k in subj_low for k in ("code", "otp", "验证", "校验", "passcode")) or re.search(
+        r"\bpin\b", subj_low
     ):
         m = _DIGIT_RUN.search(subject)
         if m and _is_plausible_digit_code(m.group(1)):
-            return m.group(1)
+            g = _accept_digit_in_context(m.group(1), subject, m)
+            if g:
+                return g
 
     # 2) Body near keywords (digits)
     m = _BODY_NEAR.search(body_blob)
     if m:
-        g = _digit_from_match(m)
+        g = _accept_digit_in_context(_digit_from_match(m), body_blob, m)
         if g:
             return g
     # 2b) Body alphanumeric (SpaceXAI etc.)
@@ -292,50 +326,67 @@ def extract_verification_code(
 
     # HTML-only body
     if body_html and not body_blob:
-        stripped = _strip_html(body_html)
+        stripped = _scrub_false_code_phrases(_strip_html(body_html))
         m = _BODY_NEAR.search(stripped)
         if m:
-            g = _digit_from_match(m)
+            g = _accept_digit_in_context(_digit_from_match(m), stripped, m)
             if g:
                 return g
         alnum = _find_alnum_near(stripped)
         if alnum:
             return alnum
         m = _DIGIT_RUN.search(stripped)
-        if (
-            m
-            and _is_plausible_digit_code(m.group(1))
-            and any(k in stripped.lower() for k in ("code", "otp", "验证", "校验", "pin", "confirm"))
-        ):
-            return m.group(1)
+        if m and _accept_digit_in_context(m.group(1), stripped, m):
+            low = stripped.lower()
+            if any(
+                k in low
+                for k in (
+                    "otp",
+                    "验证",
+                    "校验",
+                    "verification code",
+                    "login code",
+                    "passcode",
+                    "confirmation code",
+                )
+            ):
+                return m.group(1)
 
-    # Fallback: first 6-digit run in short body that looks code-like
+    # Fallback: first 6-digit run in short body that looks code-like.
+    # Keyword may live in the subject (Stripe) while digits are only in the body.
     if body_blob and len(body_blob) < 1200:
-        low = body_blob.lower()
-        # Require stronger signals than bare "confirm" (marketing noise)
+        low = f"{subject}\n{body_blob}".lower()
+        # Bare "code" / "signin" match too much marketing and status mail
         if any(
             k in low
             for k in (
-                "code",
                 "otp",
                 "验证",
                 "校验",
+                "verification code",
                 "login code",
-                "sign-in",
-                "signin",
                 "passcode",
                 "one-time",
                 "onetime",
+                "confirmation code",
             )
         ):
             m6 = re.search(r"(?<!\d)(\d{6})(?!\d)", body_blob)
             if m6 and _is_plausible_digit_code(m6.group(1)):
                 return m6.group(1)
-            # last resort: hyphenated alnum WITH a digit near code-ish body
-            for m in _ALNUM_TOKEN.finditer(body_blob):
-                cand = _normalize_code(m.group(1))
-                if cand and _is_plausible_alnum(cand) and "-" in cand:
-                    return cand
+
+    # Hyphenated product OTPs (M1M-J00) may sit before the keyword.
+    # False phrases are already scrubbed, so leftover "code" is meaningful.
+    for blob in (subject, body_blob):
+        if not blob or len(blob) >= 1200:
+            continue
+        low = blob.lower()
+        if not any(k in low for k in ("code", "otp", "验证", "校验", "passcode")):
+            continue
+        for m in _ALNUM_TOKEN.finditer(blob):
+            cand = _normalize_code(m.group(1))
+            if cand and _is_plausible_alnum(cand) and "-" in cand:
+                return cand
 
     return None
 

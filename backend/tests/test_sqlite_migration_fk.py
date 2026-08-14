@@ -156,3 +156,39 @@ def test_postgres_drops_users_fk_before_dropping_table():
     assert "accounts_owner_user_id_fkey" in joined
     assert joined.upper().index("DROP CONSTRAINT") < joined.upper().index("DROP TABLE")
     assert "users" in joined.lower()
+
+
+def test_generic_migrate_widens_fetch_lock_account_id(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    executed: list[str] = []
+    conn = MagicMock()
+    conn.execute.side_effect = lambda stmt, *a, **k: executed.append(str(stmt))
+
+    class _Insp:
+        def get_table_names(self):
+            return ["accounts", "fetch_lock_state"]
+
+        def get_columns(self, table):
+            if table == "accounts":
+                return [
+                    {"name": "id", "type": SimpleNamespace(length=40)},
+                    {"name": "owner_user_id", "type": SimpleNamespace(length=128)},
+                    {"name": "latest_verification_code", "type": SimpleNamespace(length=None)},
+                ]
+            if table == "fetch_lock_state":
+                return [
+                    {"name": "account_id", "type": SimpleNamespace(length=40)},
+                    {"name": "lease_token", "type": SimpleNamespace(length=36)},
+                ]
+            return []
+
+        def get_foreign_keys(self, table):
+            return []
+
+    monkeypatch.setattr(db_mod, "inspect", lambda _conn: _Insp())
+    monkeypatch.setattr(db_mod.engine, "dialect", SimpleNamespace(name="postgresql"))
+    db_mod._generic_add_missing_columns(conn)
+    joined = "\n".join(executed)
+    assert "ALTER TABLE fetch_lock_state ALTER COLUMN account_id TYPE VARCHAR(80)" in joined

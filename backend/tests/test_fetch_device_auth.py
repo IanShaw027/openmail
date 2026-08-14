@@ -293,6 +293,10 @@ def test_stored_fetch_forwards_pagination_args(monkeypatch):
         "before": "2026-08-02T00:00:00Z",
         "max_messages": 25,
         "full": True,
+        "phase": "full",
+        "body_ids": None,
+        "expected_uidvalidity": None,
+        "egress_mode": "interactive",
     }
 
 

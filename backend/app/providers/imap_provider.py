@@ -159,6 +159,31 @@ def _xoauth2_payload(email_addr: str, access_token: str) -> bytes:
 
 
 _UID_RE = re.compile(r"^[0-9]+$")
+_UID_IN_FETCH_RE = re.compile(rb"UID\s+(\d+)", re.I)
+_HEADER_FETCH_SPEC = (
+    "(UID FLAGS INTERNALDATE RFC822.SIZE "
+    "BODY.PEEK[HEADER.FIELDS (From To Subject Date Message-ID Content-Type)])"
+)
+_BODY_FETCH_SPEC = "(UID BODY.PEEK[])"
+_BODY_FETCH_CHUNK = 5
+DIRECT_CONNECT_TIMEOUT = 10.0
+DIRECT_GREETING_TIMEOUT = 5.0
+
+
+def imap_socket_timeouts(*, via_proxy: bool, fetch_timeout: float) -> tuple[float, float, float]:
+    """Connect / greeting / FETCH socket deadlines.
+
+    Direct: ~10s TCP, ~5s IMAP greeting, then the normal FETCH timeout.
+    WARP/proxy keeps a single deadline so a slow hop is not cut short.
+    """
+    fetch = float(fetch_timeout)
+    if via_proxy or fetch <= 0:
+        return (fetch, fetch, fetch)
+    return (
+        min(fetch, DIRECT_CONNECT_TIMEOUT),
+        min(fetch, DIRECT_GREETING_TIMEOUT),
+        fetch,
+    )
 
 
 def _safe_uids(tokens: list[Any]) -> list[str]:
@@ -169,6 +194,26 @@ def _safe_uids(tokens: list[Any]) -> list[str]:
         s = s.strip()
         if _UID_RE.fullmatch(s):
             out.append(s)
+    return out
+
+
+def parse_uid_fetch_literals(data: Any) -> dict[str, bytes]:
+    """Map each FETCH literal to the UID in that response item, not list position."""
+    out: dict[str, bytes] = {}
+    pending_uid: str | None = None
+    for item in data or []:
+        if isinstance(item, tuple) and len(item) >= 2:
+            meta = item[0] if isinstance(item[0], (bytes, bytearray)) else b""
+            payload = item[1] if isinstance(item[1], (bytes, bytearray)) else None
+            match = _UID_IN_FETCH_RE.search(bytes(meta))
+            uid = match.group(1).decode() if match else pending_uid
+            if uid and payload is not None:
+                out[uid] = bytes(payload)
+            pending_uid = None
+        elif isinstance(item, (bytes, bytearray)):
+            match = _UID_IN_FETCH_RE.search(bytes(item))
+            if match:
+                pending_uid = match.group(1).decode()
     return out
 
 
@@ -188,11 +233,13 @@ class _IMAP4SSLSni(imaplib.IMAP4_SSL):
         ssl_context: Any = None,
         server_hostname: str | None = None,
         sock: Any = None,
+        greeting_timeout: float | None = None,
     ) -> None:
         import ssl as _ssl
 
         self._tls_server_hostname = (server_hostname or host or "").strip() or host
         self._pre_sock = sock
+        self._greeting_timeout = greeting_timeout
         ctx = ssl_context or _ssl.create_default_context()
         # Parent stores ssl_context; open() uses host for TCP connect.
         super().__init__(host, port, timeout=timeout, ssl_context=ctx)
@@ -204,10 +251,17 @@ class _IMAP4SSLSni(imaplib.IMAP4_SSL):
         if sock is None:
             sock = imaplib.IMAP4._create_socket(self, timeout)
         assert self.ssl_context is not None
-        return self.ssl_context.wrap_socket(
+        wrapped = self.ssl_context.wrap_socket(
             sock,
             server_hostname=self._tls_server_hostname,
         )
+        greeting = self.__dict__.get("_greeting_timeout")
+        if greeting is not None:
+            try:
+                wrapped.settimeout(greeting)
+            except Exception:
+                pass
+        return wrapped
 
 
 class _IMAP4Sock(imaplib.IMAP4):
@@ -220,15 +274,23 @@ class _IMAP4Sock(imaplib.IMAP4):
         *,
         timeout: float | None = None,
         sock: Any = None,
+        greeting_timeout: float | None = None,
     ) -> None:
         self._pre_sock = sock
+        self._greeting_timeout = greeting_timeout
         super().__init__(host, port, timeout=timeout)
 
     def _create_socket(self, timeout):  # type: ignore[no-untyped-def]
         sock = self.__dict__.pop("_pre_sock", None)
-        if sock is not None:
-            return sock
-        return super()._create_socket(timeout)
+        if sock is None:
+            sock = super()._create_socket(timeout)
+        greeting = self.__dict__.get("_greeting_timeout")
+        if greeting is not None:
+            try:
+                sock.settimeout(greeting)
+            except Exception:
+                pass
+        return sock
 
 
 def _imap4_ssl_with_sni(
@@ -238,6 +300,7 @@ def _imap4_ssl_with_sni(
     server_hostname: str,
     timeout: float,
     sock: Any = None,
+    greeting_timeout: float | None = None,
 ) -> imaplib.IMAP4:
     import ssl as _ssl
 
@@ -250,6 +313,7 @@ def _imap4_ssl_with_sni(
             ssl_context=ctx,
             server_hostname=server_hostname,
             sock=sock,
+            greeting_timeout=greeting_timeout,
         )
     except TypeError:
         # Extremely old Python — last resort without pin-aware SNI
@@ -637,30 +701,115 @@ class ImapProvider:
                         before_dt = dt
                 except (TypeError, ValueError):
                     pass
+            phase = "full"
+            body_ids: list[str] | None = None
+            expected_uv: int | None = None
+            if limits:
+                phase = str(limits.get("phase") or "full").strip().lower() or "full"
+                raw_ids = limits.get("body_ids")
+                if isinstance(raw_ids, list):
+                    body_ids = _safe_uids(raw_ids)
+                ev = limits.get("expected_uidvalidity")
+                if ev is not None:
+                    try:
+                        expected_uv = int(ev)
+                    except (TypeError, ValueError):
+                        expected_uv = None
+            if phase == "bodies" and (
+                expected_uv is None
+                or uidvalidity is None
+                or expected_uv != uidvalidity
+            ):
+                return FetchResult(
+                    ok=False,
+                    folder=folder_out,
+                    error="UIDVALIDITY changed / mailbox reset",
+                    uidvalidity=uidvalidity,
+                    phase=phase,
+                )
+            if phase == "bodies":
+                uids = body_ids or []
+
+            def _in_time_window(msg: Message) -> bool:
+                if since_dt is None and before_dt is None:
+                    return True
+                try:
+                    msg_dt = email.utils.parsedate_to_datetime(msg.date)
+                    if msg_dt is None:
+                        msg_dt = datetime.fromisoformat(str(msg.date).replace("Z", "+00:00"))
+                    if msg_dt.tzinfo is None:
+                        msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+                    if since_dt is not None and msg_dt < since_dt:
+                        return False
+                    if before_dt is not None and msg_dt >= before_dt:
+                        return False
+                    return True
+                except (TypeError, ValueError, OverflowError, IndexError):
+                    return False
+
+            if phase == "bodies":
+                bodies = self._fetch_bodies_peek(conn, uids)
+                for uid in uids:
+                    raw = bodies.get(uid)
+                    if raw is None:
+                        continue
+                    msg = parse_rfc822(raw, msg_id=str(uid), folder=folder_out)
+                    if uidvalidity is not None:
+                        msg.uidvalidity = uidvalidity
+                    messages.append(msg)
+                attach_verification_code(messages)
+                return FetchResult(
+                    ok=True,
+                    messages=messages,
+                    folder=folder_out,
+                    session_restored=False,
+                    uidvalidity=uidvalidity,
+                    phase="bodies",
+                )
+
+            headers = self._fetch_headers_peek(conn, uids)
+            pending: list[str] = []
             for uid in uids:
-                raw = self._fetch_rfc822(conn, uid)
+                raw = headers.get(uid)
                 if raw is None:
                     continue
                 msg = parse_rfc822(raw, msg_id=str(uid), folder=folder_out)
-                if since_dt is not None or before_dt is not None:
-                    try:
-                        msg_dt = email.utils.parsedate_to_datetime(msg.date)
-                        if msg_dt is None:
-                            msg_dt = datetime.fromisoformat(str(msg.date).replace("Z", "+00:00"))
-                        if msg_dt.tzinfo is None:
-                            msg_dt = msg_dt.replace(tzinfo=timezone.utc)
-                        if since_dt is not None and msg_dt < since_dt:
-                            continue
-                        if before_dt is not None and msg_dt >= before_dt:
-                            continue
-                    except (TypeError, ValueError, OverflowError, IndexError):
-                        # A bounded query cannot safely place an unparseable date.
-                        continue
+                if not _in_time_window(msg):
+                    continue
                 if uidvalidity is not None:
                     msg.uidvalidity = uidvalidity
                 messages.append(msg)
+                pending.append(str(uid))
                 if before and len(messages) >= limit:
                     break
+
+            if phase == "headers":
+                attach_verification_code(messages)
+                return FetchResult(
+                    ok=True,
+                    messages=messages,
+                    folder=folder_out,
+                    session_restored=False,
+                    uidvalidity=uidvalidity,
+                    phase="headers",
+                    pending_body_ids=pending,
+                    partial=True,
+                )
+
+            bodies = self._fetch_bodies_peek(conn, pending)
+            filled: list[Message] = []
+            missing: list[str] = []
+            for msg in messages:
+                raw = bodies.get(str(msg.id))
+                if raw is None:
+                    filled.append(msg)
+                    missing.append(str(msg.id))
+                    continue
+                full_msg = parse_rfc822(raw, msg_id=str(msg.id), folder=folder_out)
+                if uidvalidity is not None:
+                    full_msg.uidvalidity = uidvalidity
+                filled.append(full_msg)
+            messages = filled
 
             attach_verification_code(messages)
             return FetchResult(
@@ -669,6 +818,9 @@ class ImapProvider:
                 folder=folder_out,
                 session_restored=False,
                 uidvalidity=uidvalidity,
+                phase="full",
+                pending_body_ids=missing,
+                partial=bool(missing),
             )
         except imaplib.IMAP4.error as exc:
             return FetchResult(ok=False, folder=folder, error=self._map_imap_error(exc))
@@ -725,27 +877,41 @@ class ImapProvider:
         tls_name = (server_hostname or sni or host).strip()
         sock = None
         proxy_url = (proxy or "").strip() or None
+        connect_t, greeting_t, fetch_t = imap_socket_timeouts(
+            via_proxy=bool(proxy_url), fetch_timeout=self.timeout
+        )
         if proxy_url:
             from app.services.tcp_proxy import open_proxied_tcp
 
             sock = open_proxied_tcp(
-                proxy_url, connect_host, connect_port, timeout=self.timeout
+                proxy_url, connect_host, connect_port, timeout=connect_t
             )
         if use_ssl:
-            return _imap4_ssl_with_sni(
+            conn_ssl = _imap4_ssl_with_sni(
                 connect_host,
                 connect_port,
                 server_hostname=tls_name,
-                timeout=self.timeout,
+                timeout=connect_t,
                 sock=sock,
+                greeting_timeout=None if proxy_url else greeting_t,
             )
+            try:
+                conn_ssl.sock.settimeout(fetch_t)
+            except Exception:
+                pass
+            return conn_ssl
         conn: imaplib.IMAP4
         if sock is not None:
             conn = _IMAP4Sock(
-                connect_host, connect_port, timeout=self.timeout, sock=sock
+                connect_host,
+                connect_port,
+                timeout=connect_t,
+                sock=sock,
+                greeting_timeout=None if proxy_url else greeting_t,
             )
         else:
-            conn = imaplib.IMAP4(connect_host, connect_port, timeout=self.timeout)
+            # Plain IMAP4 so tests can patch imaplib.IMAP4; greeting shares connect_t.
+            conn = imaplib.IMAP4(connect_host, connect_port, timeout=connect_t)
         try:
             typ, _ = conn.starttls()
         except Exception as exc:
@@ -762,6 +928,10 @@ class ImapProvider:
             except Exception:
                 pass
             raise RuntimeError("IMAP STARTTLS rejected / 服务器拒绝 STARTTLS")
+        try:
+            conn.sock.settimeout(fetch_t)
+        except Exception:
+            pass
         return conn
 
     def _login_connect(
@@ -1195,18 +1365,32 @@ class ImapProvider:
         return _safe_uids(recent)
 
     def _fetch_rfc822(self, conn: imaplib.IMAP4, uid: str) -> bytes | None:
-        if not _UID_RE.fullmatch(str(uid).strip()):
-            return None
+        bodies = self._fetch_bodies_peek(conn, [uid])
+        return bodies.get(str(uid))
+
+    def _uid_fetch_spec(self, conn: imaplib.IMAP4, uids: list[str], spec: str) -> dict[str, bytes]:
+        safe = _safe_uids(uids)
+        if not safe:
+            return {}
+        token = ",".join(safe)
         try:
-            typ, data = conn.uid("fetch", uid, "(RFC822)")
+            typ, data = conn.uid("fetch", token, spec)
         except imaplib.IMAP4.error:
-            typ, data = conn.fetch(uid, "(RFC822)")
+            typ, data = conn.fetch(token, spec)
         if typ != "OK" or not data:
-            return None
-        for item in data:
-            if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], (bytes, bytearray)):
-                return bytes(item[1])
-        return None
+            return {}
+        return parse_uid_fetch_literals(data)
+
+    def _fetch_headers_peek(self, conn: imaplib.IMAP4, uids: list[str]) -> dict[str, bytes]:
+        return self._uid_fetch_spec(conn, uids, _HEADER_FETCH_SPEC)
+
+    def _fetch_bodies_peek(self, conn: imaplib.IMAP4, uids: list[str]) -> dict[str, bytes]:
+        out: dict[str, bytes] = {}
+        safe = _safe_uids(uids)
+        for i in range(0, len(safe), _BODY_FETCH_CHUNK):
+            chunk = safe[i : i + _BODY_FETCH_CHUNK]
+            out.update(self._uid_fetch_spec(conn, chunk, _BODY_FETCH_SPEC))
+        return out
 
     @staticmethod
     def _map_imap_error(exc: BaseException) -> str:

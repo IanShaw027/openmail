@@ -15,7 +15,7 @@
  * Remote https images are off by default (tracking pixels). The parent
  * owns the opt-in control so it can sit in the pane header, not the body.
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { openEmailHref, type EmailLinkClickOptions } from '@/utils/emailLinks'
 import { EMAIL_FRAME_MSG, buildEmailFrameSrcdoc } from '@/utils/emailHtmlFrameDoc'
 
@@ -53,19 +53,10 @@ function onMessage(ev: MessageEvent) {
   }
 }
 
-onMounted(() => {
-  window.addEventListener('message', onMessage)
-})
+window.addEventListener('message', onMessage)
 onUnmounted(() => {
   window.removeEventListener('message', onMessage)
 })
-
-watch(
-  () => props.html,
-  () => {
-    heightPx.value = 120
-  },
-)
 </script>
 
 <template>

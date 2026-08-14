@@ -88,6 +88,9 @@ def _to_response(result: Any) -> FetchResponse:
         mailboxes=getattr(result, "mailboxes", None),
         uidvalidity=uv_out,
         credential_updates=getattr(result, "credential_updates", None),
+        phase=getattr(result, "phase", None) or "full",
+        pending_body_ids=list(getattr(result, "pending_body_ids", None) or []),
+        partial=bool(getattr(result, "partial", False)),
     )
 
 
@@ -108,6 +111,10 @@ def fetch_stored_account(
     before: str | None = None,
     max_messages: int | None = None,
     full: bool = False,
+    phase: str = "full",
+    uidvalidity: int | None = None,
+    body_ids: str | None = None,
+    egress_mode: str = "interactive",
 ) -> FetchResponse:
     ok_q, qerr = check_poll_quota(
         device_id, license_token=x_license_token, settings=settings
@@ -117,6 +124,7 @@ def fetch_stored_account(
     acc = db.get(Account, account_id)
     if acc is None or acc.owner_user_id != device_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="account not found")
+    parsed_ids = [x for x in (body_ids or "").split(",") if x.strip()][:20]
     result = fetch_account(
         db,
         acc,
@@ -127,6 +135,10 @@ def fetch_stored_account(
         before=before,
         max_messages=max_messages,
         full=bool(full),
+        phase=phase or "full",
+        body_ids=parsed_ids or None,
+        expected_uidvalidity=uidvalidity,
+        egress_mode=egress_mode if egress_mode in ("interactive", "bulk") else "interactive",
     )
     db.commit()
     return _to_response(result)
@@ -164,6 +176,10 @@ def proxy_fetch(
         before=body.before,
         max_messages=body.max_messages,
         full=bool(body.full),
+        phase=body.phase or "full",
+        body_ids=body.body_ids,
+        expected_uidvalidity=body.uidvalidity,
+        egress_mode=body.egress_mode or "interactive",
     )
     return _to_response(result)
 

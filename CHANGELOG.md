@@ -7,8 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Graph bodies stay in the requested folder.** `phase=bodies` GETs
+  `/me/mailFolders/{folder}/messages/{id}` so a foreign id is not merged.
+- **First-window bodies that fail are retried** on the next explicit fetch
+  (in-memory `pending_body_ids` per mailbox + folder).
+- **Direct IMAP uses a split socket deadline:** ~10s connect, ~5s greeting,
+  then the normal FETCH timeout. WARP/proxy keeps a single deadline.
+- **OAuth bodies reuse the headers-phase access token** for the same user
+  action instead of refreshing again.
+- **Interactive IMAP/OAuth fetch is direct-first.** WARP is used only after a
+  narrow connect/timeout/`421` failure, or for bulk jobs (batch fetch, import
+  precheck, `sync_worker`). Cookie/mail.com stays WARP-first. Send is unchanged.
+- **First-window IMAP/OAuth fetch is two-phase.** Headers paint the list;
+  bodies fill newest-first on a second request. Catch-up stays one request,
+  but IMAP now summary-FETCHes then `BODY.PEEK[]` on the same connection.
+- **Cloud-account folder fetches no longer share one lock.** Inbox, spam, and
+  sent can run together; a bodies follow-up is not blocked by the 3s interval.
+
 ### Fixed
 
+- **Graph access tokens expire and refresh.** Stored `access_token` is reused
+  only while `token_expires_at` is still fresh; a 401 retries once after
+  refresh. Folder-scoped body GETs that all fail now return `ok=false`.
+- **`fetch_lock_state.account_id` is widened to VARCHAR(80)** on Postgres and
+  MySQL so folder lease keys (`acc_<uuid>::spam`) fit existing installs.
+- **IMAP `phase=bodies` requires a UIDVALIDITY match** on both sides; a
+  mailbox reset no longer fail-opens. Missing bodies in `phase=full` are
+  returned as `pending_body_ids`.
+- **Public code API and `http_api` stay WARP-first.** Code tokens default to
+  `egress_mode=bulk`; interactive `http_api` is not treated as direct-first.
+  Cloud stored-account fetch accepts `egress_mode` so batch jobs can opt in.
+- **Console OTP column is not wiped** on a failed fetch or empty inbox cache.
+  Parser still extracts Stripe / “QR code or enter” / “Your Uber code is”
+  OTPs without matching postal/error/promo phrases.
+- **Headers success clears a previous account error.** Clear-and-refetch uses
+  the same two-phase first window as an empty folder. UIDVALIDITY mismatch
+  drops pending body retries instead of looping.
+
+- **Console OTP column is newest inbox code only.** Spam/sent fetches no
+  longer overwrite it. The parser ignores login notices without an OTP
+  keyword and phrases like postal / error / promo / status / discount code.
 - **Cloud mail pull runs when the unlocked app is shown**, then every **1
   minute** until the vault locks. The previous 3-minute timer did not fire
   on enter, so a failed first pull looked like cloud sync was off.
@@ -22,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears it. Existing mail is baselined so history is not marked new.
 - **Thunderbird-style Microsoft tokens can fetch via IMAP XOAUTH2** when
   Graph Mail.Read is missing, and the chosen transport is remembered.
+- **HTML mail iframe grows with the message.** Mail CSS `height:100%` /
+  `min-height:100vh` no longer pins the frame at 120px and leaves a blank
+  pane underneath.
 - **“Show remote images” sits in the mail pane header**, not over the body.
   HTML mail keeps `<style>` and layout attributes; only scripts, tracking
   pixels, and huge data-URI images are stripped unless storage quota forces

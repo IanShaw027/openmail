@@ -55,6 +55,12 @@ describe('buildEmailFrameSrcdoc', () => {
     expect(doc).toMatch(/img-src data: https: cid:/)
   })
 
+  it('forces html/body to content height so mail CSS cannot lock the iframe at 120px', () => {
+    const doc = buildEmailFrameSrcdoc('<p>x</p>')
+    expect(doc).toContain('height: auto !important')
+    expect(doc).toContain('getBoundingClientRect')
+  })
+
   it('detects remote http(s) images for the header control', () => {
     expect(htmlHasRemoteImages('<img src="https://cdn.example/a.png">')).toBe(true)
     expect(htmlHasRemoteImages('<img src="cid:part1">')).toBe(false)

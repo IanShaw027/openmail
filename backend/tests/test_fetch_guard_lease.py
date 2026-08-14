@@ -141,6 +141,21 @@ def _code_account(**kwargs):
     return SimpleNamespace(**base)
 
 
+def test_write_short_cache_spam_does_not_replace_inbox_code():
+    from app.services.fetch_service import _write_short_cache
+
+    account = _code_account(latest_verification_code="111111")
+    _write_short_cache(
+        SimpleNamespace(),
+        account,  # type: ignore[arg-type]
+        [],
+        "999999",
+        folder="spam",
+    )
+    assert account.latest_verification_code == "111111"
+    assert account.latest_code_folder == "inbox"
+
+
 def test_code_cache_ttl_skips_stale():
     """When latest_code_at is older than TTL, must not short-circuit as cached."""
     from app.services.fetch_service import fetch_account
@@ -379,3 +394,42 @@ def test_cloud_account_owner_email_is_unique(db_session):
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
+
+
+def test_folder_leases_do_not_block_each_other(db_session):
+    from app.fetch_guard import FetchInFlightError, fetch_lock_key
+
+    acc_id = "acc_folder_parallel"
+    settings = SimpleNamespace(
+        fetch_lock_lease_seconds=180.0,
+        fetch_min_interval_seconds=3.0,
+    )
+    inbox_held = False
+    with account_fetch_slot(db_session, acc_id, settings=settings, folder="inbox"):
+        inbox_held = True
+        with account_fetch_slot(db_session, acc_id, settings=settings, folder="spam"):
+            assert inbox_held
+            assert db_session.get(FetchLockState, fetch_lock_key(acc_id, "inbox")) is not None
+            assert db_session.get(FetchLockState, fetch_lock_key(acc_id, "spam")) is not None
+        with pytest.raises(FetchInFlightError):
+            with account_fetch_slot(db_session, acc_id, settings=settings, folder="inbox"):
+                pass
+
+
+def test_bodies_phase_skips_min_interval_via_force(db_session):
+    from app.fetch_guard import FetchTooSoonError
+
+    acc_id = "acc_bodies_interval"
+    settings = SimpleNamespace(
+        fetch_lock_lease_seconds=180.0,
+        fetch_min_interval_seconds=30.0,
+    )
+    with account_fetch_slot(db_session, acc_id, settings=settings, folder="inbox"):
+        pass
+    with pytest.raises(FetchTooSoonError):
+        with account_fetch_slot(db_session, acc_id, settings=settings, folder="inbox"):
+            pass
+    with account_fetch_slot(
+        db_session, acc_id, settings=settings, folder="inbox", force=True
+    ):
+        pass

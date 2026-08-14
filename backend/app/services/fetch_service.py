@@ -96,6 +96,9 @@ class FetchServiceResult:
     # IMAP mailbox UIDVALIDITY for this folder (optional)
     uidvalidity: int | None = None
     credential_updates: dict[str, str] | None = None
+    phase: str = "full"
+    pending_body_ids: list[str] = field(default_factory=list)
+    partial: bool = False
 
     def __post_init__(self) -> None:
         if self.message_count == 0 and self.messages:
@@ -203,6 +206,15 @@ def _latest_code_plain(account: Account, settings: Settings | None = None) -> st
     return decrypt_str_or_plain(account.latest_verification_code, settings=settings)
 
 
+def _mark_fetch_ok(account: Account) -> None:
+    now = datetime.now(timezone.utc)
+    account.last_fetch_at = now
+    account.last_error = None
+    if account.status == AccountStatus.error:
+        account.status = AccountStatus.ok
+    account.updated_at = now
+
+
 def _write_short_cache(
     db: Session,
     account: Account,
@@ -212,16 +224,13 @@ def _write_short_cache(
     matched: Message | None = None,
     folder: str = "inbox",
 ) -> None:
-    now = datetime.now(timezone.utc)
-    account.last_fetch_at = now
-    account.last_error = None
-    if account.status == AccountStatus.error:
-        account.status = AccountStatus.ok
-    if code:
+    _mark_fetch_ok(account)
+    # Console / code-API "latest code" is inbox-only. Spam/sent OTPs stay on
+    # the message rows but must not overwrite the account column.
+    if code and _folder_key(folder) == "inbox":
         account.latest_verification_code = encrypt_str(code)
-        account.latest_code_at = now
-        account.latest_code_folder = _folder_key(folder)
-    account.updated_at = now
+        account.latest_code_at = datetime.now(timezone.utc)
+        account.latest_code_folder = "inbox"
 
 
 def _folder_key(folder: str | None) -> str:
@@ -299,6 +308,10 @@ def fetch_account(
     before: str | None = None,
     max_messages: int | None = None,
     full: bool = False,
+    egress_mode: str = "interactive",
+    phase: str = "full",
+    body_ids: list[str] | None = None,
+    expected_uidvalidity: int | None = None,
 ) -> FetchServiceResult:
     """Fetch for a stored account: guard → provider → credential write-back → cache."""
     s = settings or get_settings()
@@ -384,43 +397,38 @@ def fetch_account(
         default_quick=15,
         default_page=50,
     )
+    phase_n = (phase or "full").strip().lower() or "full"
+    if phase_n in ("headers", "bodies"):
+        limits["phase"] = phase_n
+    if body_ids:
+        limits["body_ids"] = [str(x) for x in body_ids if x]
+    if expected_uidvalidity is not None:
+        limits["expected_uidvalidity"] = expected_uidvalidity
 
     try:
-        with account_fetch_slot(db, account.id, settings=s, force=force) as lease_token:
-            # Walk sticky WARP → remaining pool → direct.
-            # If account.proxy is fixed, list_proxy_candidates returns only that URL.
-            try:
-                from app.services.proxy import list_proxy_candidates
-                from app.services.settings_service import get_effective_settings
+        from app.services.settings_service import get_effective_settings
 
+        skip_interval = phase_n == "bodies"
+        with account_fetch_slot(
+            db,
+            account.id,
+            settings=s,
+            force=force or skip_interval,
+            folder=folder,
+        ) as lease_token:
+            ptype_name = str(getattr(account.provider, "value", account.provider) or "")
+            try:
                 eff = get_effective_settings(db, settings=s)
-                candidates = list_proxy_candidates(
+                ordered = resolve_egress_candidates(
                     account,
                     settings=eff,
+                    provider=ptype_name,
+                    egress_mode=egress_mode,
                     force_new_sid=force_new_sid,
-                    include_direct=True,
                 )
             except Exception:
                 fixed_proxy = str(creds.get("proxy") or account.proxy or "").strip()
-                candidates = [fixed_proxy] if fixed_proxy else [None]
-
-            seen_p: set[str] = set()
-            ordered: list[str | None] = []
-            for p in candidates:
-                key = p if p is not None else "__direct__"
-                if key in seen_p:
-                    continue
-                seen_p.add(key)
-                ordered.append(p)
-            if not ordered:
-                ordered = [None]
-            ptype_name = str(getattr(account.provider, "value", account.provider) or "")
-            egress_cap = (
-                MAX_EGRESS_ATTEMPTS_COOKIE
-                if ptype_name in ("cookie", "unknown")
-                else MAX_EGRESS_ATTEMPTS
-            )
-            ordered = _cap_egress_candidates(ordered, max_attempts=egress_cap)
+                ordered = [fixed_proxy] if fixed_proxy else [None]
 
             result = FetchResult(ok=False, folder=folder, error="取件失败 / Fetch failed")
             for idx, egress in enumerate(ordered):
@@ -449,16 +457,26 @@ def fetch_account(
                     )
                 if result.ok:
                     break
-                if idx + 1 < len(ordered) and _is_retryable_egress_error(result.error):
+                remaining = idx + 1 < len(ordered)
+                can_retry = (
+                    _is_direct_failover_error(result.error)
+                    if egress is None
+                    else _is_retryable_egress_error(result.error)
+                )
+                if remaining and can_retry:
                     continue
                 break
 
-            if lease_token and not lease_is_current(db, account.id, lease_token, settings=s):
+            if lease_token and not lease_is_current(
+                db, account.id, lease_token, settings=s, folder=folder
+            ):
                 raise FetchInFlightError()
 
             if result.credential_updates and result.credential_updates.any():
                 # Merge token_expires into credential blob if present in session_meta
-                if lease_token and not lease_is_current(db, account.id, lease_token, settings=s):
+                if lease_token and not lease_is_current(
+                    db, account.id, lease_token, settings=s, folder=folder
+                ):
                     raise FetchInFlightError()
                 apply_credential_updates(
                     db,
@@ -494,8 +512,9 @@ def fetch_account(
                     save_credentials(account, updated, settings=s)
 
             if not result.ok:
-                _mark_error(account, result.error or "fetch failed")
-                db.commit()
+                if phase_n != "bodies":
+                    _mark_error(account, result.error or "fetch failed")
+                    db.commit()
                 return FetchServiceResult(
                     ok=False,
                     error=result.error or "取件失败 / Fetch failed",
@@ -503,28 +522,40 @@ def fetch_account(
                     account_id=account.id,
                     folder=result.folder or folder,
                     messages=result.messages,
+                    phase=phase_n,
+                    pending_body_ids=list(getattr(result, "pending_body_ids", None) or []),
+                    partial=bool(getattr(result, "partial", False)),
+                    uidvalidity=getattr(result, "uidvalidity", None),
                 )
 
             for m in result.messages:
                 if not m.verification_code:
                     annotate_message_code(m, custom_regex=custom_regex)
 
-            if lease_token and not lease_is_current(db, account.id, lease_token, settings=s):
+            if lease_token and not lease_is_current(
+                db, account.id, lease_token, settings=s, folder=folder
+            ):
                 raise FetchInFlightError()
 
-            code, matched = _pick_best_code(
-                result.messages, keyword=keyword, custom_regex=custom_regex
-            )
-            _write_short_cache(
-                db,
-                account,
-                result.messages,
-                code,
-                matched=matched,
-                folder=result.folder or folder,
-            )
+            code = None
+            matched = None
+            if phase_n != "headers":
+                code, matched = _pick_best_code(
+                    result.messages, keyword=keyword, custom_regex=custom_regex
+                )
+                _write_short_cache(
+                    db,
+                    account,
+                    result.messages,
+                    code,
+                    matched=matched,
+                    folder=result.folder or folder,
+                )
+            else:
+                _mark_fetch_ok(account)
             db.commit()
             session = _session_fields_from_result(result)
+            pending = list(getattr(result, "pending_body_ids", None) or [])
 
             return FetchServiceResult(
                 ok=True,
@@ -544,6 +575,9 @@ def fetch_account(
                 mailboxes=session.get("mailboxes"),
                 uidvalidity=getattr(result, "uidvalidity", None),
                 credential_updates=session.get("credential_updates"),
+                phase=phase_n,
+                pending_body_ids=pending,
+                partial=bool(pending) or phase_n == "headers",
             )
     except FetchTooSoonError as exc:
         # Fall back to cache if available
@@ -665,31 +699,121 @@ def _cap_egress_candidates(
     *,
     max_attempts: int = MAX_EGRESS_ATTEMPTS,
 ) -> list[str | None]:
-    """Keep sticky / early pool entries + direct; drop the long tail.
+    """Cap the walk while preserving caller order, always keeping direct if present.
 
-    Order preserved. ``None`` (direct) is always kept if present in input, but
-    total length is capped so a single interactive fetch cannot burn 10×25s.
+    Direct-first input ``[None, w1, w2, …]`` stays direct-first.
+    WARP-first input ``[w1, w2, …, None]`` keeps direct last.
     """
     if max_attempts < 1:
         max_attempts = 1
-    proxies: list[str] = []
-    has_direct = False
+    seen: set[str] = set()
+    ordered: list[str | None] = []
     for p in candidates:
-        if p is None:
-            has_direct = True
+        key = p if p is not None else "__direct__"
+        if key in seen:
             continue
-        if p not in proxies:
-            proxies.append(p)
-    # Reserve one slot for direct when available
-    proxy_slots = max_attempts - 1 if has_direct else max_attempts
-    if proxy_slots < 1 and not has_direct:
-        proxy_slots = 1
-    out: list[str | None] = list(proxies[: max(0, proxy_slots)])
-    if has_direct:
-        out.append(None)
-    if not out:
-        out = [None]
-    return out[:max_attempts] if not has_direct else out
+        seen.add(key)
+        ordered.append(p)
+    if not ordered:
+        return [None]
+    if len(ordered) <= max_attempts:
+        return ordered
+    has_direct = None in ordered
+    if not has_direct:
+        return ordered[:max_attempts]
+    others = [p for p in ordered if p is not None]
+    if ordered[0] is None:
+        return [None, *others[: max_attempts - 1]]
+    return [*others[: max_attempts - 1], None]
+
+
+def _is_direct_failover_error(err: str | None) -> bool:
+    """True when a failed *direct* hop may succeed via WARP.
+
+    Narrower than ``_is_retryable_egress_error``: auth, Graph 429, and generic
+    ``请求失败`` / ``login failed`` must not walk the pool.
+    """
+    if not err:
+        return False
+    e = err.lower()
+    hard = (
+        "账号或密码错误",
+        "invalid credentials",
+        "imap 认证失败",
+        "认证失败，请检查授权码",
+        "password incorrect",
+        "invalid password",
+        "wrong password",
+        "need_reauth",
+        "刷新令牌",
+        "refresh token",
+        "invalid_grant",
+        "权限不足",
+        "unauthorized",
+        "forbidden",
+    )
+    if any(x in e or x in (err or "") for x in hard):
+        return False
+    markers = (
+        "timeout",
+        "timed out",
+        "connection refused",
+        "network is unreachable",
+        "failed to establish",
+        "connecterror",
+        "connect error",
+        "connection reset",
+        "broken pipe",
+        "eof occurred",
+        "socket error",
+        "eof",
+        "nodename nor servname",
+        "name or service not known",
+        "421",
+        "socks",
+        "proxy",
+        "tls",
+        "ssl",
+        "handshake",
+        "imap 连接超时",
+        "网络错误",
+        "network error",
+    )
+    return any(x in e for x in markers)
+
+
+def resolve_egress_candidates(
+    account: Any,
+    *,
+    settings: Any,
+    provider: str,
+    egress_mode: str = "interactive",
+    force_new_sid: bool = False,
+) -> list[str | None]:
+    """Build the capped egress walk for this fetch.
+
+    Interactive IMAP/OAuth/http_api: direct → sticky WARP → alternate.
+    Bulk, and all cookie/unknown: WARP-first (sticky → alternate → direct).
+    """
+    from app.services.proxy import list_proxy_candidates
+
+    ptype = (provider or "").strip().lower()
+    mode = (egress_mode or "interactive").strip().lower()
+    cookie_like = ptype in ("cookie", "unknown")
+    prefer_direct = mode != "bulk" and ptype in ("imap", "oauth")
+    try:
+        candidates = list_proxy_candidates(
+            account,
+            settings=settings,
+            force_new_sid=force_new_sid,
+            include_direct=True,
+            prefer_direct=prefer_direct,
+        )
+    except Exception:
+        fixed = str(getattr(account, "proxy", None) or "").strip()
+        candidates = [fixed] if fixed else [None]
+    cap = MAX_EGRESS_ATTEMPTS_COOKIE if cookie_like else MAX_EGRESS_ATTEMPTS
+    return _cap_egress_candidates(candidates, max_attempts=cap)
 
 
 def _session_fields_from_result(result: FetchResult) -> dict[str, Any]:
@@ -743,15 +867,16 @@ def fetch_proxy(
     before: str | None = None,
     max_messages: int | None = None,
     full: bool = False,
+    egress_mode: str = "interactive",
+    phase: str = "full",
+    body_ids: list[str] | None = None,
+    expected_uidvalidity: int | None = None,
 ) -> FetchServiceResult:
     """Guest/proxy fetch: credentials in memory only, never persisted.
 
-    Egress strategy when admin proxy_pool is set:
-      sticky WARP → remaining WARP workers → direct (None)
-    Fixed per-request proxy is tried once, then direct.
-
-    Session cookies from credential / cookies body are preferred; on success
-    rolling cookies are returned for the client to persist and reuse.
+    Interactive IMAP/OAuth: direct → sticky WARP → alternate.
+    Bulk and cookie: sticky WARP → alternate → direct.
+    Fixed per-request proxy is tried once (no rotation).
     """
     s = settings or get_settings()
     creds = merge_guest_credentials(
@@ -788,16 +913,17 @@ def fetch_proxy(
     )
 
     try:
-        from app.services.proxy import list_proxy_candidates
         from app.services.settings_service import get_effective_settings
 
         eff = get_effective_settings(None, settings=s)
-        # candidates: [warp sticky, warp…, None(direct)] or [fixed]
-        candidates = list_proxy_candidates(
-            account, settings=eff, include_direct=True
+        ordered = resolve_egress_candidates(
+            account,
+            settings=eff,
+            provider=ptype,
+            egress_mode=egress_mode,
         )
     except Exception:
-        candidates = [fixed_proxy] if fixed_proxy else [None]
+        ordered = [fixed_proxy] if fixed_proxy else [None]
 
     # Build a thin wrapper matching ProviderType for resolve_provider
     try:
@@ -823,6 +949,13 @@ def fetch_proxy(
         default_quick=20,
         default_page=50,
     )
+    phase_n = (phase or "full").strip().lower() or "full"
+    if phase_n in ("headers", "bodies"):
+        limits["phase"] = phase_n
+    if body_ids:
+        limits["body_ids"] = [str(x) for x in body_ids if x]
+    if expected_uidvalidity is not None:
+        limits["expected_uidvalidity"] = expected_uidvalidity
 
     def _do_fetch(c: dict[str, Any]) -> FetchResult:
         return provider_impl.fetch(
@@ -833,22 +966,8 @@ def fetch_proxy(
             limits=limits or None,
         )
 
-    # Deduplicate while preserving order (list_proxy_candidates already does)
-    seen: set[str] = set()
-    ordered: list[str | None] = []
-    for p in candidates:
-        key = p if p is not None else "__direct__"
-        if key in seen:
-            continue
-        seen.add(key)
-        ordered.append(p)
     if not ordered:
         ordered = [None]
-    # Cookie/mail.com SSO is multi-HTTP; cap egress tighter than IMAP
-    egress_cap = (
-        MAX_EGRESS_ATTEMPTS_COOKIE if ptype in ("cookie", "unknown") else MAX_EGRESS_ATTEMPTS
-    )
-    ordered = _cap_egress_candidates(ordered, max_attempts=egress_cap)
 
     result: FetchResult | None = None
     last_err: str | None = None
@@ -868,12 +987,18 @@ def fetch_proxy(
         if result.ok:
             break
         last_err = result.error or last_err
-        # Stop early on clear credential failure; otherwise try next WARP / direct
-        if idx + 1 < len(ordered) and _is_retryable_egress_error(result.error):
+        remaining = idx + 1 < len(ordered)
+        can_retry = (
+            _is_direct_failover_error(result.error)
+            if egress is None
+            else _is_retryable_egress_error(result.error)
+        )
+        if remaining and can_retry:
             continue
         break
 
     assert result is not None
+    pending = list(getattr(result, "pending_body_ids", None) or [])
     if not result.ok:
         return FetchServiceResult(
             ok=False,
@@ -881,14 +1006,21 @@ def fetch_proxy(
             email=email,
             folder=result.folder or folder,
             messages=result.messages,
+            phase=phase_n,
+            pending_body_ids=pending,
+            partial=bool(getattr(result, "partial", False)),
+            uidvalidity=getattr(result, "uidvalidity", None),
         )
 
     for m in result.messages:
         if not m.verification_code:
             annotate_message_code(m, custom_regex=custom_regex)
-    code, matched = _pick_best_code(
-        result.messages, keyword=keyword, custom_regex=custom_regex
-    )
+    code = None
+    matched = None
+    if phase_n != "headers":
+        code, matched = _pick_best_code(
+            result.messages, keyword=keyword, custom_regex=custom_regex
+        )
     session = _session_fields_from_result(result)
     return FetchServiceResult(
         ok=True,
@@ -907,4 +1039,7 @@ def fetch_proxy(
         mailboxes=session.get("mailboxes"),
         uidvalidity=getattr(result, "uidvalidity", None),
         credential_updates=session.get("credential_updates"),
+        phase=phase_n,
+        pending_body_ids=pending,
+        partial=bool(pending) or phase_n == "headers",
     )

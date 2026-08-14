@@ -29,9 +29,8 @@ def test_extract_otp_keyword() -> None:
     assert code == "445566"
 
 
-def test_bare_six_digit() -> None:
-    code = extract_verification_code(subject="Login notice 112233 expires soon")
-    assert code == "112233"
+def test_login_notice_without_code_keyword_is_not_otp() -> None:
+    assert extract_verification_code(subject="Login notice 112233 expires soon") is None
 
 
 def test_prefer_keyword_over_random_body_number() -> None:
@@ -68,8 +67,18 @@ def test_annotate_message() -> None:
 
 
 def test_four_to_eight_digits() -> None:
-    assert extract_verification_code(subject="code 1234 ready") == "1234"
+    assert extract_verification_code(subject="验证码 1234 ready") == "1234"
+    assert extract_verification_code(subject="OTP 1234 ready") == "1234"
     assert extract_verification_code(subject="code 12345678 ready") == "12345678"
+    assert extract_verification_code(body_text="Your code is 1234.") is None
+
+
+def test_reject_unrelated_code_phrases() -> None:
+    assert extract_verification_code(body_text="Your postal code is 94107.") is None
+    assert extract_verification_code(body_text="Error code 500123 — please retry.") is None
+    assert extract_verification_code(subject="Order shipped", body_text="Promo code SAVE20 today.") is None
+    assert extract_verification_code(body_text="Status code 204204 from the API.") is None
+    assert extract_verification_code(subject="Weekly digest", body_text="Use discount code 882211 at checkout.") is None
 
 
 def test_alphanumeric_confirmation_code_spacexai() -> None:
@@ -170,4 +179,33 @@ def test_still_extract_chatgpt_and_xai_codes() -> None:
             body_text="Please use the code below to validate your email address. M1M-J00",
         )
         == "M1M-J00"
+    )
+
+
+def test_subject_keyword_with_body_digits() -> None:
+    assert (
+        extract_verification_code(
+            subject="Your Stripe verification code",
+            body_text="Enter 918273 to finish signing in.",
+        )
+        == "918273"
+    )
+
+
+def test_qr_code_or_enter_otp_still_extracts() -> None:
+    assert (
+        extract_verification_code(
+            body_text="Scan the QR code or enter 447291 to continue.",
+        )
+        == "447291"
+    )
+
+
+def test_your_service_code_is_four_digit() -> None:
+    assert (
+        extract_verification_code(
+            subject="Your Uber code",
+            body_text="Your Uber code is 4821",
+        )
+        == "4821"
     )

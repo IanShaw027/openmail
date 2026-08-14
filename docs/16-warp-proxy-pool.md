@@ -18,6 +18,7 @@ OpenMail ──socks5://warp-N:1080──► warp-1 … warp-10 ──WARP──
 - **粘性**：默认 `PROXY_SID_STRATEGY=sticky_per_account`，同一邮箱固定落到同一 `warp-N`（利于 Cookie/会话）。
 - **固定代理**：操作台编辑账号 →「固定代理」填 `socks5://warp-3:1080` 可钉死某节点。
 - **并发**：`FETCH_CONCURRENCY=10`、`SYNC_CONCURRENCY=10`（可用环境变量改）。
+- **出口顺序**：交互 IMAP/OAuth 取件 **直连优先**，直连超时/拒连/`421` 才落到 sticky WARP。批量取件、导入预检、`sync_worker` 仍是 WARP-first。Cookie / mail.com 始终 WARP-first（会话绑 IP）。发件不走池、不重试。
 
 ## 启动
 

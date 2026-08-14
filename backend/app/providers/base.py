@@ -88,6 +88,9 @@ class FetchResult:
     error: str | None = None
     # IMAP SELECT UIDVALIDITY for the fetched folder (propagated to messages)
     uidvalidity: int | None = None
+    phase: str = "full"
+    pending_body_ids: list[str] = field(default_factory=list)
+    partial: bool = False
 
     def __post_init__(self) -> None:
         if self.message_count == 0 and self.messages:

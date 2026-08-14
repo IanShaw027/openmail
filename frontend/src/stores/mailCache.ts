@@ -38,6 +38,33 @@ export type DeltaMailItem = {
   uidvalidity?: number | null
 }
 
+const FALSE_CODE_PHRASE =
+  /(?:postal|zip|error|status|promo|discount|area|country|source|qr|html|css|coupon|gift|tracking|order|sku|invoice|item|model|version|http|https|preferences|conduct|review|batch|response|exit|return)[-_\s]*codes?/gi
+
+const STRONG_DIGIT_KW =
+  /验证码|校验码|动态码|确认码|临时验证码|confirmation\s*code|verification\s*code|security\s*code|access\s*code|login\s*code|auth(?:entication)?\s*code|one[-\s]?time\s+(?:pass(?:word|code)|code|otp|pin)|\botp\b|passcode|pin\s*code/i
+
+const NEAR_DIGIT =
+  /(?:验证码|校验码|动态码|确认码|临时验证码|confirmation\s*code|verification\s*code|security\s*code|access\s*code|login\s*code|auth(?:entication)?\s*code|temporary\s+(?:login\s+|verification\s+)?code|one[-\s]?time\s+(?:pass(?:word|code)|code|otp|pin)|(?<![A-Za-z])code(?![A-Za-z])|\botp\b|pin\s*code)[^\d]{0,48}(\d{4,8})|(\d{4,8})[^\d]{0,24}(?:验证码|校验码|is\s+your\s+code)/i
+
+const NEAR_ALNUM =
+  /(?:验证码|校验码|confirmation\s*code|verification\s*code|access\s*code|login\s*code|(?<![A-Za-z])code(?![A-Za-z])|\botp\b)(?:[\s:：#=\-–—]|is|为|：|是){0,24}([A-Za-z0-9]{3,8}(?:-[A-Za-z0-9]{2,8}){0,3})(?![A-Za-z0-9])/i
+
+function scrubFalseCodePhrases(text: string): string {
+  return text.replace(FALSE_CODE_PHRASE, ' ')
+}
+
+function yearOk(d: string): boolean {
+  return !/^(?:19|20)\d{2}$/.test(d)
+}
+
+function acceptDigitInContext(token: string | undefined, blob: string, index: number): string | null {
+  if (!token || !yearOk(token) || /^(.)\1+$/.test(token)) return null
+  if (token.length >= 6) return token
+  const window = blob.slice(Math.max(0, index - 40), index + token.length + 16)
+  return STRONG_DIGIT_KW.test(window) ? token : null
+}
+
 /**
  * Lightweight client-side OTP re-parse (aligned with backend heuristics).
  * Used to refresh sticky false positives without a network round-trip.
@@ -46,49 +73,60 @@ export function extractCodeFromMessage(m: Pick<
   MailMessage,
   'subject' | 'body_preview' | 'body_text' | 'body_html'
 >): string | null {
-  const subject = m.subject || ''
-  const body =
+  const subject = scrubFalseCodePhrases(m.subject || '')
+  const body = scrubFalseCodePhrases(
     (m.body_text || '') +
-    '\n' +
-    (m.body_preview || '') +
-    '\n' +
-    String(m.body_html || '').replace(/<[^>]+>/g, ' ')
-  const blob = `${subject}\n${body}`
+      '\n' +
+      (m.body_preview || '') +
+      '\n' +
+      String(m.body_html || '').replace(/<[^>]+>/g, ' '),
+  )
 
-  const yearOk = (d: string) => !/^(?:19|20)\d{2}$/.test(d)
+  const nearSubject = NEAR_DIGIT.exec(subject)
+  const subjectDigit = nearSubject?.[1] || nearSubject?.[2]
+  const acceptedSubject = acceptDigitInContext(subjectDigit, subject, nearSubject?.index ?? 0)
+  if (acceptedSubject) return acceptedSubject
 
-  // Keyword-adjacent 4–8 digits
-  const nearDigit =
-    /(?:验证码|校验码|动态码|确认码|临时验证码|confirmation\s*code|verification\s*code|security\s*code|access\s*code|login\s*code|auth(?:entication)?\s*code|temporary\s+(?:login\s+|verification\s+)?code|one[-\s]?time\s+(?:pass(?:word|code)|code|otp|pin)|(?<![A-Za-z])code(?![A-Za-z])|\botp\b|\bpin\b)[^\d]{0,48}(\d{4,8})/i.exec(
-      blob,
-    ) ||
-    /(\d{4,8})[^\d]{0,24}(?:验证码|校验码|is\s+your\s+code)/i.exec(blob)
-  if (nearDigit?.[1] && yearOk(nearDigit[1])) return nearDigit[1]
-
-  // Alphanumeric with a digit (8IX-FGG / M1M-J00)
-  const alnum =
-    /(?:验证码|校验码|confirmation\s*code|verification\s*code|access\s*code|login\s*code|(?<![A-Za-z])code(?![A-Za-z])|\botp\b)(?:[\s:：#=\-–—]|is|为|：|是){0,24}([A-Za-z0-9]{3,8}(?:-[A-Za-z0-9]{2,8}){0,3})(?![A-Za-z0-9])/i.exec(
-      blob,
-    )
-  if (alnum?.[1] && /\d/.test(alnum[1].replace(/-/g, ''))) {
-    const t = alnum[1]
+  const alnumSubject = NEAR_ALNUM.exec(subject)
+  if (alnumSubject?.[1] && /\d/.test(alnumSubject[1].replace(/-/g, ''))) {
+    const t = alnumSubject[1]
     if (!/^(code|codes|login|token|password)$/i.test(t.replace(/-/g, ''))) return t
   }
 
-  // Subject bare digits only with code-ish subject
   const subjLow = subject.toLowerCase()
-  if (
-    /code|otp|验证|校验|pin|login|passcode|sign-?in/.test(subjLow) ||
-    /验证码|校验码/.test(subject)
-  ) {
+  if (/code|otp|验证|校验|passcode/.test(subjLow) || /\bpin\b/.test(subjLow)) {
     const bare = /(?<!\d)(\d{4,8})(?!\d)/.exec(subject)
-    if (bare?.[1] && yearOk(bare[1])) return bare[1]
+    const acceptedBare = acceptDigitInContext(bare?.[1], subject, bare?.index ?? 0)
+    if (acceptedBare) return acceptedBare
   }
 
-  // Short body 6-digit near code keywords
-  if (blob.length < 1200 && /code|otp|验证|校验|login code|passcode|one-?time/i.test(blob)) {
+  const nearBody = NEAR_DIGIT.exec(body)
+  const bodyDigit = nearBody?.[1] || nearBody?.[2]
+  const acceptedBody = acceptDigitInContext(bodyDigit, body, nearBody?.index ?? 0)
+  if (acceptedBody) return acceptedBody
+
+  const alnumBody = NEAR_ALNUM.exec(body)
+  if (alnumBody?.[1] && /\d/.test(alnumBody[1].replace(/-/g, ''))) {
+    const t = alnumBody[1]
+    if (!/^(code|codes|login|token|password)$/i.test(t.replace(/-/g, ''))) return t
+  }
+
+  const blob = `${subject}\n${body}`
+  if (
+    blob.length < 1200 &&
+    /otp|验证|校验|verification code|login code|passcode|one-?time|confirmation code/i.test(blob)
+  ) {
     const m6 = /(?<!\d)(\d{6})(?!\d)/.exec(blob)
     if (m6?.[1] && yearOk(m6[1])) return m6[1]
+  }
+
+  for (const part of [subject, body]) {
+    if (!part || part.length >= 1200) continue
+    if (!/code|otp|验证|校验|passcode/i.test(part)) continue
+    const hyphen = /(?<![A-Za-z0-9])([A-Za-z0-9]{3,8}(?:-[A-Za-z0-9]{2,8}){1,3})(?![A-Za-z0-9])/.exec(
+      part,
+    )
+    if (hyphen?.[1] && /\d/.test(hyphen[1].replace(/-/g, ''))) return hyphen[1]
   }
 
   return null

@@ -179,6 +179,10 @@ class ProxyFetchRequest(BaseModel):
     max_messages: int | None = Field(default=None, ge=1, le=100)
     # Force full recent window (ignore since)
     full: bool = False
+    phase: Literal["full", "headers", "bodies"] = "full"
+    body_ids: list[str] | None = Field(default=None, max_length=20)
+    uidvalidity: int | None = None
+    egress_mode: Literal["interactive", "bulk"] = "interactive"
 
     _check_proxy = field_validator("proxy")(_validate_client_proxy)
 
@@ -250,6 +254,9 @@ class FetchResponse(BaseModel):
     # IMAP mailbox UIDVALIDITY for this folder (optional)
     uidvalidity: int | None = None
     credential_updates: dict[str, str] | None = None
+    phase: str = "full"
+    pending_body_ids: list[str] = Field(default_factory=list)
+    partial: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 

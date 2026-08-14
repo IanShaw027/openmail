@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -49,7 +50,22 @@ _SELECT = (
     "id,subject,from,toRecipients,receivedDateTime,bodyPreview,"
     "isRead,hasAttachments,body,uniqueBody"
 )
+_SELECT_HEADERS = (
+    "id,subject,from,toRecipients,receivedDateTime,bodyPreview,"
+    "isRead,hasAttachments"
+)
+_MAX_BODY_IDS = 20
 _TIMEOUT = 30.0
+
+
+def _safe_graph_message_id(raw: Any) -> str | None:
+    """Reject path-like ids before they are interpolated into a Graph URL."""
+    sid = str(raw or "").strip()
+    if not sid or len(sid) > 512:
+        return None
+    if any(ch in sid for ch in ("/", "\\", "?", "#", "..")):
+        return None
+    return sid
 
 
 def _provider_value(account: Any) -> str:
@@ -114,6 +130,24 @@ def _token_updates(token_body: dict[str, Any], *, transport: str) -> CredentialU
         meta["token_obtained_at"] = datetime.now(timezone.utc).isoformat()
     updates.session_meta = meta
     return updates
+
+
+def _access_token_reusable(token: str | None, expires_at: Any) -> str:
+    """Reuse a still-fresh access token; empty expiry is allowed for same-action reuse."""
+    value = str(token or "").strip()
+    if not value:
+        return ""
+    if expires_at is None or expires_at == "":
+        return value
+    try:
+        ts = float(expires_at)
+    except (TypeError, ValueError):
+        return ""
+    if ts > 1e12:
+        ts /= 1000.0
+    if ts - 60.0 <= datetime.now(timezone.utc).timestamp():
+        return ""
+    return value
 
 
 def _format_from(from_obj: dict[str, Any] | None) -> tuple[str, str]:
@@ -185,7 +219,7 @@ def _graph_message_to_message(item: dict[str, Any], *, folder: str) -> Message:
         to=_format_to(item.get("toRecipients")),
         date=item.get("receivedDateTime"),
         body_preview=preview or (body_text[:280] if body_text else ""),
-        body_text=body_text or preview,
+        body_text=body_text,
         body_html=body_html,
         folder=folder,
         raw_refs={"graph_id": item.get("id")},
@@ -321,6 +355,8 @@ class OAuthGraphProvider:
                     client_id=client_id,
                     refresh_token=refresh_token,
                     proxy=proxy_str,
+                    access_token=str(creds.get("access_token") or "").strip() or None,
+                    token_expires_at=creds.get("token_expires_at"),
                 )
             except OAuthError as exc:
                 last_oauth = exc
@@ -355,15 +391,54 @@ class OAuthGraphProvider:
         client_id: str,
         refresh_token: str,
         proxy: str | None,
+        access_token: str | None = None,
+        token_expires_at: Any = None,
     ) -> FetchResult:
-        token_body = self.refresh_access_token(
-            client_id=client_id,
-            refresh_token=refresh_token,
-            proxy=proxy,
-        )
-        access_token = str(token_body["access_token"])
-        updates = _token_updates(token_body, transport="graph")
-        headers = {"Authorization": f"Bearer {access_token}"}
+        phase = "full"
+        body_ids: list[str] = []
+        if limits:
+            phase = str(limits.get("phase") or "full").strip().lower() or "full"
+            raw_ids = limits.get("body_ids")
+            if isinstance(raw_ids, list):
+                body_ids = [str(x) for x in raw_ids if x][:_MAX_BODY_IDS]
+        reuse_at = _access_token_reusable(access_token, token_expires_at)
+        reused = bool(reuse_at)
+        if reuse_at:
+            token = reuse_at
+            updates = _token_updates({"access_token": token}, transport="graph")
+        else:
+            token_body = self.refresh_access_token(
+                client_id=client_id,
+                refresh_token=refresh_token,
+                proxy=proxy,
+            )
+            token = str(token_body["access_token"])
+            updates = _token_updates(token_body, transport="graph")
+
+        client = self._http(proxy=proxy)
+        close = self._owns_client()
+
+        def _auth_headers() -> dict[str, str]:
+            return {"Authorization": f"Bearer {token}"}
+
+        def _refresh_now() -> None:
+            nonlocal token, updates, reused
+            token_body = self.refresh_access_token(
+                client_id=client_id,
+                refresh_token=refresh_token,
+                proxy=proxy,
+            )
+            token = str(token_body["access_token"])
+            updates = _token_updates(token_body, transport="graph")
+            reused = False
+
+        def _get(url: str) -> httpx.Response:
+            resp = client.get(url, headers=_auth_headers())
+            if resp.status_code == 401 and reused:
+                _refresh_now()
+                resp = client.get(url, headers=_auth_headers())
+            return resp
+
         # Incremental / older-page filters
         since = None
         before = None
@@ -382,16 +457,67 @@ class OAuthGraphProvider:
                 before_s = f"{before_s}T00:00:00Z"
             filters.append(f"receivedDateTime lt {before_s}")
         filter_q = f"&$filter={' and '.join(filters)}" if filters else ""
+        select = _SELECT_HEADERS if phase == "headers" else _SELECT
         list_url = (
             f"{GRAPH_BASE}/me/mailFolders/{graph_folder}/messages"
-            f"?$top={top}&$select={_SELECT}&$orderby=receivedDateTime desc{filter_q}"
+            f"?$top={top}&$select={select}&$orderby=receivedDateTime desc{filter_q}"
         )
 
-        client = self._http(proxy=proxy)
-        close = self._owns_client()
         try:
+            if phase == "bodies":
+                messages: list[Message] = []
+                attempted = 0
+                failed = 0
+                last_status = 0
+                for raw_id in body_ids:
+                    safe_id = _safe_graph_message_id(raw_id)
+                    if not safe_id:
+                        continue
+                    attempted += 1
+                    try:
+                        br = _get(
+                            f"{GRAPH_BASE}/me/mailFolders/{graph_folder}/messages/"
+                            f"{quote(safe_id, safe='')}"
+                            f"?$select=id,subject,from,toRecipients,receivedDateTime,"
+                            f"bodyPreview,body,uniqueBody,parentFolderId"
+                        )
+                    except httpx.HTTPError:
+                        failed += 1
+                        continue
+                    if br.status_code >= 400:
+                        last_status = br.status_code
+                        failed += 1
+                        continue
+                    try:
+                        detailed = br.json()
+                    except Exception:
+                        failed += 1
+                        continue
+                    if not isinstance(detailed, dict):
+                        failed += 1
+                        continue
+                    messages.append(_graph_message_to_message(detailed, folder=folder))
+                from app.services.parser import attach_verification_code
+
+                attach_verification_code(messages)
+                if attempted and failed == attempted and not messages:
+                    return FetchResult(
+                        ok=False,
+                        folder=folder,
+                        error=_map_graph_error(last_status or 404),
+                        credential_updates=updates if updates.any() else None,
+                        phase="bodies",
+                    )
+                return FetchResult(
+                    ok=True,
+                    messages=messages,
+                    folder=folder,
+                    credential_updates=updates if updates.any() else None,
+                    phase="bodies",
+                )
+
             try:
-                resp = client.get(list_url, headers=headers)
+                resp = _get(list_url)
             except httpx.TimeoutException:
                 return FetchResult(
                     ok=False,
@@ -429,33 +555,46 @@ class OAuthGraphProvider:
             if not isinstance(items, list):
                 items = []
 
-            messages: list[Message] = []
+            messages = []
+            pending: list[str] = []
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 msg_id = item.get("id")
                 body_obj = item.get("body") if isinstance(item.get("body"), dict) else {}
                 has_body = bool(str(body_obj.get("content") or "").strip())
-                if msg_id and not has_body:
-                    try:
-                        br = client.get(
-                            f"{GRAPH_BASE}/me/messages/{msg_id}"
-                            f"?$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview,body,uniqueBody",
-                            headers=headers,
-                        )
-                        if br.status_code < 400:
-                            detailed = br.json()
-                            if isinstance(detailed, dict):
-                                item = {**item, **detailed}
-                    except httpx.HTTPError:
-                        pass
-                messages.append(_graph_message_to_message(item, folder=folder))
+                if phase != "headers" and msg_id and not has_body:
+                    safe_id = _safe_graph_message_id(msg_id)
+                    if safe_id:
+                        try:
+                            br = _get(
+                                f"{GRAPH_BASE}/me/mailFolders/{graph_folder}/messages/"
+                                f"{quote(safe_id, safe='')}"
+                                f"?$select=id,subject,from,toRecipients,receivedDateTime,"
+                                f"bodyPreview,body,uniqueBody"
+                            )
+                            if br.status_code < 400:
+                                detailed = br.json()
+                                if isinstance(detailed, dict):
+                                    item = {**item, **detailed}
+                        except httpx.HTTPError:
+                            pass
+                msg = _graph_message_to_message(item, folder=folder)
+                messages.append(msg)
+                if phase == "headers" and msg.id:
+                    pending.append(str(msg.id))
 
+            from app.services.parser import attach_verification_code
+
+            attach_verification_code(messages)
             return FetchResult(
                 ok=True,
                 messages=messages,
                 folder=folder,
                 credential_updates=updates if updates.any() else None,
+                phase=phase,
+                pending_body_ids=pending,
+                partial=phase == "headers",
             )
         finally:
             if close:
