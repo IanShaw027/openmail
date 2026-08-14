@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import httpx
 
+from unittest.mock import patch
+
 from app.models import ProviderType
+from app.providers.base import FetchResult
 from app.providers.oauth_graph import OAuthGraphProvider
 
 
@@ -95,3 +98,91 @@ def test_oauth_expands_body_for_every_listed_message() -> None:
     assert len(result.messages) == 30
     assert len(detail_ids) == 30
     assert all(m.body_text for m in result.messages)
+
+
+def test_oauth_graph_invalid_grant_falls_back_to_imap() -> None:
+    token_bodies: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "login.microsoftonline.com" in url:
+            body = request.content.decode()
+            token_bodies.append(body)
+            if "graph.microsoft.com" in body:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": "invalid_grant",
+                        "error_description": "AADSTS70000: The provided grant has expired due to it being revoked",
+                        "error_codes": [70000],
+                    },
+                )
+            if "outlook.office.com" in body and "IMAP" in body:
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": "imap_at",
+                        "refresh_token": "rt_rotated",
+                        "expires_in": 3600,
+                        "scope": "https://outlook.office.com/IMAP.AccessAsUser.All",
+                    },
+                )
+        return httpx.Response(404, json={})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OAuthGraphProvider(client=client)
+    account = SimpleNamespace(provider=ProviderType.oauth, email="user@hotmail.com")
+    imap_result = FetchResult(ok=True, messages=[], folder="inbox")
+    with patch(
+        "app.providers.imap_provider.ImapProvider.fetch",
+        return_value=imap_result,
+    ) as imap_fetch:
+        result = provider.fetch(
+            account,
+            credentials={"client_id": "cid-generic", "refresh_token": "rt_old"},
+        )
+    client.close()
+
+    assert result.ok is True
+    assert any("graph.microsoft.com" in body for body in token_bodies)
+    assert any("IMAP.AccessAsUser.All" in body for body in token_bodies)
+    assert result.credential_updates is not None
+    assert result.credential_updates.refresh_token == "rt_rotated"
+    assert (result.credential_updates.session_meta or {}).get("oauth_transport") == "imap"
+    imap_fetch.assert_called_once()
+    passed = imap_fetch.call_args.kwargs.get("credentials") or {}
+    assert passed.get("access_token") == "imap_at"
+
+
+def test_oauth_thunderbird_client_skips_graph_refresh() -> None:
+    token_bodies: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "login.microsoftonline.com" in str(request.url):
+            token_bodies.append(request.content.decode())
+            return httpx.Response(
+                200,
+                json={"access_token": "imap_at", "refresh_token": "rt_new", "expires_in": 3600},
+            )
+        return httpx.Response(404, json={})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OAuthGraphProvider(client=client)
+    account = SimpleNamespace(provider=ProviderType.oauth, email="user@hotmail.com")
+    with patch(
+        "app.providers.imap_provider.ImapProvider.fetch",
+        return_value=FetchResult(ok=True, messages=[], folder="inbox"),
+    ):
+        result = provider.fetch(
+            account,
+            credentials={
+                "client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+                "refresh_token": "rt_old",
+            },
+        )
+    client.close()
+
+    assert result.ok is True
+    assert token_bodies
+    assert all("graph.microsoft.com" not in body for body in token_bodies)
+    assert any("IMAP.AccessAsUser.All" in body for body in token_bodies)

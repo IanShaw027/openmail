@@ -25,6 +25,11 @@ from app.services.parser import annotate_message_code
 TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 DEFAULT_SCOPE = "https://graph.microsoft.com/Mail.Read offline_access"
+IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
+# Thunderbird / mail-public style public client: refresh tokens are IMAP/POP, not Graph.
+THUNDERBIRD_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+IMAP_FIRST_CLIENT_IDS = frozenset({THUNDERBIRD_CLIENT_ID.lower()})
+DEFAULT_MS_IMAP_HOST = "outlook.office365.com"
 
 # folder query param → Graph well-known folder name
 _FOLDER_MAP = {
@@ -78,6 +83,37 @@ def _map_graph_error(status: int) -> str:
     if status >= 500:
         return "Microsoft Graph 暂时不可用 / Microsoft Graph temporarily unavailable"
     return f"Graph 请求失败 ({status}) / Graph request failed ({status})"
+
+
+def prefers_imap_transport(client_id: str, creds: dict[str, Any] | None = None) -> bool:
+    """True when this client/token is known to be Outlook IMAP, not Graph."""
+    cid = str(client_id or "").strip().lower()
+    if cid in IMAP_FIRST_CLIENT_IDS:
+        return True
+    transport = str((creds or {}).get("oauth_transport") or "").strip().lower()
+    return transport == "imap"
+
+
+def _is_invalid_grant(exc: OAuthError) -> bool:
+    if str(getattr(exc, "error", "") or "").lower() == "invalid_grant":
+        return True
+    text = str(exc).lower()
+    return "invalid_grant" in text or "刷新令牌" in text or "refresh token" in text
+
+
+def _token_updates(token_body: dict[str, Any], *, transport: str) -> CredentialUpdates:
+    new_refresh = token_body.get("refresh_token")
+    updates = CredentialUpdates(
+        access_token=str(token_body["access_token"]),
+        refresh_token=str(new_refresh) if new_refresh else None,
+    )
+    meta: dict[str, Any] = {"oauth_transport": transport}
+    expires_in = token_body.get("expires_in")
+    if expires_in is not None:
+        meta["token_expires_in"] = expires_in
+        meta["token_obtained_at"] = datetime.now(timezone.utc).isoformat()
+    updates.session_meta = meta
+    return updates
 
 
 def _format_from(from_obj: dict[str, Any] | None) -> tuple[str, str]:
@@ -214,7 +250,12 @@ class OAuthGraphProvider:
             body = {"error": resp.text[:200]}
 
         if resp.status_code >= 400:
-            raise OAuthError(_map_token_error(resp.status_code, body), status=resp.status_code)
+            err = str(body.get("error") or "") if isinstance(body, dict) else ""
+            raise OAuthError(
+                _map_token_error(resp.status_code, body),
+                status=resp.status_code,
+                error=err,
+            )
         if not isinstance(body, dict) or not body.get("access_token"):
             raise OAuthError("OAuth 响应缺少 access_token / Missing access_token", status=resp.status_code)
         return body
@@ -257,41 +298,71 @@ class OAuthGraphProvider:
         else:
             out_folder = "inbox"
 
-        try:
-            token_body = self.refresh_access_token(
-                client_id=client_id,
-                refresh_token=refresh_token,
-                proxy=proxy_str,
-            )
-        except OAuthError as exc:
-            return FetchResult(ok=False, folder=out_folder, error=str(exc))
-        except httpx.TimeoutException:
-            return FetchResult(
-                ok=False,
-                folder=out_folder,
-                error="取件超时，请重试 / Fetch timed out, please retry",
-            )
-        except httpx.HTTPError as exc:
-            return FetchResult(
-                ok=False,
-                folder=out_folder,
-                error=f"网络错误 / Network error: {exc.__class__.__name__}",
-            )
-
-        access_token = str(token_body["access_token"])
-        new_refresh = token_body.get("refresh_token")
-        updates = CredentialUpdates(
-            access_token=access_token,
-            refresh_token=str(new_refresh) if new_refresh else None,
+        modes = ("imap", "graph") if prefers_imap_transport(client_id, creds) else ("graph", "imap")
+        last_oauth: OAuthError | None = None
+        for idx, mode in enumerate(modes):
+            try:
+                if mode == "imap":
+                    return self._fetch_via_imap(
+                        account,
+                        folder=folder,
+                        quick=quick,
+                        limits=limits,
+                        credentials=creds,
+                        client_id=client_id,
+                        refresh_token=refresh_token,
+                        proxy=proxy_str,
+                    )
+                return self._fetch_via_graph(
+                    folder=out_folder,
+                    graph_folder=graph_folder,
+                    top=top,
+                    limits=limits,
+                    client_id=client_id,
+                    refresh_token=refresh_token,
+                    proxy=proxy_str,
+                )
+            except OAuthError as exc:
+                last_oauth = exc
+                if idx + 1 < len(modes) and _is_invalid_grant(exc):
+                    continue
+                return FetchResult(ok=False, folder=out_folder, error=str(exc))
+            except httpx.TimeoutException:
+                return FetchResult(
+                    ok=False,
+                    folder=out_folder,
+                    error="取件超时，请重试 / Fetch timed out, please retry",
+                )
+            except httpx.HTTPError as exc:
+                return FetchResult(
+                    ok=False,
+                    folder=out_folder,
+                    error=f"网络错误 / Network error: {exc.__class__.__name__}",
+                )
+        return FetchResult(
+            ok=False,
+            folder=out_folder,
+            error=str(last_oauth) if last_oauth else "OAuth 令牌刷新失败 / OAuth token refresh failed",
         )
-        # Also surface expires if present (provider doesn't persist expires itself)
-        expires_in = token_body.get("expires_in")
-        if expires_in is not None:
-            updates.session_meta = {
-                "token_expires_in": expires_in,
-                "token_obtained_at": datetime.now(timezone.utc).isoformat(),
-            }
 
+    def _fetch_via_graph(
+        self,
+        *,
+        folder: str,
+        graph_folder: str,
+        top: int,
+        limits: dict[str, Any] | None,
+        client_id: str,
+        refresh_token: str,
+        proxy: str | None,
+    ) -> FetchResult:
+        token_body = self.refresh_access_token(
+            client_id=client_id,
+            refresh_token=refresh_token,
+            proxy=proxy,
+        )
+        access_token = str(token_body["access_token"])
+        updates = _token_updates(token_body, transport="graph")
         headers = {"Authorization": f"Bearer {access_token}"}
         # Incremental / older-page filters
         since = None
@@ -316,7 +387,7 @@ class OAuthGraphProvider:
             f"?$top={top}&$select={_SELECT}&$orderby=receivedDateTime desc{filter_q}"
         )
 
-        client = self._http(proxy=proxy_str)
+        client = self._http(proxy=proxy)
         close = self._owns_client()
         try:
             try:
@@ -324,14 +395,14 @@ class OAuthGraphProvider:
             except httpx.TimeoutException:
                 return FetchResult(
                     ok=False,
-                    folder=out_folder,
+                    folder=folder,
                     error="取件超时，请重试 / Fetch timed out, please retry",
                     credential_updates=updates if updates.any() else None,
                 )
             except httpx.HTTPError as exc:
                 return FetchResult(
                     ok=False,
-                    folder=out_folder,
+                    folder=folder,
                     error=f"网络错误 / Network error: {exc.__class__.__name__}",
                     credential_updates=updates if updates.any() else None,
                 )
@@ -339,7 +410,7 @@ class OAuthGraphProvider:
             if resp.status_code >= 400:
                 return FetchResult(
                     ok=False,
-                    folder=out_folder,
+                    folder=folder,
                     error=_map_graph_error(resp.status_code),
                     credential_updates=updates if updates.any() else None,
                 )
@@ -349,7 +420,7 @@ class OAuthGraphProvider:
             except Exception:
                 return FetchResult(
                     ok=False,
-                    folder=out_folder,
+                    folder=folder,
                     error="Graph 返回非 JSON / Graph returned non-JSON",
                     credential_updates=updates if updates.any() else None,
                 )
@@ -378,17 +449,64 @@ class OAuthGraphProvider:
                                 item = {**item, **detailed}
                     except httpx.HTTPError:
                         pass
-                messages.append(_graph_message_to_message(item, folder=out_folder))
+                messages.append(_graph_message_to_message(item, folder=folder))
 
             return FetchResult(
                 ok=True,
                 messages=messages,
-                folder=out_folder,
+                folder=folder,
                 credential_updates=updates if updates.any() else None,
             )
         finally:
             if close:
                 client.close()
+
+    def _fetch_via_imap(
+        self,
+        account: Any,
+        *,
+        folder: str,
+        quick: bool,
+        limits: dict[str, Any] | None,
+        credentials: dict[str, Any],
+        client_id: str,
+        refresh_token: str,
+        proxy: str | None,
+    ) -> FetchResult:
+        token_body = self.refresh_access_token(
+            client_id=client_id,
+            refresh_token=refresh_token,
+            scope=IMAP_SCOPE,
+            proxy=proxy,
+        )
+        updates = _token_updates(token_body, transport="imap")
+        from app.providers.imap_provider import ImapProvider
+
+        imap_creds = dict(credentials)
+        imap_creds["access_token"] = str(token_body["access_token"])
+        if not imap_creds.get("imap_host") and not imap_creds.get("host"):
+            imap_creds["imap_host"] = DEFAULT_MS_IMAP_HOST
+            imap_creds["imap_port"] = imap_creds.get("imap_port") or 993
+        result = ImapProvider().fetch(
+            account,
+            folder=folder,
+            quick=quick,
+            limits=limits,
+            credentials=imap_creds,
+        )
+        if result.credential_updates and result.credential_updates.any():
+            merged = result.credential_updates
+            if updates.refresh_token:
+                merged.refresh_token = updates.refresh_token
+            if updates.access_token:
+                merged.access_token = updates.access_token
+            meta = dict(merged.session_meta or {})
+            meta.update(updates.session_meta or {})
+            merged.session_meta = meta
+            result.credential_updates = merged
+        else:
+            result.credential_updates = updates if updates.any() else None
+        return result
 
     def health(self, account: Any, *, credentials: dict[str, Any] | None = None) -> HealthResult:
         creds = dict(credentials or {})
@@ -396,16 +514,34 @@ class OAuthGraphProvider:
         refresh_token = str(creds.get("refresh_token") or "").strip()
         if not client_id or not refresh_token:
             return HealthResult(ok=False, detail="missing client_id or refresh_token")
-        try:
-            self.refresh_access_token(client_id=client_id, refresh_token=refresh_token)
-            return HealthResult(ok=True, detail="token refresh ok")
-        except OAuthError as exc:
-            return HealthResult(ok=False, detail=str(exc))
-        except httpx.HTTPError as exc:
-            return HealthResult(ok=False, detail=str(exc))
+        scopes = (IMAP_SCOPE, DEFAULT_SCOPE) if prefers_imap_transport(client_id, creds) else (DEFAULT_SCOPE, IMAP_SCOPE)
+        last: OAuthError | httpx.HTTPError | None = None
+        for idx, scope in enumerate(scopes):
+            try:
+                self.refresh_access_token(
+                    client_id=client_id,
+                    refresh_token=refresh_token,
+                    scope=scope,
+                )
+                return HealthResult(ok=True, detail="token refresh ok")
+            except OAuthError as exc:
+                last = exc
+                if idx + 1 < len(scopes) and _is_invalid_grant(exc):
+                    continue
+                return HealthResult(ok=False, detail=str(exc))
+            except httpx.HTTPError as exc:
+                return HealthResult(ok=False, detail=str(exc))
+        return HealthResult(ok=False, detail=str(last) if last else "token refresh failed")
 
 
 class OAuthError(Exception):
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        error: str | None = None,
+    ) -> None:
         self.status = status
+        self.error = error
         super().__init__(message)

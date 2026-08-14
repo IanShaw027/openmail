@@ -9,10 +9,11 @@ import {
 import { useAccountsStore } from '@/stores/accounts'
 import { useMailCacheStore, type DeltaMailItem } from '@/stores/mailCache'
 import { formatSyncAck, getSyncAck, parseSyncAck, setSyncAck } from '@/utils/syncAck'
+import { parseIsoToMs } from '@/utils/accountUpdatedAt'
 
 const MAX_PAGES = 20
 const DEFAULT_LIMIT = 200
-const POLL_MS = 3 * 60 * 1000
+const POLL_MS = 60 * 1000
 
 function isSoftFail(e: unknown): boolean {
   return e instanceof ApiError && (e.status === 404 || e.status === 410 || e.status === 501)
@@ -56,7 +57,9 @@ function patchAccountsFromDelta(rows: SyncDeltaAccount[] | undefined): void {
         row.latest_verification_code != null && String(row.latest_verification_code).trim() !== ''
           ? String(row.latest_verification_code).trim()
           : null
-      if (!code) continue
+      const lastSyncAt =
+        parseIsoToMs(row.last_sync_at) ?? parseIsoToMs(row.latest_code_at)
+      if (!code && lastSyncAt == null) continue
 
       const sid = row.id != null ? String(row.id) : ''
       const emailKey = row.email ? String(row.email).toLowerCase().trim() : ''
@@ -67,26 +70,32 @@ function patchAccountsFromDelta(rows: SyncDeltaAccount[] | undefined): void {
         return false
       }
 
-      for (let i = 0; i < accounts.localAccounts.length; i++) {
-        const a = accounts.localAccounts[i]!
-        if (!match(a)) continue
-        if (a.latestCode === code) continue
-        accounts.localAccounts[i] = {
-          ...a,
-          latestCode: code,
-          updatedAt: Date.now(),
+      const apply = (
+        list: Array<{
+          serverId?: string
+          id: string
+          email: string
+          latestCode?: string
+          lastSyncAt?: number
+          updatedAt: number
+        }>,
+      ) => {
+        for (let i = 0; i < list.length; i++) {
+          const a = list[i]!
+          if (!match(a)) continue
+          let next = a
+          if (code && a.latestCode !== code) {
+            next = { ...next, latestCode: code, updatedAt: Date.now() }
+          }
+          if (lastSyncAt != null && a.lastSyncAt !== lastSyncAt) {
+            next = next === a ? { ...a, lastSyncAt } : { ...next, lastSyncAt }
+          }
+          if (next !== a) list[i] = next
         }
       }
-      for (let i = 0; i < accounts.serverAccounts.length; i++) {
-        const a = accounts.serverAccounts[i]!
-        if (!match(a)) continue
-        if (a.latestCode === code) continue
-        accounts.serverAccounts[i] = {
-          ...a,
-          latestCode: code,
-          updatedAt: Date.now(),
-        }
-      }
+
+      apply(accounts.localAccounts)
+      apply(accounts.serverAccounts)
     }
   } catch (e) {
     console.warn('[openmail] patch accounts from delta failed', e)
@@ -214,6 +223,7 @@ export const useCloudSyncStore = defineStore('cloudSync', () => {
 
   function startCloudDeltaPolling(): void {
     stopCloudDeltaPolling()
+    void pullCloudMailDelta()
     pollTimer = setInterval(() => {
       void pullCloudMailDelta()
     }, POLL_MS)

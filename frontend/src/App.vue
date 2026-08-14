@@ -48,18 +48,17 @@ async function hydrateStores() {
   await twofa.hydrateFromVault()
   await mailCache.hydrateFromVault()
   void accounts.loadServerAccounts()
-  // Cloud mail delta → mailCache (soft-fails if API not ready)
-  void cloudSync.pullCloudMailDelta()
-  cloudSync.startCloudDeltaPolling()
 }
 
-// Stop interval poll when vault locks (explicit lock or idle timeout)
-watch(
-  () => vault.unlocked,
-  (u) => {
-    if (!u) cloudSync.stopCloudDeltaPolling()
-  },
-)
+// Pull once when the unlocked shell is shown (enter / password unlock),
+// then every minute until the vault locks.
+watch(showApp, (show) => {
+  if (show) {
+    cloudSync.startCloudDeltaPolling()
+  } else {
+    cloudSync.stopCloudDeltaPolling()
+  }
+})
 
 /**
  * Give the user a chance to react before an idle lock hides the app: any

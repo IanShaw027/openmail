@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cloud mail pull runs when the unlocked app is shown**, then every **1
+  minute** until the vault locks. The previous 3-minute timer did not fire
+  on enter, so a failed first pull looked like cloud sync was off.
+- **Console “Updated” uses mailbox sync age**, not account-row `updated_at`.
+  Cloud delta now applies `last_sync_at` even when the OTP is unchanged, so
+  the column can move after a pull.
+- **Bare `c` still copies the panel OTP**, but Cmd/Ctrl+C and a real text
+  selection keep the native clipboard. The shortcut no longer hijacks copy.
+- **Console splits mail vs account update times.** Unseen inbox mail after
+  the last time you opened a row shows a count badge; opening the mailbox
+  clears it. Existing mail is baselined so history is not marked new.
+- **Thunderbird-style Microsoft tokens can fetch via IMAP XOAUTH2** when
+  Graph Mail.Read is missing, and the chosen transport is remembered.
+
 ## [0.3.7] — 2026-08-13
 
 ### Added

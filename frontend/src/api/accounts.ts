@@ -35,7 +35,11 @@ export interface FetchResult {
   mailboxes?: string[] | null
   /** IMAP folder UIDVALIDITY for this fetch */
   uidvalidity?: number | null
-  credential_updates?: { refresh_token?: string; access_token?: string } | null
+  credential_updates?: {
+    refresh_token?: string
+    access_token?: string
+    oauth_transport?: string
+  } | null
 }
 
 /** Body for proxy fetch (credentials not stored server-side). */
@@ -224,7 +228,11 @@ export interface SendMailResult {
   ok: boolean
   error?: string | null
   detail?: string | null
-  credential_updates?: { refresh_token?: string; access_token?: string } | null
+  credential_updates?: {
+    refresh_token?: string
+    access_token?: string
+    oauth_transport?: string
+  } | null
 }
 
 /** Send with credentials in body (local accounts). */
@@ -246,6 +254,7 @@ export function credentialFromLocal(acc: {
   email?: string
   refreshToken?: string
   clientId?: string
+  oauthTransport?: string
   apiUrl?: string
   apiKey?: string
   apiAuthStyle?: string
@@ -262,6 +271,7 @@ export function credentialFromLocal(acc: {
     const c: Record<string, unknown> = {}
     if (acc.refreshToken) c.refresh_token = acc.refreshToken
     if (acc.clientId) c.client_id = acc.clientId
+    if (acc.oauthTransport) c.oauth_transport = acc.oauthTransport
     return Object.keys(c).length ? c : null
   }
   if (acc.type === 'http_api') {
@@ -308,6 +318,7 @@ export function toCreateBody(
     password?: string
     refreshToken?: string
     clientId?: string
+    oauthTransport?: string
     apiUrl?: string
     apiKey?: string
     apiAuthStyle?: string
@@ -345,6 +356,7 @@ export function toCreateBody(
       email: partial.email,
       refreshToken: partial.refreshToken,
       clientId: partial.clientId,
+      oauthTransport: partial.oauthTransport,
       apiUrl: partial.apiUrl,
       apiKey: partial.apiKey,
       apiAuthStyle: partial.apiAuthStyle,

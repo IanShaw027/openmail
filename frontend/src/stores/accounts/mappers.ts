@@ -2,6 +2,7 @@ import type { MailAccount } from '@/types/account'
 import { resolveAccountBrand, resolveDomainProfile } from '@/utils/domainBrand'
 import type { ServerAccountOut } from '@/api/accounts'
 import { applyCloudAccountUiMeta } from '@/utils/accountUiMeta'
+import { parseIsoToMs } from '@/utils/accountUpdatedAt'
 
 export const LOCAL_ACCOUNTS_KEY = 'openmail.accounts.local'
 
@@ -53,6 +54,9 @@ export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): Mai
   else if (row.status === 'error' || row.status === 'need_reauth') status = 'error'
   const createdAt = row.created_at ? Date.parse(row.created_at) || Date.now() : Date.now()
   const updatedAt = row.updated_at ? Date.parse(row.updated_at) || Date.now() : Date.now()
+  const syncClocks = [parseIsoToMs(row.last_sync_at), parseIsoToMs(row.latest_code_at), prev?.lastSyncAt]
+    .filter((n): n is number => typeof n === 'number')
+  const lastSyncAt = syncClocks.length ? Math.max(...syncClocks) : undefined
   const mapped: MailAccount = {
     id: prev?.id && prev.storage === 'server' ? prev.id : `srv_${row.id}`,
     email,
@@ -76,6 +80,7 @@ export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): Mai
     password: prev?.password,
     refreshToken: prev?.refreshToken,
     clientId: prev?.clientId,
+    oauthTransport: prev?.oauthTransport,
     apiUrl: prev?.apiUrl,
     apiKey: prev?.apiKey,
     apiAuthStyle: prev?.apiAuthStyle,
@@ -89,6 +94,7 @@ export function mapServerToLocal(row: ServerAccountOut, prev?: MailAccount): Mai
     rawLine: prev?.rawLine || email,
     createdAt: prev?.createdAt || createdAt,
     updatedAt,
+    lastSyncAt,
   }
   return applyCloudAccountUiMeta(mapped)
 }

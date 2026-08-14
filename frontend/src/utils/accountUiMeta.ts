@@ -11,6 +11,8 @@
 export interface AccountUiMeta {
   groupId?: string
   starred?: boolean
+  /** Last time the user opened this mailbox (or first-seen baseline). */
+  mailSeenAt?: number
 }
 
 const KEY = 'openmail.accountUiMeta.v1'
@@ -54,10 +56,14 @@ export function patchAccountUiMeta(
   const next: AccountUiMeta = { ...prev }
   if (patch.groupId !== undefined) next.groupId = patch.groupId || 'default'
   if (patch.starred !== undefined) next.starred = Boolean(patch.starred)
+  if (patch.mailSeenAt !== undefined) {
+    next.mailSeenAt = Number.isFinite(patch.mailSeenAt) ? patch.mailSeenAt : undefined
+  }
   // Drop empty entries to keep storage small
   if (
     (!next.groupId || next.groupId === 'default') &&
-    !next.starred
+    !next.starred &&
+    !next.mailSeenAt
   ) {
     // Keep default + unstarred as an explicit record only when user set them
     // (needed so cloud-only rows do not lose "back to default")
@@ -99,7 +105,7 @@ export function removeAccountUiMetaIfUnused(
  * never treat 'default' as missing (that resurrected old groups on hydrate).
  */
 export function fillMissingAccountUiMeta<
-  T extends { email: string; groupId?: string; starred?: boolean },
+  T extends { email: string; groupId?: string; starred?: boolean; mailSeenAt?: number },
 >(acc: T): T {
   const meta = getAccountUiMeta(acc.email)
   if (!meta) return acc
@@ -110,6 +116,9 @@ export function fillMissingAccountUiMeta<
   if (acc.starred === undefined && meta.starred !== undefined) {
     next = { ...next, starred: meta.starred }
   }
+  if (acc.mailSeenAt === undefined && meta.mailSeenAt !== undefined) {
+    next = { ...next, mailSeenAt: meta.mailSeenAt }
+  }
   return next
 }
 
@@ -118,12 +127,13 @@ export function fillMissingAccountUiMeta<
  * when present (API has no columns; prev is only in-memory this session).
  */
 export function applyCloudAccountUiMeta<
-  T extends { email: string; groupId?: string; starred?: boolean },
+  T extends { email: string; groupId?: string; starred?: boolean; mailSeenAt?: number },
 >(acc: T): T {
   const meta = getAccountUiMeta(acc.email)
   if (!meta) return acc
   let next = acc
   if (meta.groupId !== undefined) next = { ...next, groupId: meta.groupId }
   if (meta.starred !== undefined) next = { ...next, starred: meta.starred }
+  if (meta.mailSeenAt !== undefined) next = { ...next, mailSeenAt: meta.mailSeenAt }
   return next
 }

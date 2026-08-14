@@ -35,6 +35,47 @@ def test_safe_uids_reject_wildcards_and_crlf() -> None:
     assert _safe_uids(["10", "abc", ""]) == ["10"]
 
 
+def test_imap_xoauth2_uses_authenticate_not_login() -> None:
+    mock_conn = MagicMock()
+    mock_conn.authenticate.return_value = ("OK", [b"Logged in"])
+
+    provider = ImapProvider()
+    with (
+        patch.object(provider, "_connect", return_value=mock_conn),
+        patch.object(provider, "_send_client_id"),
+    ):
+        conn = provider._login_connect(
+            "outlook.office365.com",
+            993,
+            True,
+            "user@hotmail.com",
+            "",
+            access_token="imap_at",
+        )
+
+    assert conn is mock_conn
+    mock_conn.login.assert_not_called()
+    mock_conn.authenticate.assert_called_once()
+    mechanism, authobj = mock_conn.authenticate.call_args[0]
+    assert mechanism == "XOAUTH2"
+    payload = authobj(None)
+    assert payload.startswith(b"user=user@hotmail.com")
+    assert b"auth=Bearer imap_at" in payload
+
+
+def test_imap_fetch_accepts_access_token_without_password() -> None:
+    provider = ImapProvider()
+    account = SimpleNamespace(provider="imap", email="user@hotmail.com")
+    with patch.object(provider, "_login_connect", return_value=None) as login:
+        result = provider.fetch(
+            account,
+            credentials={"access_token": "imap_at", "imap_host": "outlook.office365.com"},
+        )
+    assert "缺少 IMAP 密码" not in (result.error or "")
+    login.assert_called_once()
+    assert login.call_args.kwargs.get("access_token") == "imap_at"
+
+
 def test_imap_non_ssl_requires_starttls_before_login() -> None:
     """ssl=false means STARTTLS on 143, never plaintext LOGIN."""
     mock_conn = MagicMock()

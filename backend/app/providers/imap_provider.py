@@ -153,6 +153,11 @@ def _has_control_chars(*values: str | None) -> bool:
     )
 
 
+def _xoauth2_payload(email_addr: str, access_token: str) -> bytes:
+    """RFC 7628 XOAUTH2 initial client response."""
+    return f"user={email_addr}\x01auth=Bearer {access_token}\x01\x01".encode("utf-8")
+
+
 _UID_RE = re.compile(r"^[0-9]+$")
 
 
@@ -553,9 +558,10 @@ class ImapProvider:
             or ""
         )
         password = normalize_imap_secret(str(password), email_addr)
+        access_token = str(creds.get("access_token") or creds.get("oauth_access_token") or "").strip()
         if not email_addr:
             return FetchResult(ok=False, folder=folder, error="缺少邮箱地址")
-        if not password:
+        if not password and not access_token:
             return FetchResult(ok=False, folder=folder, error="缺少 IMAP 密码或授权码")
 
         try:
@@ -579,7 +585,13 @@ class ImapProvider:
         try:
             proxy = str(creds.get("proxy") or getattr(account, "proxy", None) or "").strip() or None
             conn = self._login_connect(
-                hint.host, hint.port, hint.ssl, email_addr, password, proxy=proxy
+                hint.host,
+                hint.port,
+                hint.ssl,
+                email_addr,
+                password,
+                proxy=proxy,
+                access_token=access_token or None,
             )
             if conn is None:
                 return FetchResult(ok=False, folder=folder, error="IMAP 登录失败")
@@ -761,12 +773,14 @@ class ImapProvider:
         password: str,
         *,
         proxy: str | None = None,
+        access_token: str | None = None,
     ) -> imaplib.IMAP4 | None:
         """Connect and login; try full email then local-part (iCloud)."""
         # imaplib sends LOGIN's username unquoted, and `_quote()` on the password
         # escapes only `\` and `"` — neither handles CRLF, so a credential with
         # control characters injects a command before authentication completes.
-        if _has_control_chars(email_addr, password):
+        token = (access_token or "").strip()
+        if _has_control_chars(email_addr, password, token):
             raise ValueError("credential contains control characters / 凭据包含控制字符")
 
         candidates = [email_addr]
@@ -782,7 +796,13 @@ class ImapProvider:
                 conn = self._connect(
                     host, port, use_ssl, server_hostname=host, proxy=proxy
                 )
-                typ, _ = conn.login(user, password)
+                if token:
+                    typ, _ = conn.authenticate(
+                        "XOAUTH2",
+                        lambda _challenge, u=user, t=token: _xoauth2_payload(u, t),
+                    )
+                else:
+                    typ, _ = conn.login(user, password)
                 if typ == "OK":
                     # NetEase and other ID-capable servers: identify client after login
                     self._send_client_id(conn, host=host)

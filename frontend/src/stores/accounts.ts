@@ -20,9 +20,11 @@ import {
 } from './accounts/mappers'
 import {
   fillMissingAccountUiMeta,
+  getAccountUiMeta,
   patchAccountUiMeta,
   removeAccountUiMetaIfUnused,
 } from '@/utils/accountUiMeta'
+import { nextMailSeenAt } from '@/utils/mailSeen'
 import { exportCredentialsTxt, rebuildRawLine } from '@/utils/exportImport'
 import { useMailCacheStore } from '@/stores/mailCache'
 
@@ -41,6 +43,7 @@ function sealPayloadFromAccount(acc: MailAccount): Record<string, unknown> {
     password: acc.password,
     refreshToken: acc.refreshToken,
     clientId: acc.clientId,
+    oauthTransport: acc.oauthTransport,
     apiUrl: acc.apiUrl,
     apiKey: acc.apiKey,
     apiAuthStyle: acc.apiAuthStyle,
@@ -454,12 +457,17 @@ export const useAccountsStore = defineStore('accounts', () => {
               : undefined
             : loc.proxy
         const nextCode = loc.latestCode || srv.latestCode
+        const nextLastSyncAt =
+          srv.lastSyncAt && (!loc.lastSyncAt || srv.lastSyncAt > loc.lastSyncAt)
+            ? srv.lastSyncAt
+            : loc.lastSyncAt
         const linkChanged =
           loc.serverId !== srv.serverId || loc.clientSealed !== srv.clientSealed
         const metaChanged =
           nextNote !== loc.note || nextProxy !== loc.proxy || nextCode !== loc.latestCode
-        if (linkChanged || metaChanged) {
-          healed = true
+        const syncClockChanged = nextLastSyncAt !== loc.lastSyncAt
+        if (linkChanged || metaChanged || syncClockChanged) {
+          if (linkChanged || metaChanged) healed = true
           localAccounts.value[li] = {
             ...loc,
             serverId: srv.serverId,
@@ -467,6 +475,7 @@ export const useAccountsStore = defineStore('accounts', () => {
             note: nextNote,
             proxy: nextProxy,
             latestCode: nextCode,
+            lastSyncAt: nextLastSyncAt,
             // Prefer cloud status when local never fetched / still unknown
             status:
               loc.status === 'unknown' && srv.status && srv.status !== 'unknown'
@@ -474,7 +483,7 @@ export const useAccountsStore = defineStore('accounts', () => {
                 : loc.status,
             lastError: loc.lastError || srv.lastError,
             syncEnabled: loc.syncEnabled ?? srv.syncEnabled,
-            updatedAt: Date.now(),
+            updatedAt: linkChanged || metaChanged ? Date.now() : loc.updatedAt,
           }
         }
       }
@@ -637,6 +646,7 @@ export const useAccountsStore = defineStore('accounts', () => {
             password: acc.password,
             refreshToken: acc.refreshToken,
             clientId: acc.clientId,
+            oauthTransport: acc.oauthTransport,
             apiUrl: acc.apiUrl,
             apiKey: acc.apiKey,
             imapHost: acc.imapHost,
@@ -1076,6 +1086,7 @@ export const useAccountsStore = defineStore('accounts', () => {
       patch.password !== undefined ||
       patch.refreshToken !== undefined ||
       patch.clientId !== undefined ||
+      patch.oauthTransport !== undefined ||
       patch.apiUrl !== undefined ||
       patch.apiKey !== undefined ||
       patch.imapHost !== undefined ||
@@ -1102,6 +1113,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     const credential: Record<string, unknown> = {}
     if (acc.refreshToken) credential.refresh_token = acc.refreshToken
     if (acc.clientId) credential.client_id = acc.clientId
+    if (acc.oauthTransport) credential.oauth_transport = acc.oauthTransport
     if (acc.apiUrl) credential.api_url = acc.apiUrl
     // http_api: do not drop api_key on full credential replace
     const apiSecret = acc.apiKey || acc.password
@@ -1313,6 +1325,38 @@ export const useAccountsStore = defineStore('accounts', () => {
     return accounts.value.find((a) => a.id === id)
   }
 
+  function applyMailSeenAt(email: string, at: number): void {
+    const key = email.toLowerCase().trim()
+    if (!key || !Number.isFinite(at)) return
+    patchAccountUiMeta(email, { mailSeenAt: at })
+    const touch = (list: typeof localAccounts) => {
+      for (let i = 0; i < list.value.length; i++) {
+        const a = list.value[i]!
+        if (a.email.toLowerCase() !== key) continue
+        if (a.mailSeenAt === at) continue
+        list.value[i] = { ...a, mailSeenAt: at }
+      }
+    }
+    touch(localAccounts)
+    touch(serverAccounts)
+  }
+
+  function markMailboxViewed(email: string, now = Date.now()): void {
+    applyMailSeenAt(email, nextMailSeenAt(undefined, { viewed: true, now }))
+  }
+
+  function ensureMailSeenBaseline(email: string, newestMailMs?: number): void {
+    const key = email.toLowerCase().trim()
+    if (!key) return
+    const existing =
+      localAccounts.value.find((a) => a.email.toLowerCase() === key)?.mailSeenAt ??
+      serverAccounts.value.find((a) => a.email.toLowerCase() === key)?.mailSeenAt ??
+      getAccountUiMeta(email)?.mailSeenAt
+    const next = nextMailSeenAt(existing, { newestMailMs, now: Date.now() })
+    if (next === existing) return
+    applyMailSeenAt(email, next)
+  }
+
   return {
     localAccounts,
     serverAccounts,
@@ -1353,6 +1397,8 @@ export const useAccountsStore = defineStore('accounts', () => {
     patchAccount,
     retryPendingCloudWrites,
     findById,
+    markMailboxViewed,
+    ensureMailSeenBaseline,
     hydrateFromVault,
     clearLocalSecrets,
     flushPersist,

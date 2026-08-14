@@ -469,7 +469,11 @@ def fetch_account(
                 )
                 # Persist expires_at convenience field on credential JSON
                 meta = result.credential_updates.session_meta or {}
-                if result.credential_updates.access_token or result.credential_updates.refresh_token:
+                if (
+                    result.credential_updates.access_token
+                    or result.credential_updates.refresh_token
+                    or meta.get("oauth_transport")
+                ):
                     from app.services.credentials import load_credentials, save_credentials
 
                     updated = load_credentials(account, settings=s)
@@ -477,6 +481,8 @@ def fetch_account(
                         updated["access_token"] = result.credential_updates.access_token
                     if result.credential_updates.refresh_token:
                         updated["refresh_token"] = result.credential_updates.refresh_token
+                    if meta.get("oauth_transport"):
+                        updated["oauth_transport"] = str(meta["oauth_transport"])
                     if meta.get("token_expires_in") is not None:
                         try:
                             exp_in = int(meta["token_expires_in"])
@@ -713,6 +719,9 @@ def _session_fields_from_result(result: FetchResult) -> dict[str, Any]:
         cred["refresh_token"] = str(updates.refresh_token)
     if updates.access_token:
         cred["access_token"] = str(updates.access_token)
+    transport = (updates.session_meta or {}).get("oauth_transport")
+    if transport:
+        cred["oauth_transport"] = str(transport)
     out["credential_updates"] = cred or None
     return out
 

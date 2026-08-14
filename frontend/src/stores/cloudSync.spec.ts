@@ -2,15 +2,21 @@
  * Cloud delta ack must not outrun a durable mailCache write.
  * Hitting the page cap must still advance the consumed cursor.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { getSyncAck } from '@/utils/syncAck'
 
-const { flushPersist, mergeDeltaMails, pullSyncDelta } = vi.hoisted(() => ({
-  flushPersist: vi.fn(async () => undefined),
-  mergeDeltaMails: vi.fn(() => 2),
-  pullSyncDelta: vi.fn(),
-}))
+const { flushPersist, mergeDeltaMails, pullSyncDelta, accountsState } = vi.hoisted(
+  () => ({
+    flushPersist: vi.fn(async () => undefined),
+    mergeDeltaMails: vi.fn(() => 2),
+    pullSyncDelta: vi.fn(),
+    accountsState: {
+      localAccounts: [] as Array<Record<string, unknown>>,
+      serverAccounts: [] as Array<Record<string, unknown>>,
+    },
+  }),
+)
 
 vi.mock('@/api/sync', () => ({
   pullSyncDelta,
@@ -24,10 +30,7 @@ vi.mock('@/stores/mailCache', () => ({
 }))
 
 vi.mock('@/stores/accounts', () => ({
-  useAccountsStore: () => ({
-    localAccounts: [],
-    serverAccounts: [],
-  }),
+  useAccountsStore: () => accountsState,
 }))
 
 import { useCloudSyncStore } from '@/stores/cloudSync'
@@ -52,6 +55,8 @@ describe('cloudSync delta ack', () => {
     mergeDeltaMails.mockReset()
     mergeDeltaMails.mockReturnValue(2)
     pullSyncDelta.mockReset()
+    accountsState.localAccounts = []
+    accountsState.serverAccounts = []
   })
 
   it('requests includeBody on every delta page', async () => {
@@ -112,3 +117,94 @@ describe('cloudSync delta ack', () => {
     expect(getSyncAck()).toBe('2026-08-12T10:20:00+00:00\tm20')
   })
 })
+
+describe('cloudSync polling', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    setActivePinia(createPinia())
+    flushPersist.mockReset()
+    flushPersist.mockResolvedValue(undefined)
+    mergeDeltaMails.mockReset()
+    mergeDeltaMails.mockReturnValue(0)
+    pullSyncDelta.mockReset()
+    pullSyncDelta.mockResolvedValue({ has_more: false, mails: [] })
+    accountsState.localAccounts = []
+    accountsState.serverAccounts = []
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    useCloudSyncStore().stopCloudDeltaPolling()
+    vi.useRealTimers()
+  })
+
+  it('pulls immediately when polling starts, then every minute', async () => {
+    const store = useCloudSyncStore()
+    store.startCloudDeltaPolling()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(pullSyncDelta).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(59_000)
+    expect(pullSyncDelta).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(pullSyncDelta).toHaveBeenCalledTimes(2)
+
+    store.stopCloudDeltaPolling()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(pullSyncDelta).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('cloudSync account lastSyncAt', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    setActivePinia(createPinia())
+    flushPersist.mockReset()
+    flushPersist.mockResolvedValue(undefined)
+    mergeDeltaMails.mockReset()
+    mergeDeltaMails.mockReturnValue(0)
+    pullSyncDelta.mockReset()
+    accountsState.localAccounts = [
+      {
+        id: 'loc-1',
+        email: 'user@example.com',
+        serverId: 'acc-1',
+        latestCode: '123456',
+        updatedAt: 1_000,
+      },
+    ]
+    accountsState.serverAccounts = [
+      {
+        id: 'srv_acc-1',
+        email: 'user@example.com',
+        serverId: 'acc-1',
+        latestCode: '123456',
+        updatedAt: 1_000,
+      },
+    ]
+  })
+
+  it('applies last_sync_at even when the OTP is unchanged', async () => {
+    pullSyncDelta.mockResolvedValue({
+      has_more: false,
+      mails: [],
+      accounts: [
+        {
+          id: 'acc-1',
+          email: 'user@example.com',
+          latest_verification_code: '123456',
+          last_sync_at: '2026-08-14T12:00:00.000Z',
+        },
+      ],
+    })
+
+    await useCloudSyncStore().pullCloudMailDelta()
+
+    const expected = Date.parse('2026-08-14T12:00:00.000Z')
+    expect(accountsState.localAccounts[0]?.lastSyncAt).toBe(expected)
+    expect(accountsState.serverAccounts[0]?.lastSyncAt).toBe(expected)
+    expect(accountsState.localAccounts[0]?.updatedAt).toBe(1_000)
+  })
+})
+

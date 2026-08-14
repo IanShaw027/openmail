@@ -170,7 +170,7 @@ Optional advanced: sealed backup only → `sync_enabled: false`, no poll badge a
 
 ## Frontend delta pull
 
-- On vault unlock + periodic (e.g. 2–5 min) + manual “同步云端”
+- When the unlocked app shell is shown (enter / password unlock), then every 1 min while unlocked
 - `GET /api/sync/delta` loop while `has_more`
 - Merge into mailCache by (email, folder, stable_id); LWW by updated_at; prefer body if other empty
 - Persist ack (`openmail.syncAck.v1` in settings or localStorage)

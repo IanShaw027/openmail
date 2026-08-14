@@ -24,6 +24,8 @@ export interface MailAccount {
   password?: string
   refreshToken?: string
   clientId?: string
+  /** Last successful Microsoft OAuth transport: graph | imap */
+  oauthTransport?: string
   apiUrl?: string
   /**
    * HttpApi / CF Worker secret (optional). Open APIs leave empty.
@@ -81,6 +83,10 @@ export interface MailAccount {
   rawLine: string
   createdAt: number
   updatedAt: number
+  /** Last mailbox poll / cloud sync clock (not account-row metadata). */
+  lastSyncAt?: number
+  /** Last time this mailbox was opened, or first-seen baseline. */
+  mailSeenAt?: number
 }
 
 /** Local secrets usable for browser → /api/fetch/proxy (server never needs them). */

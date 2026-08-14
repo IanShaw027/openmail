@@ -69,6 +69,9 @@ import ConsoleGroupModal from '@/components/console/ConsoleGroupModal.vue'
 import NotePurposeCell from '@/components/console/NotePurposeCell.vue'
 import BrandMark from '@/components/BrandMark.vue'
 import { resolveAccountBrand } from '@/utils/domainBrand'
+import { accountRowUpdatedAt, mailDataUpdatedAt } from '@/utils/accountUpdatedAt'
+import { shouldHandleCodeCopyShortcut } from '@/utils/consoleCodeCopyShortcut'
+import { countUnseenMessages } from '@/utils/mailSeen'
 
 const { t, locale } = useI18n()
 const accounts = useAccountsStore()
@@ -762,6 +765,7 @@ async function revalidateOneDraft(row: ImportDraftRow) {
           type: row.partial.type,
           refreshToken: row.partial.refreshToken,
           clientId: row.partial.clientId,
+          oauthTransport: row.partial.oauthTransport,
           apiUrl: row.partial.apiUrl,
           imapHost: row.partial.imapHost,
           imapPort: row.partial.imapPort,
@@ -788,6 +792,9 @@ async function revalidateOneDraft(row: ImportDraftRow) {
       }
       if (result.credential_updates?.refresh_token) {
         row.partial.refreshToken = result.credential_updates.refresh_token
+      }
+      if (result.credential_updates?.oauth_transport) {
+        row.partial.oauthTransport = result.credential_updates.oauth_transport
       }
     }
   } catch (e) {
@@ -835,6 +842,7 @@ async function validateImportDrafts() {
               type: row.partial.type,
               refreshToken: row.partial.refreshToken,
               clientId: row.partial.clientId,
+              oauthTransport: row.partial.oauthTransport,
               apiUrl: row.partial.apiUrl,
               imapHost: row.partial.imapHost,
               imapPort: row.partial.imapPort,
@@ -861,6 +869,9 @@ async function validateImportDrafts() {
           }
           if (result.credential_updates?.refresh_token) {
             row.partial.refreshToken = result.credential_updates.refresh_token
+          }
+          if (result.credential_updates?.oauth_transport) {
+            row.partial.oauthTransport = result.credential_updates.oauth_transport
           }
         }
       } catch (e) {
@@ -1288,6 +1299,20 @@ function formatTime(ts?: number) {
   return formatRelativeTime(t, locale.value, ts)
 }
 
+function newestMailMs(acc: MailAccount): number | undefined {
+  const iso = mailCache.newestUtcIso(acc.email)
+  const mailMs = iso ? Date.parse(iso) : Number.NaN
+  return Number.isFinite(mailMs) ? mailMs : undefined
+}
+
+function mailUpdatedTs(acc: MailAccount): number | undefined {
+  return mailDataUpdatedAt(acc, newestMailMs(acc))
+}
+
+function unseenCount(acc: MailAccount): number {
+  return countUnseenMessages(mailCache.listFor(acc.email, 'inbox'), acc.mailSeenAt)
+}
+
 /** Mail message date: YYYY-MM-DD HH:mm in the configured display timezone. */
 function formatMailDate(date?: string | null): string {
   // touch settings so list re-renders when the user changes TZ
@@ -1364,6 +1389,10 @@ async function applyFetchResult(
   const rotatedRefresh = result.credential_updates?.refresh_token
   if (result.ok !== false && rotatedRefresh) {
     patch.refreshToken = rotatedRefresh
+  }
+  const oauthTransport = result.credential_updates?.oauth_transport
+  if (result.ok !== false && oauthTransport) {
+    patch.oauthTransport = oauthTransport
   }
   // HttpApi: discovered temp mailboxes under this Worker / api_url
   const mboxes =
@@ -1498,6 +1527,7 @@ function resolveFetchAccount(acc: MailAccount): MailAccount {
     authCode: acc.authCode || local.authCode,
     refreshToken: acc.refreshToken || local.refreshToken,
     clientId: acc.clientId || local.clientId,
+    oauthTransport: acc.oauthTransport || local.oauthTransport,
     apiUrl: acc.apiUrl || local.apiUrl,
     apiKey: acc.apiKey || local.apiKey,
     apiAuthStyle: acc.apiAuthStyle || local.apiAuthStyle,
@@ -1723,6 +1753,9 @@ async function fetchOne(
           : {}),
         ...(result.ok !== false && result.credential_updates?.refresh_token
           ? { refreshToken: result.credential_updates.refresh_token }
+          : {}),
+        ...(result.ok !== false && result.credential_updates?.oauth_transport
+          ? { oauthTransport: result.credential_updates.oauth_transport }
           : {}),
         ...(result.ok !== false && mboxes?.length && (acc.isApiSource || acc.type === 'http_api')
           ? { isApiSource: acc.isApiSource ?? !acc.parentApiId, apiMailboxes: mboxes }
@@ -2664,10 +2697,12 @@ async function doSend() {
     })
     if (result.ok) {
       const rt = result.credential_updates?.refresh_token
+      const transport = result.credential_updates?.oauth_transport
       void accounts.patchAccount(acc.id, {
         status: 'ok',
         lastError: undefined,
         ...(rt ? { refreshToken: rt } : {}),
+        ...(transport ? { oauthTransport: transport } : {}),
       })
       flashMsg(t('console.sendOk'))
       showSend.value = false
@@ -2774,8 +2809,16 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault()
     void onFetchSelected(true)
   } else if (e.key === 'c' || e.key === 'C') {
-    e.preventDefault()
-    if (panelCode.value) void doCopy('hot-code', panelCode.value)
+    const selectedText = window.getSelection()?.toString() ?? ''
+    if (
+      shouldHandleCodeCopyShortcut(e, {
+        hasPanelCode: Boolean(panelCode.value),
+        selectedText,
+      })
+    ) {
+      e.preventDefault()
+      void doCopy('hot-code', panelCode.value)
+    }
   } else if (e.key === 'e' || e.key === 'E') {
     e.preventDefault()
     if (selected.value) openEdit(selected.value)
@@ -2852,7 +2895,10 @@ onMounted(() => {
   userSettings.pruneFetchMaps(accounts.accounts.map((a) => a.email))
   // Restore mail panel from durable local cache after refresh
   const sel = accounts.selected
-  if (sel) loadMessagesFromCache(sel)
+  if (sel) {
+    loadMessagesFromCache(sel)
+    accounts.markMailboxViewed(sel.email)
+  }
   // 未检测账号自动轮询检测（5s）
   startAutoDetect()
   // Defer observer until list DOM exists
@@ -2896,8 +2942,26 @@ watch(
       mailLoading.value = false
     }
     const acc = accounts.findById(id)
-    if (acc) loadMessagesFromCache(acc)
+    if (acc) {
+      loadMessagesFromCache(acc)
+      accounts.markMailboxViewed(acc.email)
+    }
   },
+  { immediate: true },
+)
+
+watch(
+  () =>
+    [
+      accounts.accounts.map((a) => a.email).join('\0'),
+      mailCache.totalCount(),
+    ] as const,
+  () => {
+    for (const a of accounts.accounts) {
+      accounts.ensureMailSeenBaseline(a.email, newestMailMs(a))
+    }
+  },
+  { immediate: true },
 )
 
 // New imports often land as unknown — kick a detect pass soon
@@ -3213,7 +3277,7 @@ onUnmounted(() => {
                 <th class="col-note">{{ t('console.colNote') }}</th>
                 <th>{{ t('console.colStatus') }}</th>
                 <th v-if="!effectiveDense">{{ t('console.colStorage') }}</th>
-                <th v-if="!effectiveDense">{{ t('console.colUpdated') }}</th>
+                <th>{{ t('console.colUpdated') }}</th>
                 <th class="col-act" :class="{ 'sticky-act': !isNarrow }">
                   {{ t('console.colActions') }}
                 </th>
@@ -3227,6 +3291,7 @@ onUnmounted(() => {
                   'is-selected': accounts.selectedId === acc.id,
                   'is-fetching': fetchingId === acc.id,
                   'is-starred': !!acc.starred,
+                  'has-unseen': unseenCount(acc) > 0,
                 }"
                 @click="onRowClick(acc)"
               >
@@ -3272,6 +3337,11 @@ onUnmounted(() => {
                     >
                       {{ acc.isApiSource ? (acc.note || acc.email) : acc.email }}
                     </button>
+                    <span
+                      v-if="unseenCount(acc)"
+                      class="mail-new-badge"
+                      :title="t('console.newMailCount', { n: unseenCount(acc) })"
+                    >{{ unseenCount(acc) }}</span>
                   </div>
                   <div v-if="acc.isApiSource" class="group-tag muted">
                     {{ t('console.apiSourceTag') }}
@@ -3424,13 +3494,36 @@ onUnmounted(() => {
                   </span>
                 </td>
 
-                <td v-if="!effectiveDense">
-                  <span
-                    class="muted time"
-                    :title="acc.updatedAt ? formatInUserTzTitle(acc.updatedAt, locale) : ''"
-                  >
-                    {{ formatTime(acc.updatedAt) }}
-                  </span>
+                <td>
+                  <div class="updated-cell">
+                    <div class="updated-line" :class="{ 'has-new': unseenCount(acc) > 0 }">
+                      <span class="updated-k">{{ t('console.mailUpdatedLabel') }}</span>
+                      <span
+                        class="muted time"
+                        :title="
+                          mailUpdatedTs(acc)
+                            ? formatInUserTzTitle(mailUpdatedTs(acc), locale)
+                            : ''
+                        "
+                      >{{ formatTime(mailUpdatedTs(acc)) }}</span>
+                      <span
+                        v-if="unseenCount(acc)"
+                        class="mail-new-badge"
+                        :title="t('console.newMailCount', { n: unseenCount(acc) })"
+                      >{{ unseenCount(acc) }}</span>
+                    </div>
+                    <div v-if="!effectiveDense" class="updated-line">
+                      <span class="updated-k">{{ t('console.accountUpdatedLabel') }}</span>
+                      <span
+                        class="muted time"
+                        :title="
+                          accountRowUpdatedAt(acc)
+                            ? formatInUserTzTitle(accountRowUpdatedAt(acc), locale)
+                            : ''
+                        "
+                      >{{ formatTime(accountRowUpdatedAt(acc)) }}</span>
+                    </div>
+                  </div>
                 </td>
 
                 <td
@@ -4753,6 +4846,48 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
 }
 .data tbody tr.is-starred td.col-email .email {
   font-weight: 700;
+}
+.data tbody tr.has-unseen td.col-email .email {
+  font-weight: 650;
+}
+.mail-new-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  background: var(--accent);
+  color: #fff;
+  flex: 0 0 auto;
+}
+.updated-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 88px;
+}
+.updated-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.updated-k {
+  font-size: 10px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.updated-line.has-new .updated-k {
+  color: var(--accent);
+  font-weight: 700;
+}
+.updated-cell .time {
+  max-width: 96px;
 }
 .cap-tags {
   display: flex;
