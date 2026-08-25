@@ -59,15 +59,21 @@ HMAC mutating requests now bind an optional `X-Device-Nonce` and reject replays 
 ## Suggested operator settings
 
 ```bash
+# Instance: solo (single-user, unlimited) or hosted (quotas + license UI)
+OPENMAIL_INSTANCE_MODE=solo
+OPENMAIL_DEVICE_ADMISSION=open
+
 # Code API cache
 CODE_API_CACHE_TTL_SECONDS=90
 
 # Fetch lock lease (seconds)
 FETCH_LOCK_LEASE_SECONDS=180
 
-# Unlicensed poll cap per device per hour
+# Unlicensed poll cap per device per hour (hosted only)
 QUOTA_MAX_POLL_PER_HOUR=1000
 ```
+
+See [14-ops-and-smoke.md](14-ops-and-smoke.md#3-instance-mode-admission-and-admin) for admin bootstrap and `first_trust`.
 
 ## Verification
 

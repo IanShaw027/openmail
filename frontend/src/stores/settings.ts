@@ -218,6 +218,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const quota = ref<PublicQuota | null>(null)
   const quotaDefaults = ref<QuotaDefaults | null>(null)
   const publicConfigLoaded = ref(false)
+  const instanceMode = ref<'hosted' | 'solo'>('hosted')
+  const licenseUiEnabled = ref(true)
+  const syncUiEnabled = ref(true)
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
   function persistNow() {
@@ -367,7 +370,13 @@ export const useSettingsStore = defineStore('settings', () => {
         licensed?: boolean
         quota_defaults?: Partial<QuotaDefaults>
         device_admission?: string
+        instance_mode?: string
+        license_ui_enabled?: boolean
+        sync_ui_enabled?: boolean
       }>('/api/config/public')
+      instanceMode.value = data.instance_mode === 'solo' ? 'solo' : 'hosted'
+      licenseUiEnabled.value = data.license_ui_enabled !== false
+      syncUiEnabled.value = data.sync_ui_enabled !== false
       const snap: PublicQuota = {
         licensed: Boolean(data.licensed ?? data.quota?.licensed),
         max_local_accounts:
@@ -431,6 +440,9 @@ export const useSettingsStore = defineStore('settings', () => {
     quota,
     quotaDefaults,
     publicConfigLoaded,
+    instanceMode,
+    licenseUiEnabled,
+    syncUiEnabled,
     markFetched,
     pruneFetchMaps,
     needsFullFetch,

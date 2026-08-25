@@ -52,9 +52,11 @@ async function hydrateStores() {
 
 // Pull once when the unlocked shell is shown (enter / password unlock),
 // then every minute until the vault locks.
-watch(showApp, (show) => {
+watch(showApp, async (show) => {
   if (show) {
-    cloudSync.startCloudDeltaPolling()
+    await settings.loadPublicConfig()
+    if (settings.syncUiEnabled) cloudSync.startCloudDeltaPolling()
+    else cloudSync.stopCloudDeltaPolling()
   } else {
     cloudSync.stopCloudDeltaPolling()
   }

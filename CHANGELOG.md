@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-08-25
+
+### Added
+
+- **`OPENMAIL_INSTANCE_MODE`** — `hosted` (code default if unset) or `solo`.
+  `solo` is unlimited, hides license/quota UI, forces device admission `open`,
+  and turns off scheduled cloud sync plus import-to-cloud chrome (HTTP
+  `/api/accounts*` and `/api/sync/*` remain). Mode change needs a restart.
+  `/api/config/public` now includes `instance_mode`, `license_ui_enabled`,
+  `sync_ui_enabled`, effective `device_admission`, and `licensed`.
+- **First trusted device becomes admin** when the admin set is empty (hot
+  reload). Persist `data/admin_device_ids`; optional `.env` write via
+  `OPENMAIL_ENV_FILE` or a writable cwd `.env`. Non-empty
+  `OPENMAIL_ADMIN_DEVICE_IDS` wins (lost-device recovery: set the new `vk_…`
+  and restart).
+
+### Changed
+
+- **`.env.example` recommends `solo` + `open`** for typical single-user
+  self-host. Unset vars still mean `hosted` + `first_trust`.
+- Switching admission to **`open` promotes leftover `pending` devices** on
+  re-register so a single-browser install is not stuck after `first_trust`.
+
+### Fixed
+
+- **HTML mail iframe** follows document height (`overflow: auto` on html/body,
+  descendant max-height unlock) so long messages are not clipped to ~120px.
+
 ## [0.3.9] — 2026-08-15
 
 ### Fixed
@@ -467,7 +495,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - User registration, admin console, server mail search UI
 - Code-API **create** (legacy token URLs may still resolve if present in DB)
 
-[Unreleased]: https://github.com/IanShaw027/openmail/compare/v0.3.9...HEAD
+[Unreleased]: https://github.com/IanShaw027/openmail/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/IanShaw027/openmail/compare/v0.3.9...v1.0.0
 [0.3.9]: https://github.com/IanShaw027/openmail/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/IanShaw027/openmail/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/IanShaw027/openmail/compare/v0.3.6...v0.3.7

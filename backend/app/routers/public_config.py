@@ -8,7 +8,7 @@ from fastapi import APIRouter, Header, Request
 
 from app.deps import DbDep, SettingsDep
 from app.models import Account
-from app.services.device_auth import verify_request
+from app.services.device_auth import admission_mode, verify_request
 from app.services.license import is_licensed, quota_snapshot
 
 router = APIRouter(prefix="/api", tags=["config"])
@@ -74,10 +74,15 @@ def public_config(
         snap.pop("cloud_used", None)
         # Do not bind poll_used_hour to a forgeable id either
         snap["poll_used_hour"] = 0
+    mode = getattr(settings, "instance_mode", "hosted")
+    solo = mode == "solo"
     return {
         "ok": True,
         "auth_ui_enabled": settings.auth_ui_enabled,
-        "device_admission": settings.device_admission,
+        "instance_mode": mode,
+        "license_ui_enabled": not solo,
+        "sync_ui_enabled": not solo,
+        "device_admission": admission_mode(),
         "fetch_concurrency": settings.fetch_concurrency,
         "fetch_lookback_days": settings.fetch_default_lookback_days,
         "mail_retention_days": settings.mail_retention_days,

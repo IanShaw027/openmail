@@ -191,6 +191,29 @@ def test_open_admission_trusts_every_register(tmp_path, monkeypatch):
     cfg.get_settings.cache_clear()
 
 
+def test_switching_to_open_promotes_existing_pending(da, monkeypatch):
+    """OPENMAIL_DEVICE_ADMISSION=open must unblock devices already left pending."""
+    s1, b1, p1 = _pair()
+    s2, b2, p2 = _pair()
+    da.register_device_secret(p1, b1)
+    da.register_device_secret(p2, b2)
+    assert da.device_status(p2) == "pending"
+
+    monkeypatch.setenv("OPENMAIL_DEVICE_ADMISSION", "open")
+    import app.config as cfg
+
+    cfg.get_settings.cache_clear()
+
+    assert da.register_device_secret(p2, b2) == p2
+    assert da.device_status(p2) == "trusted"
+
+    ts = str(int(time.time()))
+    msg = f"{ts}.GET./api/accounts".encode()
+    sig = hmac.new(s2, msg, hashlib.sha256).hexdigest()
+    ok, err = da.verify_request(p2, ts, sig, "GET", "/api/accounts")
+    assert ok is True, err
+
+
 def test_register_and_approve_over_http(tmp_path, monkeypatch):
     """End-to-end through the FastAPI app, with a private registry file."""
     key = base64.b64encode(os.urandom(32)).decode()

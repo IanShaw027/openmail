@@ -39,8 +39,8 @@ gh secret set DOCKERHUB_TOKEN -R IanShaw027/openmail
 3. Run:
 
 ```bash
-make release V=0.2.0
-# or: ./scripts/release.sh 0.2.0
+make release V=1.0.0
+# or: ./scripts/release.sh 1.0.0
 ```
 
 This syncs version files, commits `chore(release): vX.Y.Z`, creates an annotated tag, and pushes `main` + tags so CI builds Hub images and a GitHub Release.
@@ -48,8 +48,8 @@ This syncs version files, commits `chore(release): vX.Y.Z`, creates an annotated
 Tag only (if version files already committed):
 
 ```bash
-git tag -a v0.2.0 -m "OpenMail v0.2.0"
-git push origin v0.2.0
+git tag -a v1.0.0 -m "OpenMail v1.0.0"
+git push origin v1.0.0
 ```
 
 Re-publish an existing tag:
@@ -79,6 +79,6 @@ gh workflow run release.yml -R IanShaw027/openmail -f tag=v0.1.0
 ## Pull
 
 ```bash
-docker pull ianshaw027/openmail:v0.1.0
+docker pull ianshaw027/openmail:v1.0.0
 docker compose pull && docker compose up -d
 ```

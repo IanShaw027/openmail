@@ -18,6 +18,7 @@ def da(tmp_path, monkeypatch):
     key = base64.b64encode(os.urandom(32)).decode()
     monkeypatch.setenv("OPENMAIL_MASTER_KEY", key)
     monkeypatch.setenv("OPENMAIL_DEVICE_REGISTRY_PATH", str(tmp_path / "reg.json"))
+    monkeypatch.setenv("OPENMAIL_DEVICE_ADMISSION", "first_trust")
     import app.config as cfg
 
     cfg.get_settings.cache_clear()

@@ -63,9 +63,14 @@ def _as_admin(monkeypatch, pid: str) -> None:
     get_settings.cache_clear()
 
 
-def test_admin_licenses_forbidden_when_allowlist_empty(client: TestClient):
-    headers, _pid, status = _register(client)
+def test_admin_licenses_forbidden_when_allowlist_empty(client: TestClient, monkeypatch):
+    """First trusted device becomes admin; a later trusted device does not."""
+    monkeypatch.setenv("OPENMAIL_DEVICE_ADMISSION", "open")
+    get_settings.cache_clear()
+    _admin_h, _admin_pid, status = _register(client)
     assert status == "trusted"
+    headers, _pid, status2 = _register(client)
+    assert status2 == "trusted"
     r = client.get("/api/admin/licenses", headers=headers("GET", "/api/admin/licenses"))
     assert r.status_code == 403
 
@@ -78,6 +83,8 @@ def test_admin_licenses_forbidden_for_non_admin_trusted(client: TestClient, monk
 
 
 def test_pending_device_cannot_be_admin_even_if_listed(client: TestClient, monkeypatch):
+    monkeypatch.setenv("OPENMAIL_DEVICE_ADMISSION", "first_trust")
+    get_settings.cache_clear()
     _admin_h, _admin_pid, _ = _register(client)
     pending_h, pending_pid, pending_status = _register(client)
     assert pending_status == "pending"
@@ -90,6 +97,11 @@ def test_device_me_is_admin_flag(client: TestClient, monkeypatch):
     headers, pid, _ = _register(client)
     r = client.get("/api/device/me", headers=headers("GET", "/api/device/me"))
     assert r.status_code == 200
+    assert r.json()["is_admin"] is True
+
+    _as_admin(monkeypatch, "vk_someone_else_not_this_device_xx")
+    r = client.get("/api/device/me", headers=headers("GET", "/api/device/me"))
+    assert r.status_code == 200
     assert r.json()["is_admin"] is False
 
     _as_admin(monkeypatch, f"{pid}\n vk_other")
@@ -99,6 +111,8 @@ def test_device_me_is_admin_flag(client: TestClient, monkeypatch):
 
 
 def test_admin_issue_list_revoke_and_usage(client: TestClient, monkeypatch):
+    monkeypatch.setenv("OPENMAIL_DEVICE_ADMISSION", "first_trust")
+    get_settings.cache_clear()
     admin_h, admin_pid, _ = _register(client)
     user_h, user_pid, user_status = _register(client)
     assert user_status == "pending"

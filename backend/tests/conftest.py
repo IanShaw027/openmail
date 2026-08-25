@@ -22,6 +22,7 @@ os.environ["OPENMAIL_DEVICE_REGISTRY_PATH"] = os.path.join(
 # Keep background sync quiet / short interval in tests (worker still starts)
 os.environ.setdefault("SYNC_ENABLED_GLOBAL", "false")
 os.environ.setdefault("SYNC_INTERVAL_SECONDS", "3600")
+os.environ.setdefault("OPENMAIL_INSTANCE_MODE", "hosted")
 
 from app.config import get_settings
 from app.db import Base, get_db
@@ -34,6 +35,9 @@ import app.services.sync_worker as sync_worker_mod
 @pytest.fixture()
 def client(tmp_path, monkeypatch) -> Generator[TestClient, None, None]:
     monkeypatch.setenv("OPENMAIL_DEVICE_REGISTRY_PATH", str(tmp_path / "device_registry.json"))
+    monkeypatch.setenv("OPENMAIL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENMAIL_INSTANCE_MODE", "hosted")
+    monkeypatch.setenv("OPENMAIL_ADMIN_DEVICE_IDS", "")
     get_settings.cache_clear()
     import app.services.device_auth as da
 

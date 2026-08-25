@@ -58,10 +58,10 @@ curl -x socks5h://127.0.0.1:11001 -fsS https://www.cloudflare.com/cdn-cgi/trace
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `PROXY_POOL` | 10 行 `socks5://warp-N:1080` | 多通道列表 |
+| `PROXY_POOL` | compose 默认空；`up-with-warp.sh` 写入 10 行 `socks5://warp-N:1080` | 多通道列表 |
 | `PROXY_SID_STRATEGY` | `sticky_per_account` | 也可 `round_robin` |
-| `FETCH_CONCURRENCY` | `10` | 批量/导入建议并发 |
-| `SYNC_CONCURRENCY` | `10` | 定时同步并发账号数 |
+| `FETCH_CONCURRENCY` | Compose / 示例 `10`（代码默认 `5`） | 批量/导入建议并发 |
+| `SYNC_CONCURRENCY` | Compose / 示例 `10`（代码默认 `2`） | 定时同步并发账号数 |
 | `SYNC_INTERVAL_SECONDS` | `3600` | 同步周期 |
 | `WARP_LICENSE_KEY` | 空 | 可选 WARP+ |
 | `WARP_SLEEP` | `5` | 节点启动等待 |

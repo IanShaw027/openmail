@@ -568,6 +568,8 @@ async function copyCode(code?: string | null) {
   line-height: 1.55;
   word-break: break-word;
   overflow-x: auto;
+  display: block;
+  min-height: 16rem;
 }
 .body-html :deep(img) {
   max-width: 100%;

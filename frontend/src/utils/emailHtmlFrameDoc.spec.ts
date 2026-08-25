@@ -61,6 +61,20 @@ describe('buildEmailFrameSrcdoc', () => {
     expect(doc).toContain('getBoundingClientRect')
   })
 
+  it('lets the iframe document scroll when mail CSS still clips the layout', () => {
+    const doc = buildEmailFrameSrcdoc('<p>Hello,</p><p>rest of the letter</p>')
+    expect(doc).toContain('overflow: auto !important')
+    expect(doc).toContain('getElementsByTagName')
+  })
+
+  it('does not let blocked remote images keep a reserved pixel box', () => {
+    const doc = buildEmailFrameSrcdoc(
+      '<img src="https://cdn.openai.com/logo.png" width="560" height="168">',
+    )
+    expect(doc).toContain('height: auto !important')
+    expect(doc).toMatch(/img\s*\{[^}]*height:\s*auto\s*!important/)
+  })
+
   it('detects remote http(s) images for the header control', () => {
     expect(htmlHasRemoteImages('<img src="https://cdn.example/a.png">')).toBe(true)
     expect(htmlHasRemoteImages('<img src="cid:part1">')).toBe(false)

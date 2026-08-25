@@ -88,6 +88,8 @@ export default {
     devicesTitle: 'Trusted devices',
     devicesHint:
       'The first vault that registers with this server is trusted automatically. Later devices wait here until you approve them — cloud sync and server APIs stay blocked until then.',
+    devicesHintOpen:
+      'This instance admits every successful register (open / solo). Later browsers are trusted automatically; you can still revoke a device here.',
     devicesRefresh: 'Refresh device list',
     devicesEmpty: 'No other devices registered yet.',
     devicePendingBanner:
@@ -105,7 +107,8 @@ export default {
     deviceApproved: 'Device approved',
     deviceRejected: 'Device rejected',
     deviceRevoked: 'Device revoked',
-    deviceIdHint: 'Full device ID — copy into OPENMAIL_ADMIN_DEVICE_IDS on the server.',
+    deviceIdHint:
+      'Full device ID. The first trusted unlock becomes admin automatically. To replace a lost admin, put this vk_… in OPENMAIL_ADMIN_DEVICE_IDS and restart.',
     keysGuideTitle: 'Vault password vs recovery key',
     enableRecovery: 'Recovery key',
     enableRecoveryHint:
@@ -796,9 +799,9 @@ export default {
     adminNever: 'Never',
     adminEmpty: 'No codes issued yet.',
     adminAutoLicensedHint:
-      'This device is listed in OPENMAIL_ADMIN_DEVICE_IDS, so quotas are already unlimited — no license code needed.',
+      'This device is the instance admin (first unlock becomes admin automatically), so quotas are already unlimited — no license code needed.',
     adminInstanceHint:
-      'Unlicensed caps: local {local} · cloud {cloud} · polls/hour {poll}. Admission: {admission}. Change caps or the admin list in the server .env, then recreate the container.',
+      'Unlicensed caps: local {local} · cloud {cloud} · polls/hour {poll}. Admission: {admission}. To replace the admin, put the new vk_… in OPENMAIL_ADMIN_DEVICE_IDS and restart.',
     adminAdmissionFirstTrust: 'first device trusted, later need approval',
     adminAdmissionOpen: 'open registration',
   },

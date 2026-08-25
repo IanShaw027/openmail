@@ -65,7 +65,7 @@ onUnmounted(() => {
       ref="iframeRef"
       class="email-html-frame"
       :srcdoc="srcdoc"
-      :style="{ height: heightPx + 'px' }"
+      :style="{ height: '100%', minHeight: heightPx + 'px' }"
       sandbox="allow-scripts"
       referrerpolicy="no-referrer"
       title="Email body"
@@ -76,12 +76,15 @@ onUnmounted(() => {
 <style scoped>
 .email-html-frame-wrap {
   position: relative;
+  height: 100%;
+  min-height: 12rem;
 }
 .email-html-frame {
   display: block;
   width: 100%;
+  height: 100%;
   border: 0;
   background: transparent;
-  min-height: 80px;
+  overflow: auto;
 }
 </style>

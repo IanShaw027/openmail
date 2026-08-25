@@ -24,9 +24,9 @@ Import credentials in the browser, proxy fetch/send through a self-hosted FastAP
 
 ### Live demo
 
-**[https://mail.clomio.ai](https://mail.clomio.ai)** — public test instance
+**[https://mail.clomio.ai](https://mail.clomio.ai)** — public test instance (`solo` mode)
 
-> Create your own vault password on first visit. Secrets stay in **your browser**. Do **not** put production-critical mailboxes on a shared demo.
+> Create your own vault password on first visit. Secrets stay in **your browser**. Do **not** put production-critical mailboxes on a shared demo. On a fresh instance the **first trusted unlock becomes admin**.
 
 </div>
 
@@ -57,6 +57,7 @@ Import credentials in the browser, proxy fetch/send through a self-hosted FastAP
 - [Providers](#providers)
 - [Quick start (Docker)](#quick-start-docker)
 - [First visit](#first-visit)
+- [Instance mode, devices, and admin](#instance-mode-devices-and-admin)
 - [Import formats](#import-formats)
 - [Configuration](#configuration)
 - [Upgrade](#upgrade)
@@ -111,7 +112,9 @@ Stack: **Vue 3 + Vite + Pinia** frontend, **FastAPI + SQLite** backend, single D
 - **Console** — batch import, brand chips, groups, notes, batch fetch, code extract, send, body expand modal
 - **Mail list** — first 20 messages; load more (10 older) / clear & refetch
 - **Folders** — inbox / junk / sent (IMAP names include non-ASCII via modified UTF-7)
-- **Security** — vault device HMAC, SSRF host policy, HTML sanitize, CSP, client-sealed cloud rows
+- **Security** — vault device HMAC, first-trust or open device admission, sandboxed HTML iframe (remote images opt-in), SSRF, CSP, client-sealed cloud rows
+- **Instance modes** — `hosted` (quotas + license codes + optional cloud sync) or `solo` (unlimited, those UIs hidden)
+- **Admin** — first trusted vault device becomes admin automatically; recover by editing `OPENMAIL_ADMIN_DEVICE_IDS`
 - **Ops** — optional 10× Cloudflare WARP SOCKS pool for concurrent egress
 - **i18n** — Chinese + English UI
 
@@ -141,7 +144,7 @@ IMAP host defaults exist for common domains (Gmail, Outlook, etc.); you can over
 **Image (Docker Hub only):**
 
 ```text
-ianshaw027/openmail:v0.1.0
+ianshaw027/openmail:v1.0.0
 ianshaw027/openmail:latest
 ```
 
@@ -162,13 +165,13 @@ docker compose up -d
 # UI + API
 open http://127.0.0.1:8000
 curl -s http://127.0.0.1:8000/api/health
-# {"ok":true,"version":"0.1.0","master_key_configured":true,...}
+# {"ok":true,"version":"1.0.0","master_key_configured":true,...}
 ```
 
 Compose default:
 
 ```yaml
-image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.1.0}
+image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v1.0.0}
 ```
 
 Useful `.env` overrides:
@@ -186,8 +189,9 @@ Data persists in `./data` (SQLite + device registry). **Back up this directory.*
 ```bash
 docker run -d --name openmail -p 8000:8000 \
   -e OPENMAIL_MASTER_KEY="$(openssl rand -base64 32)" \
+  -e OPENMAIL_DATABASE_URL=sqlite:////data/openmail.db \
   -v openmail-data:/data \
-  ianshaw027/openmail:v0.1.0
+  ianshaw027/openmail:v1.0.0
 ```
 
 ### C) Build from source
@@ -215,10 +219,46 @@ Details: [docs/16-warp-proxy-pool.md](docs/16-warp-proxy-pool.md).
 1. Open the UI → **create vault password** (strong, memorable only to you).  
 2. **Copy the recovery key** somewhere offline (shown once; also viewable later while unlocked under Settings).  
 3. Import accounts (paste TXT or upload) **or** add one mailbox manually.  
-4. Select accounts → **Fetch**. Codes / mail list appear in the console; bodies expand in a modal.  
-5. Optional: Settings → license token (if your instance uses `LICENSE_TOKENS` quotas).  
+4. Select accounts → **Fetch**. Codes / mail list appear in the console; HTML bodies render in a sandboxed iframe (click **Show remote images** for CDN logos).  
+5. The first trusted unlock on a new instance becomes **admin**. In `hosted` mode you can paste / issue license codes in Settings. In `solo` those panels are hidden (already unlimited).  
 
 Factory reset (Settings) wipes **this browser’s** vault/storage only — not the server DB volume.
+
+---
+
+## Instance mode, devices, and admin
+
+This is the important operator contract. Full tables and recovery steps: [docs/14-ops-and-smoke.md](docs/14-ops-and-smoke.md#3-instance-mode-admission-and-admin).
+
+### Mode (`OPENMAIL_INSTANCE_MODE`)
+
+| | `hosted` (code default if the var is unset) | `solo` (what [`.env.example`](.env.example) copies for single-user) |
+|---|---|---|
+| Quotas | `QUOTA_*` unless a license code is presented | Unlimited |
+| License / quota UI | Shown | Hidden |
+| Cloud import / scheduled sync | Follows `SYNC_*` | UI + scheduled worker off (`sync_enabled_global=false`). Cloud HTTP APIs still exist |
+| New-device admission | `OPENMAIL_DEVICE_ADMISSION` | Forced `open` |
+| First trusted device → admin | Yes | Yes |
+
+Restart the process after changing mode.
+
+### Device admission (`OPENMAIL_DEVICE_ADMISSION`)
+
+A **device** is the browser vault id `vk_…`, not the physical PC. Another browser, profile, or cleared site data is a new device.
+
+- **`first_trust`** (code default): while **no trusted devices exist**, the next register is trusted; later devices stay `pending` and cannot fetch until approved in Settings.
+- **`open`**: every register is trusted. Switching to `open` also promotes leftover `pending` devices on **re-register** (unlock the vault again).
+- **`solo`**: admission is forced `open`.
+
+If fetch says *device pending approval from a trusted device*, approve it from a trusted browser, or set `open` / `solo`, recreate the container, then **unlock the vault again**.
+
+### Admin (no password)
+
+When no admin is configured, the **first trusted** vault unlock / register (or `GET /api/device/me`) is written to `data/admin_device_ids` and hot-loaded. A writable `.env` / `OPENMAIL_ENV_FILE` may also be updated. Later devices are not admin.
+
+**Lost that browser:** put the new `vk_…` (Settings → copy device id) in `OPENMAIL_ADMIN_DEVICE_IDS` and **restart**. A non-empty env value wins over the data file.
+
+**Public URL:** whoever unlocks first becomes admin if the list is still empty. Unlock yourself first, or pre-set `OPENMAIL_ADMIN_DEVICE_IDS`, before advertising the instance.
 
 ---
 
@@ -245,14 +285,22 @@ Copy [`.env.example`](.env.example) → `.env`. Most important:
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `OPENMAIL_MASTER_KEY` | **yes** | 32-byte AES key (base64/hex). Device registry + server wraps. |
-| `OPENMAIL_DEVICE_ADMISSION` | no | `first_trust` (default): first device auto-trusted, later need approval; `open`: every register is trusted |
-| `OPENMAIL_ADMIN_DEVICE_IDS` | no | Comma/newline `vk_…` ids that may issue license codes in Settings. Empty = no admin |
-| `OPENMAIL_IMAGE` | no | Compose image override (default `ianshaw027/openmail:v0.1.0`) |
+| `OPENMAIL_INSTANCE_MODE` | no | **Important.** `hosted` if unset (quotas + license UI + optional cloud sync). `solo`: unlimited, hide those UIs, force admission `open`. [`.env.example`](.env.example) copies `solo`. Restart after change. |
+| `OPENMAIL_DEVICE_ADMISSION` | no | `first_trust` if unset; `open` admits every register. Ignored in `solo`. Device = `vk_…` vault id, not a PC. |
+| `OPENMAIL_ADMIN_DEVICE_IDS` | no | Admin `vk_…` (issue license codes). Empty: first trusted unlock becomes admin (`data/admin_device_ids`). Recover: set this and restart (env wins). |
+| `OPENMAIL_IMAGE` | no | Compose image override (default `ianshaw027/openmail:v1.0.0`) |
 | `OPENMAIL_PORT` | no | Host port (default `8000`) |
-| `OPENMAIL_DATABASE_URL` | no | Default SQLite on `/data` |
-| `LICENSE_TOKENS` | no | Comma-separated codes that unlock client quotas |
-| `PROXY_POOL` | no | SOCKS/HTTP exits (`\|` or newlines) |
-| `SYNC_*` | no | Background sync interval / folders |
+| `OPENMAIL_DATABASE_URL` | no | Compose/Docker: `sqlite:////data/openmail.db`. Bare `uvicorn` code default: `sqlite:///./openmail.db` |
+| `OPENMAIL_DATA_DIR` | no | Registry + `admin_device_ids` directory (Docker `/data`). Not a Settings field |
+| `OPENMAIL_ENV_FILE` | no | Optional path bootstrap may write `OPENMAIL_ADMIN_DEVICE_IDS` to. Does not replace pydantic `.env` load |
+| `OPENMAIL_MASTER_KEY_FALLBACKS` | no | Previous master keys (comma/newline) for decrypt after rotation only |
+| `LICENSE_TOKENS` | no | Hosted only: comma-separated codes that unlock client quotas |
+| `LICENSE_HMAC_SECRET` | no | Optional: token may be HMAC-SHA256(`X-Device-Id`, secret) hex |
+| `QUOTA_*` | no | Hosted caps: local 100 / cloud 50 / polls 1000. Ignored in `solo` |
+| `ALLOW_PRIVATE_PROXY` | no | Default `false`. If `true`, client-supplied proxies may target private/loopback IPs |
+| `FETCH_CONCURRENCY` | no | Suggested batch/import concurrency. Code default `5`; Compose / `.env.example` use `10` |
+| `PROXY_POOL` | no | SOCKS/HTTP exits (`\|` or newlines). Empty unless you set it or run `up-with-warp.sh` |
+| `SYNC_*` | no | Interval / folders / concurrency. Code `SYNC_CONCURRENCY` default `2`; Compose/`.env.example` use `10`. In `solo`, scheduled cycles are off |
 | `PUBLIC_BASE_URL` | no | Public origin for legacy code-token URLs |
 | `CODE_API_MAX_FETCH_PER_HOUR` | no | Public code-API cap per token per hour; `0` = no limit |
 | `CODE_API_MAX_REFRESH_PER_HOUR` | no | Stricter cap for `refresh=1`; `0` = no limit |
@@ -270,7 +318,7 @@ Generate master key:
 ```bash
 cd openmail
 git pull
-# pin version in .env if you want: OPENMAIL_IMAGE=ianshaw027/openmail:v0.2.0
+# pin version in .env if you want: OPENMAIL_IMAGE=ianshaw027/openmail:v1.0.0
 docker compose pull
 docker compose up -d
 curl -s http://127.0.0.1:8000/api/health
@@ -304,8 +352,12 @@ Two things to be aware of:
 | `master_key_configured: false` | `OPENMAIL_MASTER_KEY` empty/invalid in `.env`; recreate container after fix |
 | `attempt to write a readonly database` / container restart loop | `./data` is not writable by the container. Upgrade to the latest image (it self-heals), or `sudo chown -R 10001:10001 ./data`. Remove any `user:` override that does not own `./data` |
 | Image pull fails on Apple Silicon | Image is **amd64-only** today — use a remote amd64 host, or `docker compose up --build` on arm (local build) |
-| IMAP SSL / cert errors | Fixed for DNS-pinned IP + SNI in recent builds; pull latest `v0.1.0+` |
+| IMAP SSL / cert errors | Fixed for DNS-pinned IP + SNI in recent builds; pull latest image |
 | IMAP `ascii codec` on folder names | Non-ASCII mailbox names need modified UTF-7 — use latest image |
+| `device pending approval…` on Fetch | This `vk_…` is **not trusted** (`first_trust`). Approve from Settings, or set `open` / `solo`, recreate, then **unlock again** (re-register promotes leftover pending). Another browser is another device. |
+| Not admin / cannot issue codes | Another device already bootstrapped. Put this `vk_…` in `OPENMAIL_ADMIN_DEVICE_IDS` and restart. |
+| No license / “import to cloud” UI | Instance is `solo` — expected. |
+| HTML body cropped / missing images | Hard-refresh. Use **Show remote images** for CDN assets. |
 | Vault password every refresh | Same-tab session should resume; hard refresh / other browser needs password or recovery key |
 | Recovery key never shown | Create flow must stay on gate until key acknowledged; update if on very old build |
 | Demo feels “empty” | Each browser has its **own** vault — nothing is shared across visitors |
@@ -356,13 +408,13 @@ scripts/     install, keygen, smoke, release, warp
 
 ```bash
 # clean main → bump VERSION sources → commit → tag → push
-make release V=0.2.0
+make release V=1.0.0
 ```
 
-On tag `v0.2.0` CI will:
+On tag `v1.0.0` CI will:
 
-1. Bake version into the image (`/api/health` → `0.2.0`)  
-2. Push Docker Hub: `ianshaw027/openmail:v0.2.0`, `:0.2.0`, `:latest`  
+1. Bake version into the image (`/api/health` → `1.0.0`)  
+2. Push Docker Hub: `ianshaw027/openmail:v1.0.0`, `:1.0.0`, `:latest`  
 3. Publish GitHub Release notes  
 
 Needs secrets: `DOCKERHUB_TOKEN` (+ optional `DOCKERHUB_USERNAME`).
@@ -409,7 +461,7 @@ Operators are responsible for their deployment, keys, and compliance.
 | Doc | Topic |
 |-----|--------|
 | [docs/architecture.md](docs/architecture.md) | Module boundaries, API surface |
-| [docs/14-ops-and-smoke.md](docs/14-ops-and-smoke.md) | Ops checklist |
+| [docs/14-ops-and-smoke.md](docs/14-ops-and-smoke.md) | Ops: instance mode, admission, admin bootstrap, smoke |
 | [docs/16-warp-proxy-pool.md](docs/16-warp-proxy-pool.md) | WARP profile |
 | [docs/17-release.md](docs/17-release.md) | Release internals |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |

@@ -22,9 +22,9 @@
 
 ### 在线体验
 
-**[https://mail.clomio.ai](https://mail.clomio.ai)** — 公共测试实例
+**[https://mail.clomio.ai](https://mail.clomio.ai)** — 公共测试实例（`solo` 模式）
 
-> 首次访问请自建金库密码。密钥只在**你的浏览器**中。请勿在公共演示环境使用重要生产邮箱。
+> 首次访问请自建金库密码。密钥只在**你的浏览器**中。请勿在公共演示环境使用重要生产邮箱。全新实例上，**第一个受信任的解锁会成为管理员**。
 
 </div>
 
@@ -55,6 +55,7 @@
 - [协议 / Provider](#协议--provider)
 - [快速开始（Docker）](#快速开始docker)
 - [首次使用](#首次使用)
+- [实例模式、设备准入与管理员](#实例模式设备准入与管理员)
 - [导入格式](#导入格式)
 - [配置](#配置)
 - [升级](#升级)
@@ -105,7 +106,9 @@
 - 邮件列表：首次 20 封，加载更多（更早 10 封）/ 清空后重拉最近 20 封  
 
 - 文件夹：收件箱 / 垃圾箱 / 发件箱（IMAP 中文文件夹名支持）  
-- 安全：设备 HMAC、SSRF、HTML 消毒、CSP  
+- 安全：设备 HMAC、先信任/开放准入、邮件 HTML 沙箱 iframe（远程图默认关）、SSRF、CSP  
+- 实例模式：`hosted`（配额 + 授权码 + 可选云同步）或 `solo`（不限额，隐藏这些界面）  
+- 管理员：第一个受信任的金库设备自动成为管理员；丢失后改 `OPENMAIL_ADMIN_DEVICE_IDS` 并重启  
 - 运维：可选 10 节点 WARP SOCKS 出站池  
 - 界面中英双语  
 
@@ -133,7 +136,7 @@
 **官方镜像（仅 Docker Hub）：**
 
 ```text
-ianshaw027/openmail:v0.1.0
+ianshaw027/openmail:v1.0.0
 ianshaw027/openmail:latest
 ```
 
@@ -158,7 +161,7 @@ curl -s http://127.0.0.1:8000/api/health
 compose 默认：
 
 ```yaml
-image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v0.1.0}
+image: ${OPENMAIL_IMAGE:-ianshaw027/openmail:v1.0.0}
 ```
 
 常用 `.env`：
@@ -176,8 +179,9 @@ OPENMAIL_PULL_POLICY=always
 ```bash
 docker run -d --name openmail -p 8000:8000 \
   -e OPENMAIL_MASTER_KEY="$(openssl rand -base64 32)" \
+  -e OPENMAIL_DATABASE_URL=sqlite:////data/openmail.db \
   -v openmail-data:/data \
-  ianshaw027/openmail:v0.1.0
+  ianshaw027/openmail:v1.0.0
 ```
 
 ### C) 源码构建
@@ -202,10 +206,46 @@ docker compose up -d --build
 1. 打开页面 → 创建金库密码  
 2. **抄写恢复密钥**（离线保存；解锁后也可在设置中查看）  
 3. 粘贴 TXT 导入或手动添加邮箱  
-4. 勾选账号 → 取件；正文可在右上角展开弹窗  
-5. 可选：设置里填写 license（若实例启用了 `LICENSE_TOKENS` 配额）  
+4. 勾选账号 → 取件；HTML 正文在沙箱 iframe 中打开（CDN 图需点 **显示远程图片**）  
+5. 新实例上，第一个受信任的解锁会成为 **管理员**。`hosted` 可在设置里粘贴/签发授权码；`solo` 不显示这些面板（已不限额）  
 
 「清空本机环境」只清当前浏览器，不删服务器 `data` 卷。
+
+---
+
+## 实例模式、设备准入与管理员
+
+这是部署时最重要的约定。完整表格与恢复步骤见 [docs/14-ops-and-smoke.md](docs/14-ops-and-smoke.md#3-instance-mode-admission-and-admin)。
+
+### 模式（`OPENMAIL_INSTANCE_MODE`）
+
+| | `hosted`（变量未设时的代码默认） | `solo`（[`.env.example`](.env.example) 给单用户复制的值） |
+|---|---|---|
+| 配额 | 未授权时走 `QUOTA_*` | 不限额 |
+| 授权码 / 配额 UI | 显示 | 隐藏 |
+| 导入到云端 / 定时同步 | 跟随 `SYNC_*` | 关闭 UI 与定时 worker（`sync_enabled_global=false`）。云端 HTTP API 仍在 |
+| 新设备准入 | `OPENMAIL_DEVICE_ADMISSION` | 强制 `open` |
+| 第一个受信任设备 → 管理员 | 是 | 是 |
+
+改模式后必须重启进程 / 重建容器。
+
+### 设备准入（`OPENMAIL_DEVICE_ADMISSION`）
+
+**设备**是浏览器金库身份 `vk_…`，不是那台电脑。换浏览器、换配置、清站点数据 = 新设备。
+
+- **`first_trust`**（代码默认）：**还没有任何受信任设备**时，下一次注册受信任；之后的设备为 `pending`，未批准前不能取件。
+- **`open`**：每次注册都受信任。切到 `open` 后需 **再次解锁**（重新注册）才会把遗留 `pending` 提升为 `trusted`。
+- **`solo`**：准入强制 `open`。
+
+取件提示 *device pending approval from a trusted device* 时：在已信任的浏览器设置里批准，或改成 `open` / `solo`、重建容器，然后**再次解锁金库**。
+
+### 管理员（没有管理员密码）
+
+名单为空时，**第一个受信任**的解锁 / 注册（或 `GET /api/device/me`）会写入 `data/admin_device_ids` 并热加载；可写的 `.env` / `OPENMAIL_ENV_FILE` 也可能被更新。之后的设备不会自动升管理员。
+
+**丢了那台浏览器：** 在能用的设备上从设置复制新的 `vk_…`，写入 `OPENMAIL_ADMIN_DEVICE_IDS` 后 **重启**。非空环境变量优先于数据文件。
+
+**公开网址：** 名单仍空时，谁先解锁谁就是管理员。对外宣传前先自己解锁，或预先写好 `OPENMAIL_ADMIN_DEVICE_IDS`。
 
 ---
 
@@ -229,11 +269,17 @@ docker compose up -d --build
 | 变量 | 必填 | 作用 |
 |------|------|------|
 | `OPENMAIL_MASTER_KEY` | **是** | 服务端 AES 密钥 |
-| `OPENMAIL_ADMIN_DEVICE_IDS` | 否 | 可在设置里签发授权码的 `vk_…` 设备（逗号/换行）。空 = 无管理员 |
-| `OPENMAIL_IMAGE` | 否 | 覆盖镜像，默认 `ianshaw027/openmail:v0.1.0` |
+| `OPENMAIL_INSTANCE_MODE` | 否 | **重要。** 未设则为 `hosted`（配额 + 授权码 UI + 可选云同步）。`solo`：不限额、隐藏这些 UI、准入强制 `open`。[`.env.example`](.env.example) 复制的是 `solo`。改后需重启 |
+| `OPENMAIL_DEVICE_ADMISSION` | 否 | 未设为 `first_trust`；`open` 则每次注册都信任。`solo` 下忽略。设备 = `vk_…`，不是电脑 |
+| `OPENMAIL_ADMIN_DEVICE_IDS` | 否 | 管理员 `vk_…`（签发授权码）。空则首次信任解锁成为管理员（`data/admin_device_ids`）。恢复：写入此项并重启（环境变量优先） |
+| `OPENMAIL_IMAGE` | 否 | 覆盖镜像，默认 `ianshaw027/openmail:v1.0.0` |
 | `OPENMAIL_PORT` | 否 | 端口，默认 `8000` |
-| `LICENSE_TOKENS` | 否 | 解除客户端配额 |
-| `PROXY_POOL` | 否 | 出站代理池 |
+| `OPENMAIL_DATABASE_URL` | 否 | Compose：`sqlite:////data/openmail.db`。本地 uvicorn 代码默认：`sqlite:///./openmail.db` |
+| `LICENSE_TOKENS` | 否 | `hosted` 下解除客户端配额 |
+| `QUOTA_*` | 否 | `hosted` 上限：本机 100 / 云端 50 / 每小时取件 1000。`solo` 忽略 |
+| `PROXY_POOL` | 否 | 出站代理池（未设则空；`up-with-warp.sh` 会写入 10 条） |
+| `SYNC_*` | 否 | 间隔 / 文件夹 / 并发。`solo` 下定时同步关闭。代码默认 `SYNC_CONCURRENCY=2`，Compose 示例为 `10` |
+| `PUBLIC_BASE_URL` | 否 | 旧 code-token 绝对地址；代码默认 `http://127.0.0.1:8000` |
 | `CODE_API_MAX_FETCH_PER_HOUR` | 否 | 公开 code API 每 token 每小时上限；`0` = 不限流 |
 | `CODE_API_MAX_REFRESH_PER_HOUR` | 否 | `refresh=1` 的更严上限；`0` = 不限流 |
 
@@ -274,6 +320,10 @@ curl -s http://127.0.0.1:8000/api/health
 | 现象 | 排查 |
 |------|------|
 | health 里 master_key 为 false | `.env` 未写入或未重建容器 |
+| 取件提示 pending approval | `first_trust` 下此 `vk_…` **未信任**（换浏览器也算新设备）。在设置里批准，或改 `open` / `solo`、重建后再**解锁一次** |
+| 不是管理员 / 不能签发授权码 | 已有别的设备抢先成为管理员。把本机 `vk_…` 写入 `OPENMAIL_ADMIN_DEVICE_IDS` 并重启 |
+| 没有授权码 / 「导入到云端」 | 实例是 `solo`，属预期 |
+| HTML 正文被裁切 / 缺图 | 强制刷新；CDN 图点「显示远程图片」 |
 | Mac ARM 拉镜像失败 | 当前仅 amd64；换 x86 机器或本地 `--build` |
 | IMAP 证书错误 / 中文文件夹 ascii 错 | 拉最新镜像（含 SNI + UTF-7 修复） |
 | 每次刷新都要输密码 | 同标签页应能恢复；换浏览器需密码或恢复密钥 |
@@ -304,7 +354,7 @@ cd frontend && npm install && npm run dev
 ## 发版（维护者）
 
 ```bash
-make release V=0.2.0
+make release V=1.0.0
 ```
 
 CI 推送 Docker Hub 并生成 GitHub Release。需要 `DOCKERHUB_TOKEN`。  
@@ -331,4 +381,4 @@ CI 推送 Docker Hub 并生成 GitHub Release。需要 `DOCKERHUB_TOKEN`。
 
 法律文案（实例运营方）：[隐私](docs/legal/privacy.zh.md) · [条款](docs/legal/terms.zh.md)
 
-可选深入文档：[架构](docs/architecture.md) · [运维](docs/14-ops-and-smoke.md) · [WARP](docs/16-warp-proxy-pool.md) · [发版](docs/17-release.md)
+可选深入文档：[架构](docs/architecture.md) · [运维（实例模式 / 准入 / 管理员）](docs/14-ops-and-smoke.md) · [WARP](docs/16-warp-proxy-pool.md) · [发版](docs/17-release.md)

@@ -171,16 +171,29 @@ class Settings(BaseSettings):
     auth_ui_enabled: bool = Field(
         default=False,
         validation_alias="AUTH_UI_ENABLED",
-        description="Show login/register/admin in frontend when true",
+        description=(
+            "Legacy flag still returned on GET /api/config/public. "
+            "The SPA no longer shows login/register chrome."
+        ),
+    )
+    instance_mode: str = Field(
+        default="hosted",
+        validation_alias="OPENMAIL_INSTANCE_MODE",
+        description=(
+            "Instance profile: 'hosted' (default) keeps quotas, license UI, and "
+            "optional scheduled cloud sync; 'solo' is unlimited, hides license UI, "
+            "forces admission=open, and turns off the scheduled sync worker + "
+            "cloud-sync chrome (HTTP cloud APIs remain)."
+        ),
     )
     device_admission: str = Field(
         default="first_trust",
         validation_alias="OPENMAIL_DEVICE_ADMISSION",
         description=(
-            "How new vault devices are admitted: "
-            "'first_trust' (default) auto-trusts the first device and requires "
-            "approval for later ones; 'open' admits every successful register "
-            "(previous behaviour)."
+            "How new vault devices (vk_…) are admitted: "
+            "'first_trust' (default) trusts the next register while no trusted "
+            "devices exist and requires approval for later ones; 'open' admits "
+            "every successful register. Ignored when instance_mode=solo (forced open)."
         ),
     )
     openmail_admin_device_ids: str = Field(
@@ -188,9 +201,17 @@ class Settings(BaseSettings):
         validation_alias="OPENMAIL_ADMIN_DEVICE_IDS",
         description=(
             "Comma or newline separated vault device ids (vk_…) allowed to issue "
-            "and revoke license codes. Empty = no admin (fail closed)."
+            "and revoke license codes. Empty: first trusted unlock becomes admin."
         ),
     )
+
+    @field_validator("instance_mode")
+    @classmethod
+    def _normalize_instance_mode(cls, v: str) -> str:
+        low = (v or "hosted").strip().lower()
+        if low not in {"hosted", "solo"}:
+            raise ValueError("OPENMAIL_INSTANCE_MODE must be 'hosted' or 'solo'")
+        return low
 
     @field_validator("device_admission")
     @classmethod

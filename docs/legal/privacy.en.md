@@ -1,7 +1,7 @@
 # OpenMail Privacy Policy
 
 > Scope: visitors and operators of a **self-hosted single instance**.  
-> Last updated: 2026-08-02  
+> Last updated: 2026-08-25  
 > Chinese: [privacy.zh.md](privacy.zh.md) · Terms: [terms.en.md](terms.en.md)
 
 ---
@@ -50,7 +50,7 @@ Using the service means you understand and accept this policy.
 ## 3. Control
 
 - Vault data is under **your** control; lost password **and** recovery key means unrecoverable ciphertext.  
-- Operators control `OPENMAIL_MASTER_KEY`, database, egress proxies, and access logs.  
+- Operators control `OPENMAIL_MASTER_KEY`, database, egress proxies, and access logs. There is no admin password: if the allowlist is empty, the first trusted vault unlock becomes admin. `hosted` instances may cap unlicensed clients; `solo` is unlimited and hides license / cloud-sync UI.  
 - Sealed cloud rows: operators can store/delete but not read plaintext without the vault key.
 
 ---

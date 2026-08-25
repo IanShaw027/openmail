@@ -51,12 +51,21 @@ openmail/
 | Method | Path | Auth |
 |--------|------|------|
 | GET | `/api/health` | public |
-| GET | `/api/config/public` | public; `cloud_used` only with vault HMAC |
-| POST | `/api/device/register` | public; binds `vk_*` to secret (no takeover) |
-| * | `/api/accounts*` | vault HMAC |
-| POST | `/api/fetch/proxy` | vault HMAC + poll quota |
-| POST | `/api/fetch/send` | vault HMAC + poll quota |
+| GET | `/api/config/public` | public; `instance_mode`, `license_ui_enabled`, `sync_ui_enabled`, `device_admission` (effective; solo→`open`), `licensed` (solo→`true` without token), plus `fetch_concurrency` / lookback / retention / `auth_ui_enabled`; `cloud_used` only with vault HMAC |
+| POST | `/api/device/register` | public; binds `vk_*` to secret (no takeover); first trusted may become admin |
+| GET | `/api/device/me` | vault HMAC (trusted or pending) |
+| * | `/api/device/list`, `/approve`, `/reject`, `/revoke` | trusted HMAC |
+| * | `/api/accounts*` | trusted vault HMAC |
+| POST | `/api/accounts/{id}/fetch` | trusted HMAC + poll quota (`solo` unlimited) |
+| GET | `/api/accounts/meta/quota` | trusted HMAC |
+| POST | `/api/fetch/proxy` | trusted HMAC + poll quota (`solo` unlimited) |
+| POST | `/api/fetch/send` | trusted HMAC + poll quota (`solo` unlimited) |
+| GET | `/api/sync/status`, `/api/sync/delta` | trusted HMAC |
+| * | `/api/transfer/*` | vault transfer (short-lived ciphertext) |
+| * | `/api/admin/licenses*` | trusted **admin** HMAC |
 | GET/POST | `/api/v1/code/{token}` | legacy token (if row exists) |
+
+410 compatibility stubs (not product surfaces): `/api/me/mails/*`, `POST /api/me/sync`, `POST /api/accounts/{id}/send`.
 
 ## What we intentionally do not do
 
@@ -71,8 +80,13 @@ openmail/
 | `providers/*` | Protocol adapters only |
 | `services/fetch_service` | Orchestration, cookies write-back, proxy rotation |
 | `services/ssrf` | Outbound host policy + pin |
-| `services/device_auth` | Vault device identity |
+| `services/device_auth` | Vault device identity + admission (`first_trust` / `open`; `solo` forces `open`) |
+| `services/admin_ids` | Effective admin set + first-trusted bootstrap |
+| `services/license` | Tokens / HMAC / issued codes; `solo` always licensed |
 | Frontend `stores/vault` | Client encryption + lock lifecycle |
+| Frontend `stores/settings` | Public config: mode, license UI, sync UI, quotas |
+
+Operator contract (mode / admission / admin recovery): [14-ops-and-smoke.md](14-ops-and-smoke.md#3-instance-mode-admission-and-admin).
 
 ## Historical docs
 

@@ -66,6 +66,15 @@ describe('EmailHtmlFrame sandbox', () => {
     expect(wrapper.find('.remote-img-btn').exists()).toBe(false)
   })
 
+  it('fills the pane and can scroll if the height bridge under-reports', () => {
+    const wrapper = mountFrame('<p>Hello,</p><p>more</p>')
+    const iframe = wrapper.get('iframe')
+    const style = iframe.attributes('style') || ''
+    expect(style).toMatch(/height:\s*100%/)
+    expect(style).toMatch(/min-height:\s*\d+px/)
+    expect(wrapper.get('.email-html-frame-wrap').classes()).toBeTruthy()
+  })
+
   it('opts into remote images when the parent says so', () => {
     const wrapper = mount(EmailHtmlFrame, {
       props: {

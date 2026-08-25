@@ -123,6 +123,7 @@ def get_effective_settings(
         except Exception:
             overrides = {}
 
+    solo = getattr(base, "instance_mode", "hosted") == "solo"
     return EffectiveSettings(
         sync_interval_seconds=int(
             overrides.get("sync_interval_seconds", base.sync_interval_seconds)
@@ -130,9 +131,9 @@ def get_effective_settings(
         sync_concurrency=int(
             overrides.get("sync_concurrency", base.sync_concurrency)
         ),
-        sync_enabled_global=bool(
-            overrides.get("sync_enabled_global", base.sync_enabled_global)
-        ),
+        sync_enabled_global=False
+        if solo
+        else bool(overrides.get("sync_enabled_global", base.sync_enabled_global)),
         proxy_template=str(overrides.get("proxy_template", base.proxy_template) or ""),
         proxy_pool=str(
             overrides.get("proxy_pool", getattr(base, "proxy_pool", "") or "") or ""

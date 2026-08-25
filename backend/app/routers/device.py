@@ -5,9 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
 from app.deps_device import device_id_any, device_id_strict
 from app.services import device_auth
+from app.services.admin_ids import effective_admin_ids, maybe_bootstrap_admin
 
 router = APIRouter(prefix="/api/device", tags=["device"])
 
@@ -70,24 +70,28 @@ def register_device(request: Request, body: DeviceRegisterBody) -> DeviceRegiste
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)) from e
     st = device_auth.device_status(pid) or device_auth.STATUS_TRUSTED
+    if st == device_auth.STATUS_TRUSTED:
+        maybe_bootstrap_admin(pid, trusted=True)
     return DeviceRegisterOut(
         ok=True,
         public_id=pid,
         status=st,
-        admission=get_settings().device_admission,
+        admission=device_auth.admission_mode(),
     )
 
 
 @router.get("/me", response_model=DeviceMeOut)
 def device_me(device_id: str = Depends(device_id_any)) -> DeviceMeOut:
     st = device_auth.device_status(device_id) or device_auth.STATUS_TRUSTED
-    admin_ids = get_settings().admin_device_id_set
+    if st == device_auth.STATUS_TRUSTED:
+        maybe_bootstrap_admin(device_id, trusted=True)
+    admin_ids = effective_admin_ids()
     is_admin = st == device_auth.STATUS_TRUSTED and bool(admin_ids) and device_id in admin_ids
     return DeviceMeOut(
         ok=True,
         public_id=device_id,
         status=st,
-        admission=get_settings().device_admission,
+        admission=device_auth.admission_mode(),
         is_admin=is_admin,
     )
 
@@ -97,7 +101,7 @@ def list_devices(_device_id: str = Depends(device_id_strict)) -> DeviceListOut:
     """List registered devices. Trusted devices only."""
     return DeviceListOut(
         ok=True,
-        admission=get_settings().device_admission,
+        admission=device_auth.admission_mode(),
         devices=device_auth.list_devices(),
     )
 

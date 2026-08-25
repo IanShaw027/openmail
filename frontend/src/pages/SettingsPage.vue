@@ -476,7 +476,9 @@ onUnmounted(() => {
 
         <div class="field" style="margin-top: 18px">
           <label class="label">{{ t('vault.devicesTitle') }}</label>
-          <p class="hint">{{ t('vault.devicesHint') }}</p>
+          <p class="hint">{{
+            vault.deviceAdmission === 'open' ? t('vault.devicesHintOpen') : t('vault.devicesHint')
+          }}</p>
           <div v-if="selfDeviceId" class="this-device">
             <label class="label">{{ t('settings.deviceId') }}</label>
             <p class="hint">{{ t('vault.deviceIdHint') }}</p>
@@ -659,7 +661,7 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section class="block">
+      <section v-if="settings.licenseUiEnabled" class="block">
         <h2>{{ t('settings.licenseTitle') }}</h2>
         <template v-if="vault.isAdmin">
           <p class="hint">{{ t('settings.adminAutoLicensedHint') }}</p>
@@ -705,7 +707,7 @@ onUnmounted(() => {
         </template>
       </section>
 
-      <section v-if="vault.isAdmin" class="block">
+      <section v-if="vault.isAdmin && settings.licenseUiEnabled" class="block">
         <h2>{{ t('settings.adminLicensesTitle') }}</h2>
         <p class="hint">{{ t('settings.adminLicensesHint') }}</p>
         <div v-if="settings.quotaDefaults" class="hint">

@@ -185,8 +185,12 @@ def is_licensed(
 ) -> bool:
     """Return True if request presents a valid unlimited license."""
     s = settings or get_settings()
+    if getattr(s, "instance_mode", "hosted") == "solo":
+        return True
     fp = _as_str(device_id)
-    admin_ids = getattr(s, "admin_device_id_set", None) or set()
+    from app.services.admin_ids import effective_admin_ids
+
+    admin_ids = effective_admin_ids() or getattr(s, "admin_device_id_set", None) or set()
     if fp and fp in admin_ids:
         return True
     token = _as_str(license_token)

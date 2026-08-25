@@ -295,6 +295,12 @@ const PRECHECK_TIMEOUT_MS = 70_000
 /** local = browser; cloud = device-scoped server store */
 const importTarget = ref<'local' | 'cloud'>('local')
 const importCloudPoll = ref(false)
+watch(
+  () => userSettings.syncUiEnabled,
+  (on) => {
+    if (!on) importTarget.value = 'local'
+  },
+)
 /** Layout panes (percent of viewport / split track) */
 const SIDE_MIN_PX = 200
 const PANE_MIN_PX = 100
@@ -958,7 +964,7 @@ async function confirmImportDrafts() {
       await userSettings.loadPublicConfig()
     }
     const q = userSettings.quota
-    const toCloud = importTarget.value === 'cloud'
+    const toCloud = userSettings.syncUiEnabled && importTarget.value === 'cloud'
     const existingEmails = new Set(
       (toCloud ? accounts.serverAccounts : accounts.localAccounts).map((a) =>
         a.email.toLowerCase(),
@@ -1063,6 +1069,7 @@ async function confirmImportDrafts() {
 }
 
 const importQuotaLabel = computed(() => {
+  if (!userSettings.licenseUiEnabled) return ''
   const q = userSettings.quota
   if (!q) return ''
   if (q.licensed) return t('console.quotaUnlimited')
@@ -3466,6 +3473,7 @@ onUnmounted(() => {
               {{ batchBusy ? t('common.loading') : t('console.tableBatchFetch') }}
             </button>
             <button
+              v-if="userSettings.syncUiEnabled"
               type="button"
               class="btn btn-outline btn-sm"
               :disabled="!hasChecked || batchBusy"
@@ -4485,7 +4493,7 @@ user@temp.dev----YOUR_SECRET----https://mail.example.workers.dev</pre>
                 <input v-model="importTarget" type="radio" value="local" />
                 {{ t('console.importTargetLocal') }}
               </label>
-              <label class="tog">
+              <label v-if="userSettings.syncUiEnabled" class="tog">
                 <input v-model="importTarget" type="radio" value="cloud" />
                 {{ t('console.importTargetCloud') }}
               </label>
@@ -5737,6 +5745,10 @@ th.col-act.sticky-act {
 .detail-html {
   white-space: normal;
   cursor: default;
+  display: block;
+  height: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
 }
 .detail-html :deep(img) {
   max-width: 100%;

@@ -83,6 +83,8 @@ export default {
     devicesTitle: '受信任设备',
     devicesHint:
       '第一个向本服务器注册的保险库会自动信任；之后的设备需在此批准后才能使用云端同步与服务端 API。',
+    devicesHintOpen:
+      '本实例为开放准入（open / solo），之后的浏览器会自动信任；仍可在此撤销某台设备。',
     devicesRefresh: '刷新设备列表',
     devicesEmpty: '尚未有其他设备注册。',
     devicePendingBanner:
@@ -100,7 +102,8 @@ export default {
     deviceApproved: '已批准设备',
     deviceRejected: '已拒绝设备',
     deviceRevoked: '已撤销设备',
-    deviceIdHint: '完整设备 ID，可复制到服务器 .env 的 OPENMAIL_ADMIN_DEVICE_IDS。',
+    deviceIdHint:
+      '完整设备 ID。第一个受信任的解锁会自动成为管理员。更换丢失的管理员时，把此 vk_… 写入 OPENMAIL_ADMIN_DEVICE_IDS 并重启。',
     keysGuideTitle: '库主密码 vs 恢复密钥',
     enableRecovery: '生成 / 查看恢复能力',
     enableRecoveryHint:
@@ -789,9 +792,9 @@ export default {
     adminNever: '尚未使用',
     adminEmpty: '还没有签发过授权码。',
     adminAutoLicensedHint:
-      '当前设备在 OPENMAIL_ADMIN_DEVICE_IDS 中，已自动不限配额，无需填写授权码。',
+      '本机是本实例的管理员设备（首次解锁自动成为管理员），已不限配额，无需填写授权码。',
     adminInstanceHint:
-      '未授权设备配额：本机 {local} · 云端 {cloud} · 每小时取件 {poll}。设备准入：{admission}。改配额或管理员名单需改服务器 .env 后重建容器。',
+      '未授权设备配额：本机 {local} · 云端 {cloud} · 每小时取件 {poll}。设备准入：{admission}。更换管理员：把新的 vk_… 写入服务器 OPENMAIL_ADMIN_DEVICE_IDS 后重启。',
     adminAdmissionFirstTrust: '先信任第一台，之后需批准',
     adminAdmissionOpen: '开放注册',
   },

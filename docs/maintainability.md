@@ -25,13 +25,14 @@ Verification baseline (last hygiene pass): backend **98 passed**, frontend **`np
 
 | Target | Why | Suggested approach |
 |--------|-----|-------------------|
-| `routers/mails.py` + `routers/sync.py` | Only return 410 | Keep **or** delete and accept 404; tests already allow both |
+| `routers/mails.py` | Returns 410 | Keep **or** delete and accept 404; tests already allow both |
+| `routers/sync.py` | `GET /api/sync/status` and `/delta` are **active**; only `POST /api/me/sync` is 410 | Do not treat the whole module as gone |
 | `code_api` create endpoint | Always 410 | Collapse to a single shared “gone” helper or drop route |
 | `AccountPool` enum (`public` / `user_private`) | Legacy labels | Keep column for DB compat; stop branching on pool in new code |
 | Dynamic imports in vault/stores | Vite warns “ineffective dynamic import” | Use static imports; drop cycle workarounds carefully |
 | `SyncWorker` docstring “into MailIndex” | MailIndex product removed | Rename comments; worker only updates account fetch status for **non-sealed** server rows |
 | Duplicate health paths | `/health` and `/api/health` | Keep both for ops scripts or document one canonical |
-| Legal docs still describe multi-user | Misleading for operators | Add banner: product is local-first; full rewrite later |
+| Legal docs vs instance-mode | Local-first rewrite is done; instance-mode / first-trusted admin is only a short privacy note | Keep legal short; ops §3 is the operator contract |
 
 ---
 
@@ -69,7 +70,7 @@ Verification baseline (last hygiene pass): backend **98 passed**, frontend **`np
 | Code-API public tokens | Legacy automation | Keep read path; no create in UI |
 | `owner_user_id` column | Now = vault device id | Rename in docs only; DB rename is high cost |
 | Soft “guest without HMAC” | Removed (strict HMAC) | Do not reintroduce |
-| Admin password / session cookies in config | May still exist in settings for old env | Ignore in UI; remove dead config keys in a dedicated PR after grep |
+| Legacy env aliases | `AUTH_UI_ENABLED` still in Settings (default false, unused UI). DB may still strip old `admin_password` keys | Grep and remove in a dedicated PR |
 | `fetch_guard` poll limits | Needed for abuse control | Keep |
 
 ---
@@ -85,7 +86,7 @@ Verification baseline (last hygiene pass): backend **98 passed**, frontend **`np
 
 ## 6. Suggested refactor order
 
-1. **Docs truth** (legal local-first rewrite) — done  
+1. **Docs truth** (legal local-first rewrite) — done; instance-mode / admin bootstrap live in README + ops §3  
 2. **ConsolePage extract** — started: `mapPool`, `consoleAccountLabels`, `ConsoleSendModal`, `ConsoleGroupModal`  
 3. **accounts store split** — started: `stores/accounts/mappers.ts`  
 4. Further ConsolePage panels (import modal, table, mail pane) — next  

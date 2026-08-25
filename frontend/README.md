@@ -25,6 +25,7 @@ Dev server: http://127.0.0.1:5173 — `/api` proxied to the backend (`vite.confi
 |---------|-------------|
 | `npm run dev` | Vite dev server |
 | `npm run build` | `vue-tsc` + production build |
+| `npm test` | Vitest |
 | `npm run preview` | Preview production build |
 
 ## Environment
@@ -40,7 +41,8 @@ Dev server: http://127.0.0.1:5173 — `/api` proxied to the backend (`vite.confi
 | `/` | Console — import, batch fetch/send, groups, notes |
 | `/mails` | Local mail cache search |
 | `/2fa` | TOTP/HOTP manager |
-| `/settings` | Vault lock, license, fetch policy |
+| `/settings` | Vault lock, fetch policy; license / issue-codes only when `license_ui_enabled` (`hosted`) |
+| `/transfer` | QR vault transfer (PC ↔ phone) |
 | `/privacy`, `/terms` | Legal |
 
 Legacy paths (`/login`, `/register`, `/admin`, `/me/*`) redirect to `/` or `/mails` / `/settings`.
@@ -54,7 +56,11 @@ Legacy paths (`/login`, `/register`, `/admin`, `/me/*`) redirect to `/` or `/mai
 | `twofa` | Encrypted with vault |
 | `mailCache` | Encrypted with vault (local history after fetch) |
 
-Fetch uses `POST /api/fetch/proxy` with credentials in the body. Device HMAC headers are attached after vault unlock + device register.
+Fetch uses `POST /api/fetch/proxy` with credentials in the body. Device HMAC headers are attached after vault unlock + device register. Privileged APIs require **trusted** admission (`first_trust` pending devices cannot fetch).
+
+`GET /api/config/public` drives instance chrome: `instance_mode`, `license_ui_enabled`, `sync_ui_enabled`. In `solo`, Settings hides license/quota and the console hides import-to-cloud / upload-to-cloud.
+
+HTML mail renders in `EmailHtmlFrame` (sandboxed iframe). Remote images stay off until the user opts in.
 
 ## Layout
 

@@ -96,9 +96,17 @@ def _b64decode_secret(raw: str) -> bytes:
 
 def _admission_mode() -> str:
     try:
-        return get_settings().device_admission
+        s = get_settings()
+        if getattr(s, "instance_mode", "hosted") == "solo":
+            return _ADMISSION_OPEN
+        return s.device_admission
     except Exception:
         return _ADMISSION_FIRST_TRUST
+
+
+def admission_mode() -> str:
+    """Effective admission, including solo → open."""
+    return _admission_mode()
 
 
 def _normalize_status(raw: object) -> str:
@@ -356,10 +364,10 @@ def register_device_secret(public_id: str, secret_b64: str) -> str:
 
     Admission (``OPENMAIL_DEVICE_ADMISSION``):
     - ``open``: every successful register is trusted (previous behaviour).
-    - ``first_trust`` (default): the first device on an empty registry is
-      trusted; later devices land as ``pending`` until a trusted device
-      approves them. Existing on-disk entries without a status are treated
-      as trusted so upgrades do not brick multi-device installs.
+    - ``first_trust`` (default): while no trusted devices exist the next
+      register is trusted; later devices land as ``pending`` until a trusted
+      device approves them. Existing on-disk entries without a status are
+      treated as trusted so upgrades do not brick multi-device installs.
     """
     load_registry()
     pid = (public_id or "").strip()
@@ -388,14 +396,22 @@ def register_device_secret(public_id: str, secret_b64: str) -> str:
         if existing is not None and existing != secret:
             raise ValueError("device already registered")
         if existing is not None:
-            # Idempotent re-register: keep the existing status.
+            # Idempotent re-register: keep the existing status, except
+            # ``open`` admission promotes leftover pending devices so
+            # switching the env var actually unblocks a single-user install.
+            if (
+                _admission_mode() == _ADMISSION_OPEN
+                and (_status.get(expected) or STATUS_TRUSTED) == STATUS_PENDING
+            ):
+                _status[expected] = STATUS_TRUSTED
+                _persist_unlocked()
             return expected
 
         mode = _admission_mode()
         if mode == _ADMISSION_OPEN:
             status = STATUS_TRUSTED
         else:
-            # first_trust: empty registry → bootstrap; otherwise wait for approval.
+            # first_trust: no trusted devices yet → bootstrap; otherwise wait for approval.
             status = STATUS_TRUSTED if _count_trusted_unlocked() == 0 else STATUS_PENDING
 
         if status == STATUS_PENDING:

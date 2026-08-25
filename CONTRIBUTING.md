@@ -34,8 +34,10 @@ cd backend && source .venv/bin/activate
 export OPENMAIL_MASTER_KEY="$(python -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())')"
 pytest -q
 
-cd frontend && npm run build   # vue-tsc + vite
+cd frontend && npm test && npm run build
 ```
+
+Instance mode / device admission / admin bootstrap: [docs/14-ops-and-smoke.md §3](docs/14-ops-and-smoke.md#3-instance-mode-admission-and-admin).
 
 ## Code style
 

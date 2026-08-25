@@ -12,23 +12,24 @@ export function buildEmailFrameSrcdoc(
 ): string {
   const bridgeJs = `(function () {
   var MSG = ${JSON.stringify(EMAIL_FRAME_MSG)};
+  function unlock(el) {
+    if (!el) return;
+    el.style.setProperty('height', 'auto', 'important');
+    el.style.setProperty('min-height', '0', 'important');
+    el.style.setProperty('max-height', 'none', 'important');
+    el.style.setProperty('overflow', 'visible', 'important');
+  }
   function report() {
     var html = document.documentElement;
     var body = document.body;
-    if (html) {
-      html.style.setProperty('height', 'auto', 'important');
-      html.style.setProperty('min-height', '0', 'important');
-    }
-    if (body) {
-      body.style.setProperty('height', 'auto', 'important');
-      body.style.setProperty('min-height', '0', 'important');
-    }
+    unlock(html);
+    unlock(body);
     var bottom = 0;
     if (body) {
-      var kids = body.children;
-      for (var i = 0; i < kids.length; i++) {
-        var el = kids[i];
-        if (!el || el.tagName === 'SCRIPT') continue;
+      var els = body.getElementsByTagName('*');
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (!el || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
         var r = el.getBoundingClientRect();
         if (r.bottom > bottom) bottom = r.bottom;
       }
@@ -73,7 +74,7 @@ export function buildEmailFrameSrcdoc(
   const imgSrc = opts?.allowRemoteImages ? 'img-src data: https: cid:' : 'img-src data: cid:'
   const csp =
     `default-src 'none'; ${imgSrc}; style-src 'unsafe-inline'; ` +
-    "script-src 'sha256-N0SiNp2Wh51KTGYQlwN+lqDogHkfabuYeXijjV3/JlY='; " +
+    "script-src 'sha256-nvlYkLZkAgICzIRqTwIoHN4rWWb7QJHKF1aIQhgWeSI='; " +
     "object-src 'none'; base-uri 'none'; form-action 'none';"
 
   return [
@@ -81,9 +82,9 @@ export function buildEmailFrameSrcdoc(
     '<meta name="viewport" content="width=device-width, initial-scale=1" />',
     `<meta http-equiv="Content-Security-Policy" content="${csp}" />`,
     '<style>',
-    'html, body { margin: 0; padding: 0; height: auto !important; min-height: 0 !important; max-height: none !important; }',
+    'html, body { margin: 0; padding: 0; height: auto !important; min-height: 0 !important; max-height: none !important; overflow: auto !important; }',
     'body { font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1a2333; word-wrap: break-word; overflow-wrap: anywhere; padding: 2px 0; }',
-    'img { max-width: 100%; height: auto; }',
+    'img { max-width: 100%; height: auto !important; }',
     'a { color: #1d4ed8; }',
     'pre, code { white-space: pre-wrap; word-break: break-word; }',
     'table { max-width: 100%; }',
